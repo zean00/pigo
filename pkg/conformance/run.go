@@ -52,20 +52,26 @@ func aiFixtureResponse(testCase AICase) ai.ScriptedResponse {
 }
 
 func RunAgent(testCase AgentCase) (AgentOutput, error) {
-	input := agentcore.ScriptedLoopInput{
-		Prompts: make([]string, 0, len(testCase.Prompts)),
-		Tools:   make([]agentcore.Tool, 0, len(testCase.Context.Tools)),
-		Turns:   make([]agentcore.AssistantTurn, 0, len(testCase.AssistantTurns)),
-	}
-	for _, prompt := range testCase.Prompts {
-		input.Prompts = append(input.Prompts, MessageText(prompt))
-	}
+	turns := make([]agentcore.AssistantTurn, 0, len(testCase.AssistantTurns))
+	tools := make([]agentcore.Tool, 0, len(testCase.Context.Tools))
+	toolSpecs := make([]ai.Tool, 0, len(testCase.Context.Tools))
 	for _, tool := range testCase.Context.Tools {
 		tool := tool
-		input.Tools = append(input.Tools, agentcore.Tool{
+		toolSpecs = append(toolSpecs, tool.Tool)
+		tools = append(tools, agentcore.Tool{
 			Name: tool.Name,
-			Execute: func(_ context.Context, _ ai.ContentBlock) agentcore.ToolResult {
-				return agentcore.ToolResult{Text: tool.Result.Text, Details: tool.Result.Details}
+			ExecuteWithUpdate: func(_ context.Context, call ai.ContentBlock, onUpdate func(agentcore.ToolResult)) agentcore.ToolResult {
+				if onUpdate != nil {
+					onUpdate(agentcore.ToolResult{
+						Text:    fmt.Sprintf("started:%s", call.ID),
+						Details: map[string]any{"toolCallId": call.ID},
+					})
+				}
+				return agentcore.ToolResult{
+					Text:      tool.Result.Text,
+					Details:   tool.Result.Details,
+					Terminate: tool.Result.Terminate,
+				}
 			},
 		})
 	}
@@ -74,9 +80,59 @@ func RunAgent(testCase AgentCase) (AgentOutput, error) {
 		if err != nil {
 			return AgentOutput{}, err
 		}
-		input.Turns = append(input.Turns, agentcore.AssistantTurn{Content: blocks, StopReason: turn.StopReason})
+		turns = append(turns, agentcore.AssistantTurn{Content: blocks, StopReason: defaultStopReason(turn.StopReason)})
 	}
-	loop, err := agentcore.RunScriptedLoop(context.Background(), input)
+	history := append([]ai.Message(nil), testCase.Context.Messages...)
+	if strings.TrimSpace(testCase.Context.SystemPrompt) != "" {
+		history = append([]ai.Message{{Role: "system", Content: testCase.Context.SystemPrompt}}, history...)
+	}
+	turnIndex := 0
+	events := []agentcore.Event{}
+	loop, err := agentcore.RunProviderLoop(context.Background(), agentcore.ProviderLoopInput{
+		PromptMessages: testCase.Prompts,
+		Tools:          tools,
+		History:        history,
+		Provider:       testCase.Model.Provider,
+		Model:          testCase.Model.ID,
+		ToolSpecs:      toolSpecs,
+		ToolExecution:  agentcore.ToolExecutionMode(testCase.Options.ToolExecution),
+		Options:        ai.ChatOptions{Stream: true},
+		EventSink: func(event agentcore.Event) {
+			events = append(events, event)
+		},
+		StreamFn: func(ctx context.Context, req ai.CompletionRequest) *ai.EventStream {
+			stream := ai.CreateEventStream()
+			go func() {
+				if turnIndex >= len(turns) {
+					err := fmt.Errorf("missing scripted assistant turn %d", turnIndex)
+					stream.Close(ai.NormalizedResult{Role: "assistant", StopReason: "error", ErrorMessage: err.Error()}, err)
+					return
+				}
+				turn := turns[turnIndex]
+				turnIndex++
+				result := ai.NormalizedResult{
+					Role:       "assistant",
+					Provider:   req.Provider,
+					Model:      req.Model,
+					StopReason: defaultStopReason(turn.StopReason),
+					Text:       ai.ContentText(turn.Content),
+					Content:    ai.NormalizedContent(turn.Content),
+					Usage:      &ai.Usage{Input: 1, Output: 1, TotalTokens: 2},
+				}
+				for _, event := range ai.AttachEventPayloads(ai.AssistantEvents(turn.Content, result.StopReason), result) {
+					select {
+					case <-ctx.Done():
+						stream.Close(result, ctx.Err())
+						return
+					default:
+						stream.Push(event)
+					}
+				}
+				stream.Close(result, nil)
+			}()
+			return stream
+		},
+	})
 	if err != nil {
 		return AgentOutput{}, err
 	}
@@ -84,7 +140,7 @@ func RunAgent(testCase AgentCase) (AgentOutput, error) {
 		Case:           testCase.Name,
 		Implementation: Implementation{Name: "pigo-agentcore", Version: "0.1.0"},
 		Model:          testCase.Model,
-		Events:         eventsToAny(loop.Events),
+		Events:         eventsToAny(events),
 		Messages:       messagesToAny(loop.Messages),
 	}, nil
 }

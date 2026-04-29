@@ -43,14 +43,17 @@ type BeforeToolCallResult struct {
 type BeforeToolCallContext struct {
 	AssistantMessage Message
 	ToolCall         ai.ContentBlock
+	Args             map[string]any
 	Context          []ai.Message
 }
 
 type AfterToolCallContext struct {
 	AssistantMessage Message
 	ToolCall         ai.ContentBlock
+	Args             map[string]any
 	Context          []ai.Message
 	Result           ToolResult
+	IsError          bool
 }
 
 type AssistantTurn struct {
@@ -65,23 +68,25 @@ type ScriptedLoopInput struct {
 }
 
 type ProviderLoopInput struct {
-	Prompts             []string
-	Tools               []Tool
-	History             []ai.Message
-	Provider            string
-	Model               string
-	ToolSpecs           []ai.Tool
-	Options             ai.ChatOptions
-	MaxRounds           int
-	ToolExecution       ToolExecutionMode
-	GetAPIKey           func(provider string) string
-	TransformContext    func([]ai.Message) []ai.Message
-	GetSteeringMessages func() []ai.Message
-	GetFollowUpMessages func() []ai.Message
-	StreamFn            func(context.Context, ai.CompletionRequest) *ai.EventStream
-	BeforeToolCall      func(ctx context.Context, input BeforeToolCallContext) (BeforeToolCallResult, error)
-	AfterToolCall       func(ctx context.Context, input AfterToolCallContext) (ToolResult, error)
-	EventSink           func(Event)
+	Prompts              []string
+	PromptMessages       []ai.Message
+	Tools                []Tool
+	History              []ai.Message
+	Provider             string
+	Model                string
+	ToolSpecs            []ai.Tool
+	Options              ai.ChatOptions
+	MaxRounds            int
+	ToolExecution        ToolExecutionMode
+	GetAPIKey            func(provider string) string
+	TransformContext     func([]ai.Message) []ai.Message
+	TransformContextFunc func(context.Context, []ai.Message) ([]ai.Message, error)
+	GetSteeringMessages  func() []ai.Message
+	GetFollowUpMessages  func() []ai.Message
+	StreamFn             func(context.Context, ai.CompletionRequest) *ai.EventStream
+	BeforeToolCall       func(ctx context.Context, input BeforeToolCallContext) (BeforeToolCallResult, error)
+	AfterToolCall        func(ctx context.Context, input AfterToolCallContext) (ToolResult, error)
+	EventSink            func(Event)
 }
 
 type LoopResult struct {
@@ -98,6 +103,7 @@ type executedToolCall struct {
 	blocked   bool
 	startErr  string
 	sourceIdx int
+	immediate bool
 }
 
 func emit(result *LoopResult, sink func(Event), event Event) {
@@ -173,6 +179,8 @@ func RunScriptedLoop(ctx context.Context, input ScriptedLoopInput) (LoopResult, 
 
 		emit(&result, nil, Event{
 			"type":            "turn_end",
+			"message":         assistant,
+			"toolResults":     cloneMessages(toolResults),
 			"messageRole":     "assistant",
 			"toolResultCount": len(toolResults),
 		})
@@ -215,6 +223,22 @@ func RunProviderLoop(ctx context.Context, input ProviderLoopInput) (LoopResult, 
 		emit(&result, input.EventSink, Event{"type": "message_end", "message": user})
 		result.Messages = append(result.Messages, user)
 	}
+	for _, prompt := range input.PromptMessages {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		if prompt.Role == "" {
+			prompt.Role = "user"
+		}
+		if prompt.Role != "user" {
+			return result, fmt.Errorf("prompt messages must use role user")
+		}
+		conversation = append(conversation, prompt)
+		user := aiMessageToEventMessage(prompt)
+		emit(&result, input.EventSink, Event{"type": "message_start", "message": user})
+		emit(&result, input.EventSink, Event{"type": "message_end", "message": user})
+		result.Messages = append(result.Messages, user)
+	}
 	if len(conversation) == 0 {
 		return result, fmt.Errorf("provider loop requires at least one prompt or history message")
 	}
@@ -227,6 +251,13 @@ func RunProviderLoop(ctx context.Context, input ProviderLoopInput) (LoopResult, 
 			return result, err
 		}
 		requestMessages := append([]ai.Message(nil), conversation...)
+		if input.TransformContextFunc != nil {
+			var err error
+			requestMessages, err = input.TransformContextFunc(ctx, requestMessages)
+			if err != nil {
+				return result, err
+			}
+		}
 		if input.TransformContext != nil {
 			requestMessages = input.TransformContext(requestMessages)
 		}
@@ -296,8 +327,16 @@ func RunProviderLoop(ctx context.Context, input ProviderLoopInput) (LoopResult, 
 			})
 		}
 
+		toolResultMessages := make([]Message, 0, len(executed))
+		for _, item := range executed {
+			if item.executed {
+				toolResultMessages = append(toolResultMessages, item.message)
+			}
+		}
 		emit(&result, input.EventSink, Event{
 			"type":            "turn_end",
+			"message":         assistant,
+			"toolResults":     cloneMessages(toolResultMessages),
 			"messageRole":     "assistant",
 			"toolResultCount": len(executed),
 		})
@@ -329,6 +368,8 @@ func RunProviderLoop(ctx context.Context, input ProviderLoopInput) (LoopResult, 
 				emit(&result, input.EventSink, Event{"type": "message_start", "message": mapped})
 				emit(&result, input.EventSink, Event{"type": "message_end", "message": mapped})
 			}
+		} else if round+1 < maxRounds {
+			emit(&result, input.EventSink, Event{"type": "turn_start"})
 		}
 	}
 
@@ -557,8 +598,31 @@ func aiMessageToEventMessage(message ai.Message) Message {
 			IsError: message.IsError,
 		})
 	default:
-		return UserMessage(ai.MessageText(message))
+		user := UserMessage(ai.MessageText(message))
+		if hasStructuredContent(message.Content) {
+			user["content"] = normalizeEventContent(message.Content)
+		}
+		return user
 	}
+}
+
+func hasStructuredContent(content any) bool {
+	switch typed := content.(type) {
+	case []ai.ContentBlock:
+		return len(typed) > 0
+	case []any:
+		return len(ai.ParseContentBlocks(typed)) > 0
+	default:
+		return false
+	}
+}
+
+func normalizeEventContent(content any) any {
+	blocks := ai.ParseContentBlocks(content)
+	if len(blocks) == 0 {
+		return content
+	}
+	return ai.NormalizedContent(blocks)
 }
 
 func assistantMessageFromNormalized(blocks []ai.ContentBlock, stopReason string) Message {
@@ -607,10 +671,41 @@ func executeToolBatch(ctx context.Context, input ProviderLoopInput, assistant Me
 		call := &calls[idx]
 		call.started = true
 		emit(result, input.EventSink, Event{"type": "tool_execution_start", "toolCallId": call.call.ID, "toolName": call.call.Name, "args": call.call.Arguments})
+		tool := findTool(input.Tools, call.call.Name)
+		if tool == nil {
+			call.blocked = true
+			call.immediate = true
+			call.result = ToolResult{Text: fmt.Sprintf("Tool %s not found", call.call.Name), Details: map[string]any{}, IsError: true}
+			call.message = ToolResultMessage(call.call.ID, call.call.Name, call.result)
+			continue
+		}
+		if tool.PrepareArguments != nil {
+			prepared, err := tool.PrepareArguments(cloneArguments(call.call.Arguments))
+			if err != nil {
+				call.blocked = true
+				call.immediate = true
+				call.result = ToolResult{Text: err.Error(), IsError: true}
+				call.message = ToolResultMessage(call.call.ID, call.call.Name, call.result)
+				continue
+			}
+			call.call.Arguments = prepared
+		}
+		if toolSpec := findToolSpec(input.ToolSpecs, call.call.Name); toolSpec != nil {
+			arguments, err := ai.ValidateToolArguments(*toolSpec, call.call)
+			if err != nil {
+				call.blocked = true
+				call.immediate = true
+				call.result = ToolResult{Text: err.Error(), IsError: true}
+				call.message = ToolResultMessage(call.call.ID, call.call.Name, call.result)
+				continue
+			}
+			call.call.Arguments = arguments
+		}
 		if input.BeforeToolCall != nil {
 			beforeResult, err := input.BeforeToolCall(ctx, BeforeToolCallContext{
 				AssistantMessage: assistant,
 				ToolCall:         call.call,
+				Args:             cloneArguments(call.call.Arguments),
 				Context:          append([]ai.Message(nil), conversation...),
 			})
 			if err != nil {
@@ -622,6 +717,7 @@ func executeToolBatch(ctx context.Context, input ProviderLoopInput, assistant Me
 					text = "tool execution blocked"
 				}
 				call.blocked = true
+				call.immediate = true
 				call.result = ToolResult{Text: text, IsError: true}
 				call.message = ToolResultMessage(call.call.ID, call.call.Name, call.result)
 			}
@@ -633,11 +729,13 @@ func executeToolBatch(ctx context.Context, input ProviderLoopInput, assistant Me
 		for idx := range calls {
 			if calls[idx].blocked {
 				calls[idx].executed = true
-				emitFinalizedToolCall(result, input.EventSink, &calls[idx])
+				emitToolExecutionEnd(result, input.EventSink, &calls[idx])
+				emitToolResultMessage(result, input.EventSink, &calls[idx])
 				continue
 			}
 			executeOneToolCall(ctx, input, assistant, conversation, input.EventSink, &calls[idx])
-			emitFinalizedToolCall(result, input.EventSink, &calls[idx])
+			emitToolExecutionEnd(result, input.EventSink, &calls[idx])
+			emitToolResultMessage(result, input.EventSink, &calls[idx])
 		}
 	} else {
 		type completed struct {
@@ -649,7 +747,7 @@ func executeToolBatch(ctx context.Context, input ProviderLoopInput, assistant Me
 		for idx := range calls {
 			if calls[idx].blocked {
 				calls[idx].executed = true
-				emitFinalizedToolCall(result, input.EventSink, &calls[idx])
+				emitToolExecutionEnd(result, input.EventSink, &calls[idx])
 				continue
 			}
 			pending++
@@ -664,7 +762,12 @@ func executeToolBatch(ctx context.Context, input ProviderLoopInput, assistant Me
 			if item.err != nil {
 				return nil, false, item.err
 			}
-			emitFinalizedToolCall(result, input.EventSink, &calls[item.index])
+			emitToolExecutionEnd(result, input.EventSink, &calls[item.index])
+		}
+		for idx := range calls {
+			if calls[idx].executed {
+				emitToolResultMessage(result, input.EventSink, &calls[idx])
+			}
 		}
 	}
 
@@ -684,26 +787,6 @@ func executeOneToolCall(ctx context.Context, input ProviderLoopInput, assistant 
 		call.executed = true
 		return
 	}
-	if toolSpec := findToolSpec(input.ToolSpecs, call.call.Name); toolSpec != nil {
-		arguments, err := ai.ValidateToolArguments(*toolSpec, call.call)
-		if err != nil {
-			call.result = ToolResult{Text: err.Error(), IsError: true}
-			call.message = ToolResultMessage(call.call.ID, call.call.Name, call.result)
-			call.executed = true
-			return
-		}
-		call.call.Arguments = arguments
-	}
-	if tool := findTool(input.Tools, call.call.Name); tool != nil && tool.PrepareArguments != nil {
-		prepared, err := tool.PrepareArguments(cloneArguments(call.call.Arguments))
-		if err != nil {
-			call.result = ToolResult{Text: err.Error(), IsError: true}
-			call.message = ToolResultMessage(call.call.ID, call.call.Name, call.result)
-			call.executed = true
-			return
-		}
-		call.call.Arguments = prepared
-	}
 	toolResult := executeToolWithUpdates(ctx, input.Tools, call.call, sink, func(partial ToolResult) {
 		if sink != nil {
 			sink(Event{
@@ -720,8 +803,10 @@ func executeOneToolCall(ctx context.Context, input ProviderLoopInput, assistant 
 		updated, err := input.AfterToolCall(ctx, AfterToolCallContext{
 			AssistantMessage: assistant,
 			ToolCall:         call.call,
+			Args:             cloneArguments(call.call.Arguments),
 			Context:          append([]ai.Message(nil), conversation...),
 			Result:           toolResult,
+			IsError:          toolResult.IsError,
 		})
 		if err != nil {
 			toolResult = ToolResult{Text: err.Error(), IsError: true}
@@ -842,7 +927,7 @@ func cloneArguments(arguments map[string]any) map[string]any {
 	return out
 }
 
-func emitFinalizedToolCall(result *LoopResult, sink func(Event), call *executedToolCall) {
+func emitToolExecutionEnd(result *LoopResult, sink func(Event), call *executedToolCall) {
 	emit(result, sink, Event{
 		"type":       "tool_execution_end",
 		"toolCallId": call.call.ID,
@@ -851,6 +936,9 @@ func emitFinalizedToolCall(result *LoopResult, sink func(Event), call *executedT
 		"isError":    call.result.IsError,
 		"text":       call.result.Text,
 	})
+}
+
+func emitToolResultMessage(result *LoopResult, sink func(Event), call *executedToolCall) {
 	emit(result, sink, Event{"type": "message_start", "message": call.message})
 	emit(result, sink, Event{"type": "message_end", "message": call.message})
 }

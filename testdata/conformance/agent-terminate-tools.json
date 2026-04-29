@@ -1,0 +1,96 @@
+{
+	"name": "agent_terminate_tools",
+	"model": {
+		"provider": "openai",
+		"id": "gpt-4o-mini"
+	},
+	"context": {
+		"systemPrompt": "Use tools when useful.",
+		"messages": [],
+		"tools": [
+			{
+				"name": "first",
+				"description": "Return the first value",
+				"parameters": {
+					"type": "object",
+					"properties": {},
+					"additionalProperties": false
+				},
+				"result": {
+					"text": "first done",
+					"terminate": true
+				}
+			},
+			{
+				"name": "second",
+				"description": "Return the second value",
+				"parameters": {
+					"type": "object",
+					"properties": {},
+					"additionalProperties": false
+				},
+				"result": {
+					"text": "second done",
+					"terminate": true
+				}
+			}
+		]
+	},
+	"prompts": [
+		{
+			"role": "user",
+			"content": "Call both terminating tools."
+		}
+	],
+	"assistantTurns": [
+		{
+			"stopReason": "toolUse",
+			"content": [
+				{
+					"type": "toolCall",
+					"id": "tool-1",
+					"name": "first",
+					"arguments": {}
+				},
+				{
+					"type": "toolCall",
+					"id": "tool-2",
+					"name": "second",
+					"arguments": {}
+				}
+			]
+		}
+	],
+	"options": {
+		"toolExecution": "parallel"
+	},
+	"expect": {
+		"finalMessageRoles": ["user", "assistant", "toolResult", "toolResult"],
+		"toolExecutions": [
+			{
+				"toolCallId": "tool-1",
+				"toolName": "first",
+				"isError": false
+			},
+			{
+				"toolCallId": "tool-2",
+				"toolName": "second",
+				"isError": false
+			}
+		],
+		"toolResults": [
+			{
+				"toolCallId": "tool-1",
+				"toolName": "first",
+				"textContains": "first done",
+				"isError": false
+			},
+			{
+				"toolCallId": "tool-2",
+				"toolName": "second",
+				"textContains": "second done",
+				"isError": false
+			}
+		]
+	}
+}

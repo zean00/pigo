@@ -1,0 +1,28 @@
+{
+	"name": "agent_context_continue",
+	"model": {
+		"provider": "openai",
+		"id": "gpt-4o-mini"
+	},
+	"context": {
+		"systemPrompt": "Continue from existing context.",
+		"messages": [
+			{
+				"role": "user",
+				"content": "Existing prompt"
+			}
+		],
+		"tools": []
+	},
+	"prompts": [],
+	"assistantTurns": [
+		{
+			"stopReason": "stop",
+			"content": [{ "type": "text", "text": "continued from context" }]
+		}
+	],
+	"expect": {
+		"finalMessageRoles": ["assistant"],
+		"finalTextContains": ["continued from context"]
+	}
+}

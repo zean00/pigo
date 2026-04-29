@@ -44,6 +44,32 @@ type AgentCase struct {
 	} `json:"context"`
 	Prompts        []ai.Message           `json:"prompts"`
 	AssistantTurns []AssistantFixtureTurn `json:"assistantTurns"`
+	Options        struct {
+		ToolExecution string `json:"toolExecution,omitempty"`
+	} `json:"options,omitempty"`
+	Expect AgentExpectations `json:"expect,omitempty"`
+}
+
+type AgentExpectations struct {
+	EventTypesInOrder []string `json:"eventTypesInOrder,omitempty"`
+	FinalMessageRoles []string `json:"finalMessageRoles,omitempty"`
+	FinalTextContains []string `json:"finalTextContains,omitempty"`
+	ToolResults       []struct {
+		ToolCallID   string `json:"toolCallId,omitempty"`
+		ToolName     string `json:"toolName"`
+		TextContains string `json:"textContains,omitempty"`
+		IsError      *bool  `json:"isError,omitempty"`
+	} `json:"toolResults,omitempty"`
+	ToolExecutions []struct {
+		ToolCallID string `json:"toolCallId,omitempty"`
+		ToolName   string `json:"toolName"`
+		IsError    *bool  `json:"isError,omitempty"`
+	} `json:"toolExecutions,omitempty"`
+}
+
+type VerificationResult struct {
+	OK     bool     `json:"ok"`
+	Errors []string `json:"errors"`
 }
 
 type AgentFixtureTool struct {

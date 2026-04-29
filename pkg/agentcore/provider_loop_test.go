@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/badlogic/pigo/pkg/ai"
 )
@@ -99,6 +100,99 @@ func TestRunProviderLoopExecutesToolsAndStops(t *testing.T) {
 	}
 }
 
+func TestRunProviderLoopTurnEndIncludesMessageAndToolResults(t *testing.T) {
+	providerName := "agentcore-provider-loop-turn-end-payload"
+	provider := &scriptedProvider{responses: []ai.NormalizedResult{
+		{
+			Role:       "assistant",
+			StopReason: "toolUse",
+			Content: []any{
+				map[string]any{"type": "toolCall", "id": "tc-1", "name": "echo", "arguments": map[string]any{"value": "ok"}},
+			},
+		},
+		{
+			Role:       "assistant",
+			StopReason: "stop",
+			Text:       "done",
+			Content:    []any{map[string]any{"type": "text", "text": "done"}},
+		},
+	}}
+	ai.RegisterProvider(providerName, provider)
+
+	var turnEnds []Event
+	_, err := RunProviderLoop(context.Background(), ProviderLoopInput{
+		Prompts:  []string{"go"},
+		Provider: providerName,
+		Model:    "test",
+		Tools: []Tool{{
+			Name: "echo",
+			Execute: func(_ context.Context, _ ai.ContentBlock) ToolResult {
+				return ToolResult{Text: "echoed"}
+			},
+		}},
+		EventSink: func(event Event) {
+			if event["type"] == "turn_end" {
+				turnEnds = append(turnEnds, event)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turnEnds) != 2 {
+		t.Fatalf("turn end count = %d", len(turnEnds))
+	}
+	firstMessage, ok := turnEnds[0]["message"].(Message)
+	if !ok || firstMessage["role"] != "assistant" {
+		t.Fatalf("turn end message = %#v", turnEnds[0]["message"])
+	}
+	toolResults, ok := turnEnds[0]["toolResults"].([]Message)
+	if !ok || len(toolResults) != 1 || toolResults[0]["toolCallId"] != "tc-1" {
+		t.Fatalf("turn end tool results = %#v", turnEnds[0]["toolResults"])
+	}
+	secondResults, ok := turnEnds[1]["toolResults"].([]Message)
+	if !ok || len(secondResults) != 0 {
+		t.Fatalf("second turn tool results = %#v", turnEnds[1]["toolResults"])
+	}
+}
+
+func TestRunProviderLoopPreservesStructuredPromptMessageEvents(t *testing.T) {
+	providerName := "agentcore-provider-loop-structured-prompt"
+	provider := &scriptedProvider{responses: []ai.NormalizedResult{{
+		Role:       "assistant",
+		StopReason: "stop",
+		Text:       "done",
+		Content:    []any{map[string]any{"type": "text", "text": "done"}},
+	}}}
+	ai.RegisterProvider(providerName, provider)
+
+	result, err := RunProviderLoop(context.Background(), ProviderLoopInput{
+		PromptMessages: []ai.Message{{
+			Role: "user",
+			Content: []any{
+				map[string]any{"type": "text", "text": "look"},
+				map[string]any{"type": "image", "data": "abc", "mimeType": "image/png"},
+			},
+		}},
+		Provider: providerName,
+		Model:    "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Messages) < 1 {
+		t.Fatalf("messages = %#v", result.Messages)
+	}
+	content, ok := result.Messages[0]["content"].([]any)
+	if !ok || len(content) != 2 {
+		t.Fatalf("user content = %#v", result.Messages[0]["content"])
+	}
+	blocks := ai.ParseContentBlocks(content)
+	if len(blocks) != 2 || blocks[1].Type != "image" || blocks[1].Data != "abc" {
+		t.Fatalf("event blocks = %#v", blocks)
+	}
+}
+
 func TestRunProviderLoopReturnsProviderError(t *testing.T) {
 	providerName := "agentcore-provider-loop-2"
 	provider := &scriptedProvider{responses: []ai.NormalizedResult{}}
@@ -125,6 +219,39 @@ func TestRunProviderLoopRejectsAssistantContinuation(t *testing.T) {
 	}
 	if got, want := err.Error(), "cannot continue provider loop from assistant message"; got != want {
 		t.Fatalf("error = %q, want %q", got, want)
+	}
+}
+
+func TestRunProviderLoopContinuesFromExistingContextWithoutPromptEvents(t *testing.T) {
+	providerName := "agentcore-provider-loop-continue-context"
+	provider := &scriptedProvider{responses: []ai.NormalizedResult{{
+		Role:       "assistant",
+		StopReason: "stop",
+		Text:       "continued",
+		Content:    []any{map[string]any{"type": "text", "text": "continued"}},
+	}}}
+	ai.RegisterProvider(providerName, provider)
+
+	var events []string
+	result, err := RunProviderLoop(context.Background(), ProviderLoopInput{
+		History:  []ai.Message{{Role: "user", Content: "existing"}},
+		Provider: providerName,
+		Model:    "test",
+		EventSink: func(event Event) {
+			events = append(events, eventType(event))
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Messages) != 1 || result.Messages[0]["text"] != "continued" {
+		t.Fatalf("messages = %#v", result.Messages)
+	}
+	if fmt.Sprint(events[:4]) != "[agent_start turn_start message_start message_update]" {
+		t.Fatalf("events = %#v", events)
+	}
+	if provider.requests[0].Messages[0].Content != "existing" {
+		t.Fatalf("request messages = %#v", provider.requests[0].Messages)
 	}
 }
 
@@ -200,6 +327,56 @@ func TestRunProviderLoopUsesSteeringAndFollowUpMessages(t *testing.T) {
 	}
 }
 
+func TestRunProviderLoopSteeringOneAtATime(t *testing.T) {
+	providerName := "agentcore-provider-loop-steering-one"
+	provider := &scriptedProvider{responses: []ai.NormalizedResult{
+		{
+			Role:       "assistant",
+			StopReason: "toolUse",
+			Content: []any{
+				map[string]any{"type": "toolCall", "id": "tc-1", "name": "echo", "arguments": map[string]any{"value": "first"}},
+			},
+		},
+		{
+			Role:       "assistant",
+			StopReason: "stop",
+			Text:       "second",
+			Content:    []any{map[string]any{"type": "text", "text": "second"}},
+		},
+	}}
+	ai.RegisterProvider(providerName, provider)
+
+	queue := []ai.Message{{Role: "user", Content: "steer-1"}, {Role: "user", Content: "steer-2"}}
+	_, err := RunProviderLoop(context.Background(), ProviderLoopInput{
+		Prompts:  []string{"go"},
+		Provider: providerName,
+		Model:    "test",
+		Tools: []Tool{{
+			Name: "echo",
+			Execute: func(_ context.Context, _ ai.ContentBlock) ToolResult {
+				return ToolResult{Text: "ok"}
+			},
+		}},
+		GetSteeringMessages: func() []ai.Message {
+			if len(queue) == 0 {
+				return nil
+			}
+			next := queue[0]
+			queue = queue[1:]
+			return []ai.Message{next}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queue) != 1 || queue[0].Content != "steer-2" {
+		t.Fatalf("queue = %#v", queue)
+	}
+	if got := provider.requests[1].Messages[len(provider.requests[1].Messages)-1].Content; got != "steer-1" {
+		t.Fatalf("second request last message = %#v", got)
+	}
+}
+
 func TestRunProviderLoopBeforeAndAfterToolHooks(t *testing.T) {
 	providerName := "agentcore-provider-loop-4"
 	provider := &scriptedProvider{responses: []ai.NormalizedResult{
@@ -268,6 +445,38 @@ func TestRunProviderLoopBeforeAndAfterToolHooks(t *testing.T) {
 	}
 	if got := result.Messages[3]["text"]; got != "echoed: ok [wrapped]" {
 		t.Fatalf("after hook result = %#v", got)
+	}
+}
+
+func TestRunProviderLoopStopsWhenEveryToolResultTerminates(t *testing.T) {
+	providerName := "agentcore-provider-loop-terminate-batch"
+	provider := &scriptedProvider{responses: []ai.NormalizedResult{{
+		Role:       "assistant",
+		StopReason: "toolUse",
+		Content: []any{
+			map[string]any{"type": "toolCall", "id": "tc-1", "name": "one", "arguments": map[string]any{}},
+			map[string]any{"type": "toolCall", "id": "tc-2", "name": "two", "arguments": map[string]any{}},
+		},
+	}}}
+	ai.RegisterProvider(providerName, provider)
+
+	result, err := RunProviderLoop(context.Background(), ProviderLoopInput{
+		Prompts:  []string{"go"},
+		Provider: providerName,
+		Model:    "test",
+		Tools: []Tool{
+			{Name: "one", Execute: func(_ context.Context, _ ai.ContentBlock) ToolResult { return ToolResult{Text: "one", Terminate: true} }},
+			{Name: "two", Execute: func(_ context.Context, _ ai.ContentBlock) ToolResult { return ToolResult{Text: "two", Terminate: true} }},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("provider calls = %d, want 1", len(provider.requests))
+	}
+	if len(result.Messages) != 4 {
+		t.Fatalf("messages = %#v", result.Messages)
 	}
 }
 
@@ -374,6 +583,67 @@ func TestRunProviderLoopValidatesAndPreparesToolArguments(t *testing.T) {
 	}
 }
 
+func TestRunProviderLoopPreparesArgumentsBeforeValidationAndBeforeHook(t *testing.T) {
+	providerName := "agentcore-provider-loop-prepare-before-validate"
+	provider := &scriptedProvider{responses: []ai.NormalizedResult{
+		{
+			Role:       "assistant",
+			StopReason: "toolUse",
+			Content: []any{
+				map[string]any{"type": "toolCall", "id": "tc-1", "name": "echo", "arguments": map[string]any{"count": "4"}},
+			},
+		},
+		{
+			Role:       "assistant",
+			StopReason: "stop",
+			Text:       "done",
+			Content:    []any{map[string]any{"type": "text", "text": "done"}},
+		},
+	}}
+	ai.RegisterProvider(providerName, provider)
+
+	var beforeArgs map[string]any
+	result, err := RunProviderLoop(context.Background(), ProviderLoopInput{
+		Prompts:  []string{"go"},
+		Provider: providerName,
+		Model:    "test",
+		ToolSpecs: []ai.Tool{{
+			Name: "echo",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"count": map[string]any{"type": "integer"},
+				},
+				"required":             []any{"count"},
+				"additionalProperties": false,
+			},
+		}},
+		Tools: []Tool{{
+			Name: "echo",
+			PrepareArguments: func(args map[string]any) (map[string]any, error) {
+				args["count"] = 4
+				return args, nil
+			},
+			Execute: func(_ context.Context, call ai.ContentBlock) ToolResult {
+				return ToolResult{Text: fmt.Sprintf("count:%v", call.Arguments["count"])}
+			},
+		}},
+		BeforeToolCall: func(_ context.Context, input BeforeToolCallContext) (BeforeToolCallResult, error) {
+			beforeArgs = input.Args
+			return BeforeToolCallResult{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beforeArgs["count"] != 4 && beforeArgs["count"] != float64(4) {
+		t.Fatalf("before hook args = %#v", beforeArgs)
+	}
+	if got := result.Messages[2]["text"]; got != "count:4" {
+		t.Fatalf("tool result text = %#v", got)
+	}
+}
+
 func TestRunProviderLoopRejectsInvalidToolArguments(t *testing.T) {
 	providerName := "agentcore-provider-loop-invalid-tool"
 	provider := &scriptedProvider{responses: []ai.NormalizedResult{
@@ -469,5 +739,73 @@ func TestRunProviderLoopForwardsExtendedChatOptions(t *testing.T) {
 	}
 	if options.Metadata["user_id"] != "u1" || options.MaxRetries != 2 {
 		t.Fatalf("metadata/retries = %#v", options)
+	}
+}
+
+func TestRunProviderLoopParallelToolResultMessagesStayInSourceOrder(t *testing.T) {
+	providerName := "agentcore-provider-loop-parallel-source-order"
+	provider := &scriptedProvider{responses: []ai.NormalizedResult{
+		{
+			Role:       "assistant",
+			StopReason: "toolUse",
+			Content: []any{
+				map[string]any{"type": "toolCall", "id": "slow", "name": "slow", "arguments": map[string]any{}},
+				map[string]any{"type": "toolCall", "id": "fast", "name": "fast", "arguments": map[string]any{}},
+			},
+		},
+		{
+			Role:       "assistant",
+			StopReason: "stop",
+			Text:       "done",
+			Content:    []any{map[string]any{"type": "text", "text": "done"}},
+		},
+	}}
+	ai.RegisterProvider(providerName, provider)
+
+	var ended []string
+	var messageEnds []string
+	result, err := RunProviderLoop(context.Background(), ProviderLoopInput{
+		Prompts:       []string{"go"},
+		Provider:      providerName,
+		Model:         "test",
+		ToolExecution: ToolExecutionParallel,
+		Tools: []Tool{
+			{
+				Name: "slow",
+				Execute: func(_ context.Context, _ ai.ContentBlock) ToolResult {
+					time.Sleep(40 * time.Millisecond)
+					return ToolResult{Text: "slow"}
+				},
+			},
+			{
+				Name: "fast",
+				Execute: func(_ context.Context, _ ai.ContentBlock) ToolResult {
+					return ToolResult{Text: "fast"}
+				},
+			},
+		},
+		EventSink: func(event Event) {
+			if event["type"] == "tool_execution_end" {
+				ended = append(ended, event["toolCallId"].(string))
+			}
+			if event["type"] == "message_end" {
+				message, _ := event["message"].(Message)
+				if message["role"] == "toolResult" {
+					messageEnds = append(messageEnds, message["toolCallId"].(string))
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(ended) != "[fast slow]" {
+		t.Fatalf("tool execution end order = %#v", ended)
+	}
+	if fmt.Sprint(messageEnds) != "[slow fast]" {
+		t.Fatalf("tool result message order = %#v", messageEnds)
+	}
+	if result.Messages[2]["toolCallId"] != "slow" || result.Messages[3]["toolCallId"] != "fast" {
+		t.Fatalf("result messages = %#v", result.Messages)
 	}
 }

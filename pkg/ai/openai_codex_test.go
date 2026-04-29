@@ -71,6 +71,51 @@ func TestOpenAICodexProviderUsesCodexEndpoint(t *testing.T) {
 	}
 }
 
+func TestOpenAICodexProviderStreamingResponse(t *testing.T) {
+	token := buildCodexTestJWT("acct_test_123")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["stream"] != true {
+			t.Fatalf("stream = %#v", payload["stream"])
+		}
+		if req.Header.Get("Accept") != "text/event-stream" {
+			t.Fatalf("accept = %q", req.Header.Get("Accept"))
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\"}}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+	}))
+	defer server.Close()
+
+	provider := OpenAICodexProvider()
+	result, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openai-codex",
+		Model:    "gpt-5.5",
+		Options: ChatOptions{
+			APIKey:  token,
+			BaseURL: server.URL + "/backend-api",
+			Stream:  true,
+		},
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != "hello" {
+		t.Fatalf("text = %q", result.Text)
+	}
+}
+
 func buildCodexTestJWT(accountID string) string {
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"https://api.openai.com/auth":{"chatgpt_account_id":"` + accountID + `"}}`))

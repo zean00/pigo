@@ -49,6 +49,7 @@ type mistralToolCall struct {
 	ID       string                `json:"id,omitempty"`
 	Type     string                `json:"type,omitempty"`
 	Function mistralToolInvocation `json:"function"`
+	Index    int                   `json:"index,omitempty"`
 }
 
 type mistralToolInvocation struct {
@@ -59,6 +60,15 @@ type mistralToolInvocation struct {
 type mistralResponse struct {
 	Choices []mistralChoice `json:"choices"`
 	Usage   *mistralUsage   `json:"usage,omitempty"`
+}
+
+type mistralStreamResponse struct {
+	Choices []mistralStreamChoice `json:"choices"`
+}
+
+type mistralStreamChoice struct {
+	Delta        mistralResponseMessage `json:"delta"`
+	FinishReason string                 `json:"finish_reason"`
 }
 
 type mistralChoice struct {
@@ -84,9 +94,6 @@ func MistralProvider() ChatProvider {
 
 func (provider *mistralProvider) Complete(ctx context.Context, req CompletionRequest) (NormalizedResult, []NormalizedEvent, error) {
 	providerSpec, hasProviderSpec := ProviderSpecForProvider(req.Provider)
-	if req.Options.Stream {
-		return NormalizedResult{}, nil, errors.New("streaming is not supported for mistral providers yet")
-	}
 
 	apiKey := strings.TrimSpace(req.Options.APIKey)
 	if apiKey == "" && hasProviderSpec {
@@ -115,7 +122,7 @@ func (provider *mistralProvider) Complete(ctx context.Context, req CompletionReq
 	payload := mistralRequest{
 		Model:    req.Model,
 		Messages: toMistralMessages(req.Messages),
-		Stream:   false,
+		Stream:   req.Options.Stream,
 	}
 	if req.Options.MaxTokens > 0 {
 		payload.MaxTokens = req.Options.MaxTokens
@@ -208,6 +215,10 @@ func (provider *mistralProvider) Complete(ctx context.Context, req CompletionReq
 		return NormalizedResult{}, nil, fmt.Errorf("mistral API error: %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 
+	if req.Options.Stream {
+		return mistralStreamToResult(resp.Body)
+	}
+
 	var completion mistralResponse
 	if err := json.NewDecoder(resp.Body).Decode(&completion); err != nil {
 		return NormalizedResult{}, nil, fmt.Errorf("parse mistral response: %w", err)
@@ -225,6 +236,98 @@ func (provider *mistralProvider) Complete(ctx context.Context, req CompletionReq
 		}
 	}
 	return result, AssistantEvents(result.contentBlocks(), result.StopReason), nil
+}
+
+func mistralStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, error) {
+	blocks := []ContentBlock{}
+	textBuilder := strings.Builder{}
+	toolCalls := map[int]*mistralToolCall{}
+	stopReason := "stop"
+
+	err := scanSSE(body, func(event sseEvent) error {
+		payload := strings.TrimSpace(event.Data)
+		if payload == "" || payload == "[DONE]" {
+			return nil
+		}
+		var chunk mistralStreamResponse
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			return fmt.Errorf("parse mistral stream chunk: %w", err)
+		}
+		for _, choice := range chunk.Choices {
+			if choice.FinishReason != "" {
+				stopReason = choice.FinishReason
+			}
+			switch content := choice.Delta.Content.(type) {
+			case string:
+				textBuilder.WriteString(content)
+			case []any:
+				for _, item := range content {
+					itemMap, ok := item.(map[string]any)
+					if !ok {
+						continue
+					}
+					if asString(itemMap["type"]) == "text" {
+						textBuilder.WriteString(asString(itemMap["text"]))
+					}
+				}
+			}
+			for position, toolCall := range choice.Delta.ToolCalls {
+				index := toolCall.Index
+				if index == 0 && position > 0 {
+					index = position
+				}
+				entry, ok := toolCalls[index]
+				if !ok {
+					entry = &mistralToolCall{}
+					toolCalls[index] = entry
+				}
+				if toolCall.ID != "" {
+					entry.ID = toolCall.ID
+				}
+				if toolCall.Function.Name != "" {
+					entry.Function.Name = toolCall.Function.Name
+				}
+				entry.Function.Arguments += toolCall.Function.Arguments
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return NormalizedResult{}, nil, err
+	}
+
+	if strings.TrimSpace(textBuilder.String()) != "" {
+		blocks = append(blocks, ContentBlock{Type: "text", Text: textBuilder.String()})
+	}
+	for index := 0; index < len(toolCalls); index++ {
+		call, ok := toolCalls[index]
+		if !ok {
+			continue
+		}
+		arguments := map[string]any{}
+		if raw := strings.TrimSpace(call.Function.Arguments); raw != "" {
+			if err := json.Unmarshal([]byte(raw), &arguments); err != nil {
+				return NormalizedResult{}, nil, fmt.Errorf("parse mistral tool arguments: %w", err)
+			}
+		}
+		blocks = append(blocks, ContentBlock{
+			Type:      "toolCall",
+			ID:        call.ID,
+			Name:      call.Function.Name,
+			Arguments: arguments,
+		})
+	}
+
+	if len(toolCalls) > 0 && mapMistralStopReason(stopReason) == "stop" {
+		stopReason = "tool_calls"
+	}
+	result := NormalizedResult{
+		Role:       "assistant",
+		StopReason: mapMistralStopReason(stopReason),
+		Text:       ContentText(blocks),
+		Content:    NormalizedContent(blocks),
+	}
+	return result, AssistantEvents(blocks, result.StopReason), nil
 }
 
 func normalizeMistralURL(baseURL string) string {

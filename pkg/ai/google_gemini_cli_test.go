@@ -164,3 +164,29 @@ func TestGoogleAntigravityProviderUsesSandboxHeadersAndSystemInstruction(t *test
 		t.Fatalf("text = %q", result.Text)
 	}
 }
+
+func TestGoogleGeminiCLIProviderSupportsStreamFlag(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"hello\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1,\"totalTokenCount\":2}}}\n\n")
+	}))
+	defer server.Close()
+
+	provider := GoogleGeminiCLIProvider()
+	result, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "google-gemini-cli",
+		Model:    "gemini-test",
+		Options: ChatOptions{
+			APIKey:  `{"token":"test-token","projectId":"test-project"}`,
+			BaseURL: server.URL,
+			Stream:  true,
+		},
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != "hello" {
+		t.Fatalf("text = %q", result.Text)
+	}
+}

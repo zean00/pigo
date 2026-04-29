@@ -19,6 +19,7 @@ type openAICodexProvider struct{}
 type openAICodexRequest struct {
 	Model          string           `json:"model"`
 	Store          bool             `json:"store"`
+	Stream         bool             `json:"stream,omitempty"`
 	Instructions   string           `json:"instructions,omitempty"`
 	Input          []any            `json:"input,omitempty"`
 	Tools          []openAIChatTool `json:"tools,omitempty"`
@@ -35,9 +36,6 @@ func OpenAICodexProvider() ChatProvider {
 
 func (provider *openAICodexProvider) Complete(ctx context.Context, req CompletionRequest) (NormalizedResult, []NormalizedEvent, error) {
 	providerSpec, hasProviderSpec := ProviderSpecForProvider(req.Provider)
-	if req.Options.Stream {
-		return NormalizedResult{}, nil, errors.New("streaming is not supported for openai-codex providers yet")
-	}
 
 	apiKey := strings.TrimSpace(req.Options.APIKey)
 	if apiKey == "" && hasProviderSpec {
@@ -66,12 +64,16 @@ func (provider *openAICodexProvider) Complete(ctx context.Context, req Completio
 	payload := openAICodexRequest{
 		Model:        req.Model,
 		Store:        false,
+		Stream:       req.Options.Stream,
 		Input:        toOpenAIResponsesRequest(req).Input,
 		Text:         map[string]any{"verbosity": "low"},
 		Include:      []string{"reasoning.encrypted_content"},
 		ToolChoice:   "auto",
 		Temperature:  req.Options.Temperature,
 		Instructions: "",
+	}
+	if req.Options.Stream {
+		payload.Store = false
 	}
 	if req.Options.MaxTokens > 0 {
 		payload.Text["max_output_tokens"] = req.Options.MaxTokens
@@ -100,6 +102,9 @@ func (provider *openAICodexProvider) Complete(ctx context.Context, req Completio
 		return NormalizedResult{}, nil, fmt.Errorf("create openai-codex request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if req.Options.Stream {
+		httpReq.Header.Set("Accept", "text/event-stream")
+	}
 	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	httpReq.Header.Set("OpenAI-Beta", "responses=experimental")
 	if accountID := extractCodexAccountID(apiKey); accountID != "" {
@@ -126,11 +131,10 @@ func (provider *openAICodexProvider) Complete(ctx context.Context, req Completio
 		return NormalizedResult{}, nil, fmt.Errorf("openai-codex API error: %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 
-	result, events, err := openAIResponsesToResult(resp.Body)
-	if err != nil {
-		return NormalizedResult{}, nil, err
+	if req.Options.Stream {
+		return openAIResponsesSSEToResult(resp.Body)
 	}
-	return result, events, nil
+	return openAIResponsesToResult(resp.Body)
 }
 
 func resolveCodexURL(baseURL string) string {

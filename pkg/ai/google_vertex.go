@@ -22,9 +22,6 @@ func GoogleVertexProvider() ChatProvider {
 
 func (provider *googleVertexProvider) Complete(ctx context.Context, req CompletionRequest) (NormalizedResult, []NormalizedEvent, error) {
 	providerSpec, hasProviderSpec := ProviderSpecForProvider(req.Provider)
-	if req.Options.Stream {
-		return NormalizedResult{}, nil, errors.New("streaming is not supported for google-vertex providers yet")
-	}
 
 	apiKey := strings.TrimSpace(req.Options.APIKey)
 	if apiKey == "" && hasProviderSpec {
@@ -59,7 +56,7 @@ func (provider *googleVertexProvider) Complete(ctx context.Context, req Completi
 	if location == "" {
 		return NormalizedResult{}, nil, errors.New("google-vertex requires GOOGLE_CLOUD_LOCATION")
 	}
-	requestURL, err := buildGoogleVertexURL(baseURL, project, location, req.Model, apiKey)
+	requestURL, err := buildGoogleVertexURL(baseURL, project, location, req.Model, apiKey, req.Options.Stream)
 	if err != nil {
 		return NormalizedResult{}, nil, err
 	}
@@ -111,6 +108,14 @@ func (provider *googleVertexProvider) Complete(ctx context.Context, req Completi
 		return NormalizedResult{}, nil, fmt.Errorf("google-vertex API error: %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 
+	if req.Options.Stream {
+		result, err := googleSSEToResult(resp.Body)
+		if err != nil {
+			return NormalizedResult{}, nil, err
+		}
+		return result, AssistantEvents(result.contentBlocks(), result.StopReason), nil
+	}
+
 	var completion googleResponse
 	if err := json.NewDecoder(resp.Body).Decode(&completion); err != nil {
 		return NormalizedResult{}, nil, fmt.Errorf("parse google-vertex response: %w", err)
@@ -119,7 +124,7 @@ func (provider *googleVertexProvider) Complete(ctx context.Context, req Completi
 	return result, AssistantEvents(result.contentBlocks(), result.StopReason), nil
 }
 
-func buildGoogleVertexURL(baseURL, project, location, model, apiKey string) (string, error) {
+func buildGoogleVertexURL(baseURL, project, location, model, apiKey string, stream bool) (string, error) {
 	baseURL = strings.TrimSpace(baseURL)
 	if baseURL == "" {
 		baseURL = "https://{location}-aiplatform.googleapis.com"
@@ -129,10 +134,18 @@ func buildGoogleVertexURL(baseURL, project, location, model, apiKey string) (str
 
 	var requestURL string
 	if strings.Contains(baseURL, "/publishers/google/models/") {
-		requestURL = baseURL + ":generateContent"
+		if stream {
+			requestURL = baseURL + ":streamGenerateContent"
+		} else {
+			requestURL = baseURL + ":generateContent"
+		}
 	} else {
+		suffix := ":generateContent"
+		if stream {
+			suffix = ":streamGenerateContent"
+		}
 		requestURL = baseURL + "/v1/projects/" + url.PathEscape(project) + "/locations/" + url.PathEscape(location) +
-			"/publishers/google/models/" + url.PathEscape(model) + ":generateContent"
+			"/publishers/google/models/" + url.PathEscape(model) + suffix
 	}
 
 	parsed, err := url.Parse(requestURL)
@@ -141,6 +154,9 @@ func buildGoogleVertexURL(baseURL, project, location, model, apiKey string) (str
 	}
 	query := parsed.Query()
 	query.Set("key", apiKey)
+	if stream {
+		query.Set("alt", "sse")
+	}
 	parsed.RawQuery = query.Encode()
 	return parsed.String(), nil
 }

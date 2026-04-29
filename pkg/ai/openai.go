@@ -94,6 +94,7 @@ type openAIResponsesRequest struct {
 	ToolChoice      string           `json:"tool_choice,omitempty"`
 	MaxOutputTokens int              `json:"max_output_tokens,omitempty"`
 	Temperature     *float64         `json:"temperature,omitempty"`
+	Stream          bool             `json:"stream,omitempty"`
 }
 
 type openAIResponsesResponse struct {
@@ -388,10 +389,6 @@ func (provider *openAIProvider) Complete(ctx context.Context, req CompletionRequ
 		baseURL = baseURL + "/chat/completions"
 	}
 
-	if useResponsesAPI && req.Options.Stream {
-		return NormalizedResult{}, nil, errors.New("streaming is not supported for responses API models")
-	}
-
 	var requestBody any
 	var data []byte
 	if useResponsesAPI {
@@ -457,6 +454,9 @@ func (provider *openAIProvider) Complete(ctx context.Context, req CompletionRequ
 		return NormalizedResult{}, nil, fmt.Errorf("create openai request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if useResponsesAPI && req.Options.Stream {
+		httpReq.Header.Set("Accept", "text/event-stream")
+	}
 	if hasProviderSpec {
 		for key, value := range providerSpec.DefaultHeader {
 			httpReq.Header.Set(key, value)
@@ -498,6 +498,9 @@ func (provider *openAIProvider) Complete(ctx context.Context, req CompletionRequ
 	}
 
 	if useResponsesAPI {
+		if req.Options.Stream {
+			return openAIResponsesSSEToResult(resp.Body)
+		}
 		result, events, responseErr := openAIResponsesToResult(resp.Body)
 		if responseErr != nil {
 			return NormalizedResult{}, nil, responseErr
@@ -546,8 +549,9 @@ func shouldUseOpenAIResponses(provider, model string) bool {
 
 func toOpenAIResponsesRequest(req CompletionRequest) openAIResponsesRequest {
 	payload := openAIResponsesRequest{
-		Model: req.Model,
-		Input: make([]any, 0, len(req.Messages)*2),
+		Model:  req.Model,
+		Input:  make([]any, 0, len(req.Messages)*2),
+		Stream: req.Options.Stream,
 	}
 	if req.Options.MaxTokens > 0 {
 		payload.MaxOutputTokens = req.Options.MaxTokens
@@ -667,6 +671,124 @@ func toOpenAIResponsesRequest(req CompletionRequest) openAIResponsesRequest {
 		}
 	}
 	return payload
+}
+
+func openAIResponsesSSEToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, error) {
+	blocks := []ContentBlock{}
+	rawToolArgs := map[int]string{}
+	currentTextIndex := -1
+	currentThinkingIndex := -1
+	currentToolIndex := -1
+	stopReason := "stop"
+	result := NormalizedResult{Role: "assistant", StopReason: "stop"}
+
+	err := scanSSE(body, func(event sseEvent) error {
+		payload := strings.TrimSpace(event.Data)
+		if payload == "" || payload == "[DONE]" {
+			return nil
+		}
+		var item map[string]any
+		if err := json.Unmarshal([]byte(payload), &item); err != nil {
+			return fmt.Errorf("parse openai responses stream event: %w", err)
+		}
+		switch asString(item["type"]) {
+		case "response.output_item.added":
+			outputItem, _ := item["item"].(map[string]any)
+			switch asString(outputItem["type"]) {
+			case "reasoning":
+				blocks = append(blocks, ContentBlock{Type: "thinking"})
+				currentThinkingIndex = len(blocks) - 1
+			case "message":
+				blocks = append(blocks, ContentBlock{Type: "text"})
+				currentTextIndex = len(blocks) - 1
+			case "function_call":
+				blocks = append(blocks, ContentBlock{
+					Type:      "toolCall",
+					ID:        mergeOpenAIResponsesToolCallID(asString(outputItem["call_id"]), asString(outputItem["id"])),
+					Name:      asString(outputItem["name"]),
+					Arguments: map[string]any{},
+				})
+				currentToolIndex = len(blocks) - 1
+				rawToolArgs[currentToolIndex] = asString(outputItem["arguments"])
+			}
+		case "response.reasoning_summary_text.delta":
+			if currentThinkingIndex >= 0 && currentThinkingIndex < len(blocks) {
+				blocks[currentThinkingIndex].Thinking += asString(item["delta"])
+			}
+		case "response.output_text.delta", "response.refusal.delta":
+			if currentTextIndex >= 0 && currentTextIndex < len(blocks) {
+				blocks[currentTextIndex].Text += asString(item["delta"])
+			}
+		case "response.function_call_arguments.delta":
+			if currentToolIndex >= 0 && currentToolIndex < len(blocks) {
+				rawToolArgs[currentToolIndex] += asString(item["delta"])
+				var arguments map[string]any
+				if json.Unmarshal([]byte(rawToolArgs[currentToolIndex]), &arguments) == nil {
+					blocks[currentToolIndex].Arguments = arguments
+				}
+			}
+		case "response.function_call_arguments.done":
+			if currentToolIndex >= 0 && currentToolIndex < len(blocks) {
+				rawToolArgs[currentToolIndex] = asString(item["arguments"])
+				var arguments map[string]any
+				if json.Unmarshal([]byte(rawToolArgs[currentToolIndex]), &arguments) == nil {
+					blocks[currentToolIndex].Arguments = arguments
+				}
+			}
+		case "response.output_item.done":
+			outputItem, _ := item["item"].(map[string]any)
+			switch asString(outputItem["type"]) {
+			case "reasoning":
+				currentThinkingIndex = -1
+			case "message":
+				currentTextIndex = -1
+			case "function_call":
+				currentToolIndex = -1
+			}
+		case "response.completed":
+			response, _ := item["response"].(map[string]any)
+			if response != nil {
+				stopReason = mapOpenAIResponsesStopReason(asString(response["status"]))
+				if usageMap, ok := response["usage"].(map[string]any); ok {
+					cachedTokens := 0
+					if details, ok := usageMap["input_tokens_details"].(map[string]any); ok {
+						cachedTokens = int(asFloat64(details["cached_tokens"]))
+					}
+					result.Usage = &Usage{
+						Input:       int(asFloat64(usageMap["input_tokens"])) - cachedTokens,
+						Output:      int(asFloat64(usageMap["output_tokens"])),
+						CacheRead:   cachedTokens,
+						TotalTokens: int(asFloat64(usageMap["total_tokens"])),
+					}
+				}
+			}
+		case "response.failed":
+			response, _ := item["response"].(map[string]any)
+			if errMap, ok := response["error"].(map[string]any); ok {
+				return errors.New(asString(errMap["message"]))
+			}
+			return errors.New("openai responses stream failed")
+		case "error":
+			return errors.New(asString(item["message"]))
+		}
+		return nil
+	})
+	if err != nil {
+		return NormalizedResult{}, nil, err
+	}
+
+	if stopReason == "stop" {
+		for _, block := range blocks {
+			if block.Type == "toolCall" {
+				stopReason = "toolUse"
+				break
+			}
+		}
+	}
+	result.StopReason = mapOpenAIStopReason(stopReason)
+	result.Text = ContentText(blocks)
+	result.Content = NormalizedContent(blocks)
+	return result, AssistantEvents(blocks, result.StopReason), nil
 }
 
 func openAIResponsesToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, error) {

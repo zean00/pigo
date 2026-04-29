@@ -61,9 +61,6 @@ func GoogleGeminiCLIProvider() ChatProvider {
 
 func (provider *googleGeminiCLIProvider) Complete(ctx context.Context, req CompletionRequest) (NormalizedResult, []NormalizedEvent, error) {
 	providerSpec, hasProviderSpec := ProviderSpecForProvider(req.Provider)
-	if req.Options.Stream {
-		return NormalizedResult{}, nil, errors.New("streaming is not supported for google-gemini-cli providers yet")
-	}
 
 	apiKey := strings.TrimSpace(req.Options.APIKey)
 	if apiKey == "" && hasProviderSpec {

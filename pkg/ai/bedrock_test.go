@@ -13,12 +13,28 @@ import (
 )
 
 type fakeBedrockClient struct {
-	converse func(context.Context, *bedrockruntime.ConverseInput, ...func(*bedrockruntime.Options)) (*bedrockruntime.ConverseOutput, error)
+	converse       func(context.Context, *bedrockruntime.ConverseInput, ...func(*bedrockruntime.Options)) (*bedrockruntime.ConverseOutput, error)
+	converseStream func(context.Context, *bedrockruntime.ConverseStreamInput, ...func(*bedrockruntime.Options)) (*bedrockruntime.ConverseStreamOutput, error)
 }
 
 func (client fakeBedrockClient) Converse(ctx context.Context, input *bedrockruntime.ConverseInput, optFns ...func(*bedrockruntime.Options)) (*bedrockruntime.ConverseOutput, error) {
 	return client.converse(ctx, input, optFns...)
 }
+
+func (client fakeBedrockClient) ConverseStream(ctx context.Context, input *bedrockruntime.ConverseStreamInput, optFns ...func(*bedrockruntime.Options)) (*bedrockruntime.ConverseStreamOutput, error) {
+	return client.converseStream(ctx, input, optFns...)
+}
+
+type fakeBedrockStreamReader struct {
+	events chan bedrocktypes.ConverseStreamOutput
+	err    error
+}
+
+func (reader *fakeBedrockStreamReader) Events() <-chan bedrocktypes.ConverseStreamOutput {
+	return reader.events
+}
+func (reader *fakeBedrockStreamReader) Close() error { return nil }
+func (reader *fakeBedrockStreamReader) Err() error   { return reader.err }
 
 func TestBedrockProviderReturnsTextAndToolCalls(t *testing.T) {
 	t.Setenv("AWS_BEARER_TOKEN_BEDROCK", "")
@@ -253,5 +269,43 @@ func TestBedrockProviderMapsThinkingBlocksAndCanceledErrors(t *testing.T) {
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestBedrockProviderStreamingResponse(t *testing.T) {
+	events := make(chan bedrocktypes.ConverseStreamOutput, 4)
+	events <- &bedrocktypes.ConverseStreamOutputMemberContentBlockDelta{
+		Value: bedrocktypes.ContentBlockDeltaEvent{
+			ContentBlockIndex: aws.Int32(0),
+			Delta:             &bedrocktypes.ContentBlockDeltaMemberText{Value: "hello"},
+		},
+	}
+	events <- &bedrocktypes.ConverseStreamOutputMemberMessageStop{
+		Value: bedrocktypes.MessageStopEvent{StopReason: bedrocktypes.StopReasonEndTurn},
+	}
+	events <- &bedrocktypes.ConverseStreamOutputMemberMetadata{
+		Value: bedrocktypes.ConverseStreamMetadataEvent{
+			Usage: &bedrocktypes.TokenUsage{
+				InputTokens:  aws.Int32(1),
+				OutputTokens: aws.Int32(1),
+				TotalTokens:  aws.Int32(2),
+			},
+		},
+	}
+	close(events)
+
+	stream := bedrockruntime.NewConverseStreamEventStream(func(stream *bedrockruntime.ConverseStreamEventStream) {
+		stream.Reader = &fakeBedrockStreamReader{events: events}
+	})
+
+	result, _, err := bedrockEventStreamToResult(stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != "hello" {
+		t.Fatalf("text = %q", result.Text)
+	}
+	if result.StopReason != "stop" {
+		t.Fatalf("stopReason = %q", result.StopReason)
 	}
 }

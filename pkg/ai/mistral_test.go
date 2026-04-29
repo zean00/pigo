@@ -93,3 +93,85 @@ func TestMistralProviderReturnsToolCalls(t *testing.T) {
 		t.Fatalf("content len = %d", len(result.Content))
 	}
 }
+
+func TestMistralProviderStreamingResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["stream"] != true {
+			t.Fatalf("stream = %#v", payload["stream"])
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":\"\"}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call-1\",\"function\":{\"name\":\"math\",\"arguments\":\"{\\\"a\\\":15}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	provider := MistralProvider()
+	result, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "mistral",
+		Model:    "devstral-test",
+		Options: ChatOptions{
+			APIKey:  "test-key",
+			BaseURL: server.URL,
+			Stream:  true,
+		},
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.StopReason != "toolUse" {
+		t.Fatalf("stopReason = %q", result.StopReason)
+	}
+	if result.Text != "hello" {
+		t.Fatalf("text = %q", result.Text)
+	}
+}
+
+func TestMistralProviderStreamingResponsePreservesToolCallIndexes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"first\",\"arguments\":\"{\\\"a\\\":\"}},{\"index\":1,\"id\":\"call-2\",\"function\":{\"name\":\"second\",\"arguments\":\"{\\\"b\\\":\"}}]},\"finish_reason\":\"\"}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"2}\"}}]},\"finish_reason\":\"\"}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"1}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	provider := MistralProvider()
+	result, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "mistral",
+		Model:    "devstral-test",
+		Options: ChatOptions{
+			APIKey:  "test-key",
+			BaseURL: server.URL,
+			Stream:  true,
+		},
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.StopReason != "toolUse" {
+		t.Fatalf("stopReason = %q", result.StopReason)
+	}
+	blocks := result.contentBlocks()
+	if len(blocks) != 2 {
+		t.Fatalf("blocks = %#v", blocks)
+	}
+	if blocks[0].Name != "first" || blocks[0].Arguments["a"] != float64(1) {
+		t.Fatalf("first tool call = %#v", blocks[0])
+	}
+	if blocks[1].Name != "second" || blocks[1].Arguments["b"] != float64(2) {
+		t.Fatalf("second tool call = %#v", blocks[1])
+	}
+}

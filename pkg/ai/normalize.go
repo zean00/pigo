@@ -108,6 +108,29 @@ func asBool(value any) bool {
 	return result
 }
 
+func asFloat64(value any) float64 {
+	switch typed := value.(type) {
+	case float64:
+		return typed
+	case float32:
+		return float64(typed)
+	case int:
+		return float64(typed)
+	case int32:
+		return float64(typed)
+	case int64:
+		return float64(typed)
+	case json.Number:
+		number, err := typed.Float64()
+		if err != nil {
+			return 0
+		}
+		return number
+	default:
+		return 0
+	}
+}
+
 func MessageText(message Message) string {
 	if text, ok := message.Content.(string); ok {
 		return text

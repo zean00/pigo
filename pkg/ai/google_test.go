@@ -98,3 +98,35 @@ func TestGoogleProviderReturnsToolCalls(t *testing.T) {
 		t.Fatalf("content len = %d", len(result.Content))
 	}
 }
+
+func TestGoogleProviderStreamingResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/v1beta/models/gemini-test:streamGenerateContent" {
+			t.Fatalf("path = %q", req.URL.Path)
+		}
+		if req.URL.Query().Get("alt") != "sse" {
+			t.Fatalf("alt = %q", req.URL.Query().Get("alt"))
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"hello\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1,\"totalTokenCount\":2}}\n\n")
+	}))
+	defer server.Close()
+
+	provider := GoogleProvider()
+	result, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "google",
+		Model:    "gemini-test",
+		Options: ChatOptions{
+			APIKey:  "test-key",
+			BaseURL: server.URL + "/v1beta",
+			Stream:  true,
+		},
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != "hello" {
+		t.Fatalf("text = %q", result.Text)
+	}
+}

@@ -204,9 +204,31 @@ func TestOpenAIProviderUsesResponsesEndpointForGpt5(t *testing.T) {
 	}
 }
 
-func TestOpenAIProviderRejectsStreamingForResponsesModels(t *testing.T) {
-	provider := OpenAIProvider()
-	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+func TestOpenAIProviderStreamsResponsesModels(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/v1/responses" {
+			t.Fatalf("path = %q", req.URL.Path)
+		}
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["stream"] != true {
+			t.Fatalf("stream = %#v", payload["stream"])
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\"}}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+	}))
+	defer server.Close()
+
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	result, _, err := provider.Complete(context.Background(), CompletionRequest{
 		Provider: "openai",
 		Model:    "gpt-5.4",
 		Options: ChatOptions{
@@ -217,11 +239,11 @@ func TestOpenAIProviderRejectsStreamingForResponsesModels(t *testing.T) {
 			{Role: "user", Content: "hi"},
 		},
 	})
-	if err == nil {
-		t.Fatal("expected error")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := err.Error(); got != "streaming is not supported for responses API models" {
-		t.Fatalf("error = %q", got)
+	if result.Text != "hi" {
+		t.Fatalf("text = %q", result.Text)
 	}
 }
 

@@ -102,9 +102,6 @@ func GoogleProvider() ChatProvider {
 
 func (provider *googleProvider) Complete(ctx context.Context, req CompletionRequest) (NormalizedResult, []NormalizedEvent, error) {
 	providerSpec, hasProviderSpec := ProviderSpecForProvider(req.Provider)
-	if req.Options.Stream {
-		return NormalizedResult{}, nil, errors.New("streaming is not supported for google providers yet")
-	}
 
 	apiKey := strings.TrimSpace(req.Options.APIKey)
 	if apiKey == "" && hasProviderSpec {
@@ -128,7 +125,7 @@ func (provider *googleProvider) Complete(ctx context.Context, req CompletionRequ
 	if baseURL == "" {
 		baseURL = defaultGoogleBaseURL
 	}
-	requestURL, err := buildGoogleURL(baseURL, req.Model, apiKey)
+	requestURL, err := buildGoogleURL(baseURL, req.Model, apiKey, req.Options.Stream)
 	if err != nil {
 		return NormalizedResult{}, nil, err
 	}
@@ -180,6 +177,14 @@ func (provider *googleProvider) Complete(ctx context.Context, req CompletionRequ
 		return NormalizedResult{}, nil, fmt.Errorf("google API error: %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 
+	if req.Options.Stream {
+		result, err := googleSSEToResult(resp.Body)
+		if err != nil {
+			return NormalizedResult{}, nil, err
+		}
+		return result, AssistantEvents(result.contentBlocks(), result.StopReason), nil
+	}
+
 	var completion googleResponse
 	if err := json.NewDecoder(resp.Body).Decode(&completion); err != nil {
 		return NormalizedResult{}, nil, fmt.Errorf("parse google response: %w", err)
@@ -188,20 +193,52 @@ func (provider *googleProvider) Complete(ctx context.Context, req CompletionRequ
 	return result, AssistantEvents(result.contentBlocks(), result.StopReason), nil
 }
 
-func buildGoogleURL(baseURL, model, apiKey string) (string, error) {
+func buildGoogleURL(baseURL, model, apiKey string, stream bool) (string, error) {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if baseURL == "" {
 		baseURL = defaultGoogleBaseURL
 	}
-	requestURL := baseURL + "/models/" + url.PathEscape(model) + ":generateContent"
+	suffix := ":generateContent"
+	if stream {
+		suffix = ":streamGenerateContent"
+	}
+	requestURL := baseURL + "/models/" + url.PathEscape(model) + suffix
 	parsed, err := url.Parse(requestURL)
 	if err != nil {
 		return "", fmt.Errorf("invalid google base URL: %w", err)
 	}
 	query := parsed.Query()
 	query.Set("key", apiKey)
+	if stream {
+		query.Set("alt", "sse")
+	}
 	parsed.RawQuery = query.Encode()
 	return parsed.String(), nil
+}
+
+func googleSSEToResult(body io.Reader) (NormalizedResult, error) {
+	var final googleResponse
+	seen := false
+	err := scanSSE(body, func(event sseEvent) error {
+		payload := strings.TrimSpace(event.Data)
+		if payload == "" || payload == "[DONE]" {
+			return nil
+		}
+		var chunk googleResponse
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			return fmt.Errorf("parse google stream chunk: %w", err)
+		}
+		final = mergeGoogleStreamResponse(final, chunk)
+		seen = true
+		return nil
+	})
+	if err != nil {
+		return NormalizedResult{}, err
+	}
+	if !seen {
+		return NormalizedResult{}, errors.New("google returned an empty response")
+	}
+	return googleResponseToNormalized(final), nil
 }
 
 func toGoogleRequest(req CompletionRequest) googleRequest {

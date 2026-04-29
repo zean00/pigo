@@ -56,9 +56,6 @@ func AnthropicProvider() ChatProvider {
 
 func (provider *anthropicProvider) Complete(ctx context.Context, req CompletionRequest) (NormalizedResult, []NormalizedEvent, error) {
 	providerSpec, hasProviderSpec := ProviderSpecForProvider(req.Provider)
-	if req.Options.Stream {
-		return NormalizedResult{}, nil, errors.New("streaming is not supported for anthropic providers yet")
-	}
 
 	apiKey := strings.TrimSpace(req.Options.APIKey)
 	if apiKey == "" && hasProviderSpec {
@@ -85,6 +82,7 @@ func (provider *anthropicProvider) Complete(ctx context.Context, req CompletionR
 	baseURL = normalizeAnthropicURL(baseURL)
 
 	payload := toAnthropicRequest(req)
+	payload.Stream = req.Options.Stream
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return NormalizedResult{}, nil, fmt.Errorf("marshal anthropic payload: %w", err)
@@ -137,11 +135,124 @@ func (provider *anthropicProvider) Complete(ctx context.Context, req CompletionR
 		return NormalizedResult{}, nil, fmt.Errorf("anthropic API error: %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 
+	if req.Options.Stream {
+		return anthropicStreamToResult(resp.Body)
+	}
+
 	result, err := anthropicResponseToResult(resp.Body)
 	if err != nil {
 		return NormalizedResult{}, nil, err
 	}
 	return result, AssistantEvents(result.contentBlocks(), result.StopReason), nil
+}
+
+func anthropicStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, error) {
+	blocksByIndex := map[int]map[string]any{}
+	stopReason := ""
+	usage := &Usage{}
+
+	err := scanSSE(body, func(event sseEvent) error {
+		payload := strings.TrimSpace(event.Data)
+		if payload == "" || payload == "[DONE]" || event.Event == "ping" {
+			return nil
+		}
+		var item map[string]any
+		if err := json.Unmarshal([]byte(payload), &item); err != nil {
+			return fmt.Errorf("parse anthropic stream event: %w", err)
+		}
+		switch event.Event {
+		case "message_start":
+			if message, ok := item["message"].(map[string]any); ok {
+				if usageMap, ok := message["usage"].(map[string]any); ok {
+					usage.Input = int(asFloat64(usageMap["input_tokens"]))
+					usage.Output = int(asFloat64(usageMap["output_tokens"]))
+					usage.CacheRead = int(asFloat64(usageMap["cache_read_input_tokens"]))
+					usage.CacheWrite = int(asFloat64(usageMap["cache_creation_input_tokens"]))
+				}
+			}
+		case "content_block_start":
+			index := int(asFloat64(item["index"]))
+			block, _ := item["content_block"].(map[string]any)
+			if block == nil {
+				block = map[string]any{}
+			}
+			switch asString(block["type"]) {
+			case "text":
+				blocksByIndex[index] = map[string]any{"type": "text", "text": asString(block["text"])}
+			case "thinking":
+				blocksByIndex[index] = map[string]any{"type": "thinking", "thinking": asString(block["thinking"])}
+			case "tool_use":
+				inputMap, _ := block["input"].(map[string]any)
+				if inputMap == nil {
+					inputMap = map[string]any{}
+				}
+				blocksByIndex[index] = map[string]any{
+					"type":  "tool_use",
+					"id":    asString(block["id"]),
+					"name":  asString(block["name"]),
+					"input": inputMap,
+					"json":  "",
+				}
+			}
+		case "content_block_delta":
+			index := int(asFloat64(item["index"]))
+			block := blocksByIndex[index]
+			if block == nil {
+				return nil
+			}
+			delta, _ := item["delta"].(map[string]any)
+			switch asString(delta["type"]) {
+			case "text_delta":
+				block["text"] = asString(block["text"]) + asString(delta["text"])
+			case "thinking_delta":
+				block["thinking"] = asString(block["thinking"]) + asString(delta["thinking"])
+			case "input_json_delta":
+				raw := asString(block["json"]) + asString(delta["partial_json"])
+				block["json"] = raw
+				var input map[string]any
+				if strings.TrimSpace(raw) != "" && json.Unmarshal([]byte(raw), &input) == nil {
+					block["input"] = input
+				}
+			}
+		case "message_delta":
+			delta, _ := item["delta"].(map[string]any)
+			if value := asString(delta["stop_reason"]); value != "" {
+				stopReason = value
+			}
+			if usageDelta, ok := item["usage"].(map[string]any); ok {
+				if value := int(asFloat64(usageDelta["output_tokens"])); value != 0 {
+					usage.Output = value
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return NormalizedResult{}, nil, err
+	}
+
+	content := make([]map[string]any, 0, len(blocksByIndex))
+	for index := 0; index < len(blocksByIndex); index++ {
+		block := blocksByIndex[index]
+		if block == nil {
+			continue
+		}
+		delete(block, "json")
+		content = append(content, block)
+	}
+	result := NormalizedResult{
+		Role:       "assistant",
+		StopReason: mapAnthropicStopReason(stopReason, len(content) > 0),
+		Usage:      usage,
+	}
+	blocks, hasToolCalls := anthropicContentToBlocks(content)
+	result.StopReason = mapAnthropicStopReason(stopReason, hasToolCalls)
+	result.Text = ContentText(blocks)
+	result.Content = NormalizedContent(blocks)
+	if result.Usage != nil && result.Usage.TotalTokens == 0 {
+		result.Usage.TotalTokens = result.Usage.Input + result.Usage.Output
+	}
+	return result, AssistantEvents(blocks, result.StopReason), nil
 }
 
 func normalizeAnthropicURL(baseURL string) string {

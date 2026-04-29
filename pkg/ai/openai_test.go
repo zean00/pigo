@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -135,5 +136,298 @@ func TestOpenAIProviderStreamingResponse(t *testing.T) {
 	}
 	if result.Text != "hello world" {
 		t.Fatalf("text = %q", result.Text)
+	}
+}
+
+func TestOpenAIProviderUsesResponsesEndpointForGpt5(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/v1/responses" {
+			t.Fatalf("path = %q", req.URL.Path)
+		}
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		input, _ := payload["input"].([]any)
+		if len(input) == 0 {
+			t.Fatal("missing input")
+		}
+		first, ok := input[0].(map[string]any)
+		if !ok {
+			t.Fatalf("first input item = %#v", input[0])
+		}
+		if got := first["role"]; got != "user" {
+			t.Fatalf("input role = %v", got)
+		}
+
+		_, _ = fmt.Fprint(w, `{
+			"output": [
+				{
+					"type": "message",
+					"role": "assistant",
+					"content": [{"type": "output_text", "text": "hi"}]
+				}
+			],
+			"usage": {
+				"input_tokens": 3,
+				"output_tokens": 4,
+				"total_tokens": 7
+			},
+			"status": "completed"
+		}`)
+	}))
+	defer server.Close()
+
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	result, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openai",
+		Model:    "gpt-5.4",
+		Options: ChatOptions{
+			APIKey: "test-key",
+		},
+		Messages: []Message{
+			{Role: "user", Content: "hi"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.StopReason != "stop" {
+		t.Fatalf("stopReason = %q", result.StopReason)
+	}
+	if result.Text != "hi" {
+		t.Fatalf("text = %q", result.Text)
+	}
+}
+
+func TestOpenAIProviderRejectsStreamingForResponsesModels(t *testing.T) {
+	provider := OpenAIProvider()
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openai",
+		Model:    "gpt-5.4",
+		Options: ChatOptions{
+			APIKey: "test-key",
+			Stream: true,
+		},
+		Messages: []Message{
+			{Role: "user", Content: "hi"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if got := err.Error(); got != "streaming is not supported for responses API models" {
+		t.Fatalf("error = %q", got)
+	}
+}
+
+func TestOpenAIProviderUsesProviderProfileAPIKey(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path = %q", req.URL.Path)
+		}
+		if req.Header.Get("Authorization") != "Bearer secret-deepseek-key" {
+			t.Fatalf("authorization = %q", req.Header.Get("Authorization"))
+		}
+		_, _ = fmt.Fprint(w, `{
+			"choices": [{
+				"message": {
+					"role": "assistant",
+					"content": "ok"
+				},
+				"finish_reason": "stop"
+			}]
+		}`)
+	}))
+	defer server.Close()
+
+	t.Setenv("DEEPSEEK_API_KEY", "secret-deepseek-key")
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "deep-seek",
+		Model:    "deepseek-v4-pro",
+		Options:  ChatOptions{},
+		Messages: []Message{
+			{Role: "user", Content: "hi"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenAIProviderUsesCopilotHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/chat/completions" {
+			t.Fatalf("path = %q", req.URL.Path)
+		}
+		if req.Header.Get("Authorization") != "Bearer secret-copilot-key" {
+			t.Fatalf("authorization = %q", req.Header.Get("Authorization"))
+		}
+		if req.Header.Get("User-Agent") != "GitHubCopilotChat/0.35.0" {
+			t.Fatalf("user-agent = %q", req.Header.Get("User-Agent"))
+		}
+		if req.Header.Get("Editor-Version") != "vscode/1.107.0" {
+			t.Fatalf("editor-version = %q", req.Header.Get("Editor-Version"))
+		}
+		if req.Header.Get("Editor-Plugin-Version") != "copilot-chat/0.35.0" {
+			t.Fatalf("editor-plugin-version = %q", req.Header.Get("Editor-Plugin-Version"))
+		}
+		if req.Header.Get("Copilot-Integration-Id") != "vscode-chat" {
+			t.Fatalf("copilot-integration-id = %q", req.Header.Get("Copilot-Integration-Id"))
+		}
+		if req.Header.Get("X-Initiator") != "user" {
+			t.Fatalf("x-initiator = %q", req.Header.Get("X-Initiator"))
+		}
+		if req.Header.Get("Openai-Intent") != "conversation-edits" {
+			t.Fatalf("openai-intent = %q", req.Header.Get("Openai-Intent"))
+		}
+		if got := req.Header.Get("Copilot-Vision-Request"); got != "" {
+			t.Fatalf("copilot-vision-request = %q", got)
+		}
+		_, _ = fmt.Fprint(w, `{
+			"choices": [{
+				"message": {
+					"role": "assistant",
+					"content": "ok"
+				},
+				"finish_reason": "stop"
+			}]
+		}`)
+	}))
+	defer server.Close()
+
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL))
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "github-copilot",
+		Model:    "gpt-5.4",
+		Options:  ChatOptions{APIKey: "secret-copilot-key"},
+		Messages: []Message{
+			{Role: "user", Content: "hi"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenAIProviderCopilotHeadersUseAgentInitiatorAndVisionHeaderWhenImagesPresent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Header.Get("X-Initiator") != "agent" {
+			t.Fatalf("x-initiator = %q", req.Header.Get("X-Initiator"))
+		}
+		if req.Header.Get("Openai-Intent") != "conversation-edits" {
+			t.Fatalf("openai-intent = %q", req.Header.Get("Openai-Intent"))
+		}
+		if req.Header.Get("Copilot-Vision-Request") != "true" {
+			t.Fatalf("copilot-vision-request = %q", req.Header.Get("Copilot-Vision-Request"))
+		}
+		_, _ = fmt.Fprint(w, `{
+			"choices": [{
+				"message": {
+					"role": "assistant",
+					"content": "ok"
+				},
+				"finish_reason": "stop"
+			}]
+		}`)
+	}))
+	defer server.Close()
+
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL))
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "github-copilot",
+		Model:    "gpt-5.4",
+		Options:  ChatOptions{APIKey: "secret-copilot-key"},
+		Messages: []Message{
+			{Role: "user", Content: "hi"},
+			{Role: "user", Content: []any{
+				map[string]any{
+					"type":     "image",
+					"mimeType": "image/png",
+					"data":     "aGVsbG8=",
+				},
+			}},
+			{Role: "assistant", Content: "ready"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenAIProviderSupportsAzureResponses(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/openai/v1/responses" {
+			t.Fatalf("path = %q", req.URL.Path)
+		}
+		if got := req.URL.Query().Get("api-version"); got != "test-version" {
+			t.Fatalf("api-version = %q", got)
+		}
+		if req.Header.Get("Authorization") != "Bearer secret-azure-key" {
+			t.Fatalf("authorization = %q", req.Header.Get("Authorization"))
+		}
+		_, _ = fmt.Fprint(w, `{
+			"output": [
+				{"type": "message", "role": "assistant", "content": [{"type":"output_text", "text": "ok"}]}
+			],
+			"usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+			"status": "completed"
+		}`)
+	}))
+	defer server.Close()
+
+	t.Setenv("AZURE_OPENAI_API_KEY", "secret-azure-key")
+	t.Setenv("AZURE_OPENAI_BASE_URL", server.URL+"/openai/v1")
+	t.Setenv("AZURE_OPENAI_API_VERSION", "test-version")
+	provider := OpenAIProvider()
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "azure-openai-responses",
+		Model:    "gpt-5.4",
+		Messages: []Message{
+			{Role: "user", Content: "hi"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenAIProviderAzureResponsesRequiresBaseURL(t *testing.T) {
+	t.Setenv("AZURE_OPENAI_API_KEY", "secret-azure-key")
+	t.Setenv("AZURE_OPENAI_BASE_URL", "")
+	t.Setenv("AZURE_OPENAI_RESOURCE_NAME", "")
+	provider := OpenAIProvider()
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "azure-openai-responses",
+		Model:    "gpt-5.4",
+		Messages: []Message{
+			{Role: "user", Content: "hi"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "Azure OpenAI base URL is required") {
+		t.Fatalf("error = %q", err)
+	}
+}
+
+func TestOpenAIProviderAzureResponsesUsesResourceNameFallback(t *testing.T) {
+	t.Setenv("AZURE_OPENAI_BASE_URL", "")
+	t.Setenv("AZURE_OPENAI_RESOURCE_NAME", "my-azure-resource")
+	t.Setenv("AZURE_OPENAI_API_VERSION", "")
+	t.Setenv("AZURE_OPENAI_API_KEY", "secret-azure-key")
+
+	got, err := resolveAzureOpenAIBaseURL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "https://my-azure-resource.openai.azure.com/openai/v1" {
+		t.Fatalf("resolved base URL = %q", got)
 	}
 }

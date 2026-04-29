@@ -215,6 +215,7 @@ func (s *Session) NewSession() {
 	s.Events = nil
 	s.Messages = nil
 	s.AvailableModels = nil
+	s.seedDefaultModels()
 	s.entries = nil
 	s.entriesByID = map[string]SessionEntry{}
 	s.leafID = ""
@@ -227,6 +228,15 @@ func (s *Session) NewSession() {
 	s.SteeringMode = "one-at-a-time"
 	s.FollowUpMode = "one-at-a-time"
 	s.IsStreaming = false
+}
+
+func (s *Session) seedDefaultModels() {
+	for _, model := range ai.DefaultModels() {
+		s.AvailableModels = appendModelIfMissing(s.AvailableModels, ModelInfo{
+			Provider: model.Provider,
+			ModelID:  model.ModelID,
+		})
+	}
 }
 
 func (s *Session) SetSteeringMode(mode string) error {

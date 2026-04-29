@@ -9,14 +9,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
 )
 
 const (
-	openAIProviderName   = "openai"
-	defaultOpenAIBaseURL = "https://api.openai.com/v1"
+	openAIProviderName     = "openai"
+	defaultOpenAIBaseURL   = "https://api.openai.com/v1"
+	defaultAzureAPIVersion = "v1"
 )
 
 type openAIRequest struct {
@@ -85,6 +87,137 @@ type openAIStreamChoice struct {
 	FinishReason string        `json:"finish_reason"`
 }
 
+type openAIResponsesRequest struct {
+	Model           string           `json:"model"`
+	Input           []any            `json:"input"`
+	Tools           []openAIChatTool `json:"tools,omitempty"`
+	ToolChoice      string           `json:"tool_choice,omitempty"`
+	MaxOutputTokens int              `json:"max_output_tokens,omitempty"`
+	Temperature     *float64         `json:"temperature,omitempty"`
+}
+
+type openAIResponsesResponse struct {
+	Output []any                 `json:"output"`
+	Usage  *openAIResponsesUsage `json:"usage"`
+	Status string                `json:"status"`
+}
+
+type openAIResponsesUsage struct {
+	InputTokens        int `json:"input_tokens"`
+	OutputTokens       int `json:"output_tokens"`
+	TotalTokens        int `json:"total_tokens"`
+	PromptTokens       int `json:"prompt_tokens"`
+	CompletionTokens   int `json:"completion_tokens"`
+	InputTokensDetails struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"input_tokens_details,omitempty"`
+}
+
+func splitToolCallID(raw string) (string, string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", ""
+	}
+	if strings.Contains(raw, "|") {
+		parts := strings.SplitN(raw, "|", 2)
+		callID := normalizeOpenAIResponseID(parts[0])
+		if callID == "" {
+			return "", ""
+		}
+		if len(parts) < 2 || strings.TrimSpace(parts[1]) == "" {
+			return callID, ""
+		}
+		return callID, normalizeOpenAIResponseItemID(parts[1])
+	}
+	return normalizeOpenAIResponseID(raw), ""
+}
+
+func normalizeOpenAIResponseID(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var sanitized strings.Builder
+	for _, r := range raw {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			sanitized.WriteRune(r)
+		} else {
+			sanitized.WriteRune('_')
+		}
+	}
+	value := strings.Trim(sanitized.String(), "_")
+	if value == "" {
+		return ""
+	}
+	if len(value) > 64 {
+		return value[:64]
+	}
+	return value
+}
+
+func normalizeOpenAIResponseItemID(raw string) string {
+	itemID := normalizeOpenAIResponseID(raw)
+	if itemID == "" {
+		return ""
+	}
+	if strings.HasPrefix(itemID, "fc_") {
+		return itemID
+	}
+	itemID = "fc_" + itemID
+	if len(itemID) > 64 {
+		return itemID[:64]
+	}
+	return itemID
+}
+
+func inferCopilotInitiator(messages []Message) string {
+	if len(messages) == 0 {
+		return "user"
+	}
+	lastMessage := messages[len(messages)-1]
+	if strings.TrimSpace(lastMessage.Role) == "user" {
+		return "user"
+	}
+	return "agent"
+}
+
+func hasCopilotVisionInput(messages []Message) bool {
+	for _, message := range messages {
+		if message.Role != "user" && message.Role != "toolResult" {
+			continue
+		}
+		for _, block := range messageContentBlocks(message.Content) {
+			if block.Type == "image" && strings.TrimSpace(block.Data) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func buildCopilotDynamicHeaders(messages []Message) map[string]string {
+	headers := map[string]string{
+		"X-Initiator":   inferCopilotInitiator(messages),
+		"Openai-Intent": "conversation-edits",
+	}
+	if hasCopilotVisionInput(messages) {
+		headers["Copilot-Vision-Request"] = "true"
+	}
+	return headers
+}
+
+func mergeOpenAIResponsesToolCallID(callID, itemID string) string {
+	callID = strings.TrimSpace(callID)
+	if callID == "" {
+		return ""
+	}
+	itemID = strings.TrimSpace(itemID)
+	if itemID == "" {
+		return callID
+	}
+	return callID + "|" + itemID
+}
+
 type openAIProvider struct {
 	defaultBaseURL string
 }
@@ -96,7 +229,89 @@ type openAIStreamingCall struct {
 }
 
 func init() {
-	RegisterProvider(openAIProviderName, OpenAIProvider())
+	provider := OpenAIProvider()
+	anthropicProvider := AnthropicProvider()
+	googleProvider := GoogleProvider()
+	googleCLIProvider := GoogleGeminiCLIProvider()
+	googleVertexProvider := GoogleVertexProvider()
+	bedrockProvider := BedrockProvider()
+	mistralProvider := MistralProvider()
+	codexProvider := OpenAICodexProvider()
+	RegisterProvider(openAIProviderName, provider)
+	for providerName, spec := range providerSpecs {
+		if spec.Mode == providerModeOpenAI {
+			RegisterProvider(providerName, provider)
+			continue
+		}
+		if spec.Mode == providerModeBedrock {
+			RegisterProvider(providerName, bedrockProvider)
+			continue
+		}
+		if spec.Mode == providerModeAnthropic {
+			RegisterProvider(providerName, anthropicProvider)
+			continue
+		}
+		if spec.Mode == providerModeGoogle {
+			RegisterProvider(providerName, googleProvider)
+			continue
+		}
+		if spec.Mode == providerModeGoogleCLI {
+			RegisterProvider(providerName, googleCLIProvider)
+			continue
+		}
+		if spec.Mode == providerModeGoogleVertex {
+			RegisterProvider(providerName, googleVertexProvider)
+			continue
+		}
+		if spec.Mode == providerModeMistral {
+			RegisterProvider(providerName, mistralProvider)
+			continue
+		}
+		if spec.Mode == providerModeCodex {
+			RegisterProvider(providerName, codexProvider)
+			continue
+		}
+		RegisterProvider(providerName, unsupportedProviderFor(providerName))
+	}
+	for alias := range providerAliases {
+		spec, ok := ProviderSpecForProvider(alias)
+		if !ok {
+			continue
+		}
+		if spec.Mode == providerModeOpenAI {
+			RegisterProvider(alias, provider)
+			continue
+		}
+		if spec.Mode == providerModeBedrock {
+			RegisterProvider(alias, bedrockProvider)
+			continue
+		}
+		if spec.Mode == providerModeAnthropic {
+			RegisterProvider(alias, anthropicProvider)
+			continue
+		}
+		if spec.Mode == providerModeGoogle {
+			RegisterProvider(alias, googleProvider)
+			continue
+		}
+		if spec.Mode == providerModeGoogleCLI {
+			RegisterProvider(alias, googleCLIProvider)
+			continue
+		}
+		if spec.Mode == providerModeGoogleVertex {
+			RegisterProvider(alias, googleVertexProvider)
+			continue
+		}
+		if spec.Mode == providerModeMistral {
+			RegisterProvider(alias, mistralProvider)
+			continue
+		}
+		if spec.Mode == providerModeCodex {
+			RegisterProvider(alias, codexProvider)
+			continue
+		}
+		RegisterProvider(alias, unsupportedProviderFor(spec.Name))
+	}
 }
 
 func OpenAIProvider(opts ...OpenAIProviderOption) ChatProvider {
@@ -119,12 +334,18 @@ func WithOpenAIBaseURL(baseURL string) OpenAIProviderOption {
 }
 
 func (provider *openAIProvider) Complete(ctx context.Context, req CompletionRequest) (NormalizedResult, []NormalizedEvent, error) {
+	providerSpec, hasProviderSpec := ProviderSpecForProvider(req.Provider)
+	useResponsesAPI := shouldUseOpenAIResponses(req.Provider, req.Model)
 	apiKey := strings.TrimSpace(req.Options.APIKey)
-	if apiKey == "" {
-		apiKey = strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+	if apiKey == "" && hasProviderSpec {
+		apiKey, _ = ProviderAPIKey(req.Provider)
 	}
 	if apiKey == "" {
-		return NormalizedResult{}, nil, errors.New("missing OPENAI_API_KEY")
+		providerName := strings.TrimSpace(req.Provider)
+		if providerName == "" {
+			providerName = openAIProviderName
+		}
+		return NormalizedResult{}, nil, fmt.Errorf("missing API key for provider: %s", providerName)
 	}
 	if strings.TrimSpace(req.Model) == "" {
 		return NormalizedResult{}, nil, errors.New("model is required")
@@ -132,7 +353,22 @@ func (provider *openAIProvider) Complete(ctx context.Context, req CompletionRequ
 
 	baseURL := strings.TrimSpace(req.Options.BaseURL)
 	if baseURL == "" {
-		baseURL = strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
+		if hasProviderSpec && providerSpec.Name == "azure-openai-responses" {
+			resolved, err := resolveAzureOpenAIBaseURL()
+			if err != nil {
+				return NormalizedResult{}, nil, err
+			}
+			baseURL = resolved
+		}
+		if hasProviderSpec && providerSpec.Name == openAIProviderName {
+			baseURL = strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
+		}
+		if baseURL == "" && provider.defaultBaseURL != "" && strings.TrimSpace(provider.defaultBaseURL) != defaultOpenAIBaseURL {
+			baseURL = strings.TrimSpace(provider.defaultBaseURL)
+		}
+		if baseURL == "" && hasProviderSpec {
+			baseURL = strings.TrimSpace(providerSpec.BaseURL)
+		}
 		if baseURL == "" {
 			baseURL = strings.TrimSpace(provider.defaultBaseURL)
 		}
@@ -141,21 +377,270 @@ func (provider *openAIProvider) Complete(ctx context.Context, req CompletionRequ
 		baseURL = defaultOpenAIBaseURL
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
-	if !strings.HasSuffix(baseURL, "/chat/completions") {
+	if useResponsesAPI {
+		if !strings.HasSuffix(baseURL, "/responses") {
+			baseURL = baseURL + "/responses"
+		}
+		if hasProviderSpec && providerSpec.Name == "azure-openai-responses" {
+			baseURL = ensureAzureOpenAIAPIVersion(baseURL)
+		}
+	} else if !strings.HasSuffix(baseURL, "/chat/completions") {
 		baseURL = baseURL + "/chat/completions"
 	}
 
-	payload := openAIRequest{
-		Model:    req.Model,
-		Messages: toOpenAIMessages(req.Messages),
-		Stream:   req.Options.Stream,
+	if useResponsesAPI && req.Options.Stream {
+		return NormalizedResult{}, nil, errors.New("streaming is not supported for responses API models")
+	}
+
+	var requestBody any
+	var data []byte
+	if useResponsesAPI {
+		payload := toOpenAIResponsesRequest(req)
+		requestBody = payload
+	} else {
+		payload := openAIRequest{
+			Model:    req.Model,
+			Messages: toOpenAIMessages(req.Messages),
+			Stream:   req.Options.Stream,
+		}
+		if req.Options.MaxTokens > 0 {
+			payload.MaxTokens = req.Options.MaxTokens
+		}
+		if req.Options.Temperature != nil {
+			payload.Temperature = req.Options.Temperature
+		}
+		if len(req.Tools) > 0 {
+			payload.Tools = make([]openAIChatTool, 0, len(req.Tools))
+			payload.ToolChoice = strings.TrimSpace(req.Options.ToolChoice)
+			if payload.ToolChoice == "" {
+				payload.ToolChoice = "auto"
+			}
+			for _, tool := range req.Tools {
+				parameters := tool.Parameters
+				if parameters == nil {
+					parameters = map[string]any{
+						"type":                 "object",
+						"properties":           map[string]any{},
+						"additionalProperties": true,
+					}
+				}
+				payload.Tools = append(payload.Tools, openAIChatTool{
+					Type: "function",
+					Function: openAIFunctionDescriptor{
+						Name:        tool.Name,
+						Description: strings.TrimSpace(tool.Description),
+						Parameters:  parameters,
+					},
+				})
+			}
+		}
+		requestBody = payload
+	}
+
+	data, err := json.Marshal(requestBody)
+	if err != nil {
+		return NormalizedResult{}, nil, fmt.Errorf("marshal openai payload: %w", err)
+	}
+
+	httpClient := req.Options.HTTPClient
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	if req.Options.Timeout > 0 {
+		cloned := *httpClient
+		cloned.Timeout = req.Options.Timeout
+		httpClient = &cloned
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL, bytes.NewReader(data))
+	if err != nil {
+		return NormalizedResult{}, nil, fmt.Errorf("create openai request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if hasProviderSpec {
+		for key, value := range providerSpec.DefaultHeader {
+			httpReq.Header.Set(key, value)
+		}
+	}
+	if hasProviderSpec && providerSpec.Name == "github-copilot" {
+		for key, value := range buildCopilotDynamicHeaders(req.Messages) {
+			httpReq.Header.Set(key, value)
+		}
+	}
+	for key, value := range req.Options.Headers {
+		httpReq.Header.Set(key, value)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: err.Error()}, nil, err
+		}
+		return NormalizedResult{}, nil, fmt.Errorf("call openai API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		if len(body) == 0 {
+			return NormalizedResult{}, nil, fmt.Errorf("openai API error: %s", resp.Status)
+		}
+		return NormalizedResult{}, nil, fmt.Errorf("openai API error: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	if req.Options.Stream && !useResponsesAPI {
+		result, events, streamErr := openAIStreamToResult(resp.Body)
+		if streamErr != nil {
+			return NormalizedResult{}, nil, streamErr
+		}
+		return result, events, nil
+	}
+
+	if useResponsesAPI {
+		result, events, responseErr := openAIResponsesToResult(resp.Body)
+		if responseErr != nil {
+			return NormalizedResult{}, nil, responseErr
+		}
+		return result, events, nil
+	}
+
+	var completion openAIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&completion); err != nil {
+		return NormalizedResult{}, nil, fmt.Errorf("parse openai response: %w", err)
+	}
+	if len(completion.Choices) == 0 {
+		return NormalizedResult{Role: "assistant", StopReason: "error", ErrorMessage: "openai response missing choices"}, nil,
+			errors.New("openai response missing choices")
+	}
+
+	result := openAIChoiceToNormalized(completion.Choices[0])
+	if completion.Usage != nil {
+		result.Usage = &Usage{
+			Input:       completion.Usage.PromptTokens,
+			Output:      completion.Usage.CompletionTokens,
+			CacheRead:   0,
+			CacheWrite:  0,
+			TotalTokens: completion.Usage.TotalTokens,
+		}
+	}
+	return result, AssistantEvents(result.contentBlocks(), result.StopReason), nil
+}
+
+func shouldUseOpenAIResponses(provider, model string) bool {
+	if strings.TrimSpace(model) == "" {
+		return false
+	}
+	if strings.TrimSpace(provider) != "" {
+		provider = strings.TrimSpace(strings.ToLower(provider))
+		if provider != openAIProviderName && provider != "azure-openai-responses" {
+			return false
+		}
+	}
+	model = strings.ToLower(strings.TrimSpace(model))
+	if strings.HasPrefix(model, "gpt-5") || strings.HasPrefix(model, "oswe") {
+		return true
+	}
+	return false
+}
+
+func toOpenAIResponsesRequest(req CompletionRequest) openAIResponsesRequest {
+	payload := openAIResponsesRequest{
+		Model: req.Model,
+		Input: make([]any, 0, len(req.Messages)*2),
 	}
 	if req.Options.MaxTokens > 0 {
-		payload.MaxTokens = req.Options.MaxTokens
+		payload.MaxOutputTokens = req.Options.MaxTokens
 	}
 	if req.Options.Temperature != nil {
 		payload.Temperature = req.Options.Temperature
 	}
+
+	for _, message := range req.Messages {
+		switch message.Role {
+		case "user":
+			parts := messageContentBlocks(message.Content)
+			content := make([]string, 0, len(parts))
+			for _, block := range parts {
+				if block.Type == "text" && strings.TrimSpace(block.Text) != "" {
+					content = append(content, block.Text)
+				}
+			}
+			if len(content) == 0 {
+				contentText := MessageText(message)
+				if strings.TrimSpace(contentText) != "" {
+					content = append(content, contentText)
+				}
+			}
+			joined := strings.Join(content, "")
+			if strings.TrimSpace(joined) == "" {
+				continue
+			}
+			payload.Input = append(payload.Input, map[string]any{
+				"role": "user",
+				"content": []map[string]any{{
+					"type": "input_text",
+					"text": joined,
+				}},
+			})
+
+		case "assistant":
+			text := ""
+			for _, block := range messageContentBlocks(message.Content) {
+				switch block.Type {
+				case "text":
+					if strings.TrimSpace(block.Text) != "" {
+						if text == "" {
+							text = block.Text
+						} else {
+							text += block.Text
+						}
+					}
+				case "toolCall":
+					callID, itemID := splitToolCallID(block.ID)
+					if callID == "" {
+						continue
+					}
+					arguments := "{}"
+					if marshaled, err := json.Marshal(block.Arguments); err == nil {
+						arguments = string(marshaled)
+					}
+					item := map[string]any{
+						"type":      "function_call",
+						"call_id":   callID,
+						"name":      block.Name,
+						"arguments": arguments,
+					}
+					if strings.TrimSpace(itemID) != "" {
+						item["id"] = itemID
+					}
+					payload.Input = append(payload.Input, item)
+				}
+			}
+			if strings.TrimSpace(text) != "" {
+				payload.Input = append(payload.Input, map[string]any{
+					"type": "message",
+					"role": "assistant",
+					"content": []map[string]any{{
+						"type": "output_text",
+						"text": text,
+					}},
+				})
+			}
+
+		case "toolResult":
+			callID, _ := splitToolCallID(message.ToolCallID)
+			if callID == "" {
+				continue
+			}
+			payload.Input = append(payload.Input, map[string]any{
+				"type":    "function_call_output",
+				"call_id": callID,
+				"output":  MessageText(message),
+			})
+		}
+	}
+
 	if len(req.Tools) > 0 {
 		payload.Tools = make([]openAIChatTool, 0, len(req.Tools))
 		payload.ToolChoice = strings.TrimSpace(req.Options.ToolChoice)
@@ -181,74 +666,155 @@ func (provider *openAIProvider) Complete(ctx context.Context, req CompletionRequ
 			})
 		}
 	}
+	return payload
+}
 
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return NormalizedResult{}, nil, fmt.Errorf("marshal openai payload: %w", err)
+func openAIResponsesToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, error) {
+	var response openAIResponsesResponse
+	if err := json.NewDecoder(body).Decode(&response); err != nil {
+		return NormalizedResult{}, nil, fmt.Errorf("parse openai responses payload: %w", err)
 	}
 
-	httpClient := req.Options.HTTPClient
-	if httpClient == nil {
-		httpClient = http.DefaultClient
+	blocks, hasToolCalls := openAIResponsesContentToBlocks(response.Output)
+	stopReason := mapOpenAIResponsesStopReason(response.Status)
+	if stopReason == "" {
+		stopReason = "stop"
 	}
-	if req.Options.Timeout > 0 {
-		cloned := *httpClient
-		cloned.Timeout = req.Options.Timeout
-		httpClient = &cloned
+	if stopReason == "stop" && hasToolCalls {
+		stopReason = "toolUse"
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL, bytes.NewReader(data))
-	if err != nil {
-		return NormalizedResult{}, nil, fmt.Errorf("create openai request: %w", err)
+	result := NormalizedResult{
+		Role:       "assistant",
+		StopReason: mapOpenAIStopReason(stopReason),
+		Text:       ContentText(blocks),
+		Content:    NormalizedContent(blocks),
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-
-	resp, err := httpClient.Do(httpReq)
-	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: err.Error()}, nil, err
+	if response.Usage != nil {
+		inputTokens := response.Usage.InputTokens
+		if inputTokens == 0 {
+			inputTokens = response.Usage.PromptTokens
 		}
-		return NormalizedResult{}, nil, fmt.Errorf("call openai API: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		if len(body) == 0 {
-			return NormalizedResult{}, nil, fmt.Errorf("openai API error: %s", resp.Status)
+		outputTokens := response.Usage.OutputTokens
+		if outputTokens == 0 {
+			outputTokens = response.Usage.CompletionTokens
 		}
-		return NormalizedResult{}, nil, fmt.Errorf("openai API error: %s: %s", resp.Status, strings.TrimSpace(string(body)))
-	}
-
-	if req.Options.Stream {
-		result, events, streamErr := openAIStreamToResult(resp.Body)
-		if streamErr != nil {
-			return NormalizedResult{}, nil, streamErr
+		cacheRead := 0
+		if response.Usage.InputTokensDetails.CachedTokens != 0 {
+			cacheRead = response.Usage.InputTokensDetails.CachedTokens
 		}
-		return result, events, nil
-	}
-
-	var completion openAIResponse
-	if err := json.NewDecoder(resp.Body).Decode(&completion); err != nil {
-		return NormalizedResult{}, nil, fmt.Errorf("parse openai response: %w", err)
-	}
-	if len(completion.Choices) == 0 {
-		return NormalizedResult{Role: "assistant", StopReason: "error", ErrorMessage: "openai response missing choices"}, nil,
-			errors.New("openai response missing choices")
-	}
-
-	result := openAIChoiceToNormalized(completion.Choices[0])
-	if completion.Usage != nil {
+		if cacheRead > inputTokens {
+			cacheRead = inputTokens
+		}
+		input := inputTokens - cacheRead
+		if input < 0 {
+			input = 0
+		}
 		result.Usage = &Usage{
-			Input:       completion.Usage.PromptTokens,
-			Output:      completion.Usage.CompletionTokens,
-			CacheRead:   0,
-			CacheWrite:  0,
-			TotalTokens: completion.Usage.TotalTokens,
+			Input:       input,
+			Output:      outputTokens,
+			CacheRead:   cacheRead,
+			TotalTokens: response.Usage.TotalTokens,
 		}
 	}
-	return result, AssistantEvents(result.contentBlocks(), result.StopReason), nil
+
+	return result, AssistantEvents(blocks, result.StopReason), nil
+}
+
+func mapOpenAIResponsesStopReason(status string) string {
+	switch status {
+	case "completed":
+		return "stop"
+	case "incomplete":
+		return "length"
+	case "failed", "cancelled":
+		return "error"
+	case "aborted":
+		return "aborted"
+	case "queued", "in_progress":
+		return "stop"
+	case "":
+		return ""
+	default:
+		return "error"
+	}
+}
+
+func openAIResponsesContentToBlocks(raw []any) ([]ContentBlock, bool) {
+	blocks := make([]ContentBlock, 0)
+	hasToolCalls := false
+
+	for _, item := range raw {
+		itemMap, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		typeValue := asString(itemMap["type"])
+		switch typeValue {
+		case "message":
+			contents, ok := itemMap["content"].([]any)
+			if !ok {
+				continue
+			}
+			for _, content := range contents {
+				asMap, ok := content.(map[string]any)
+				if !ok {
+					continue
+				}
+				contentType := asString(asMap["type"])
+				switch contentType {
+				case "output_text", "text", "refusal":
+					text := asString(asMap["text"])
+					if strings.TrimSpace(text) != "" {
+						blocks = append(blocks, ContentBlock{Type: "text", Text: text})
+					}
+				case "tool_call", "function_call":
+					hasToolCalls = true
+					arguments := asResponseArguments(asMap["arguments"])
+					if len(arguments) == 0 {
+						arguments = asResponseArguments(asMap["input"])
+					}
+					blocks = append(blocks, ContentBlock{
+						Type:      "toolCall",
+						ID:        mergeOpenAIResponsesToolCallID(asString(asMap["call_id"]), asString(asMap["id"])),
+						Name:      asString(asMap["name"]),
+						Arguments: arguments,
+					})
+				}
+			}
+		case "tool_call", "function_call":
+			hasToolCalls = true
+			arguments := asResponseArguments(itemMap["arguments"])
+			if len(arguments) == 0 {
+				arguments = asResponseArguments(itemMap["input"])
+			}
+			blocks = append(blocks, ContentBlock{
+				Type:      "toolCall",
+				ID:        mergeOpenAIResponsesToolCallID(asString(itemMap["call_id"]), asString(itemMap["id"])),
+				Name:      asString(itemMap["name"]),
+				Arguments: arguments,
+			})
+		}
+	}
+	return blocks, hasToolCalls
+}
+
+func asResponseArguments(value any) map[string]any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return typed
+	case string:
+		if strings.TrimSpace(typed) == "" {
+			return map[string]any{}
+		}
+		parsed := map[string]any{}
+		if err := json.Unmarshal([]byte(typed), &parsed); err == nil {
+			return parsed
+		}
+		return map[string]any{"arguments": typed}
+	default:
+		return map[string]any{}
+	}
 }
 
 func openAIChoiceToNormalized(choice openAIChoice) NormalizedResult {
@@ -278,6 +844,37 @@ func openAIChoiceToNormalized(choice openAIChoice) NormalizedResult {
 		Text:       ContentText(blocks),
 		Content:    NormalizedContent(blocks),
 	}
+}
+
+func resolveAzureOpenAIBaseURL() (string, error) {
+	baseURL := strings.TrimSpace(os.Getenv("AZURE_OPENAI_BASE_URL"))
+	if baseURL != "" {
+		return baseURL, nil
+	}
+	resourceName := strings.TrimSpace(os.Getenv("AZURE_OPENAI_RESOURCE_NAME"))
+	if resourceName != "" {
+		return "https://" + resourceName + ".openai.azure.com/openai/v1", nil
+	}
+	return "", errors.New(
+		"Azure OpenAI base URL is required. Set AZURE_OPENAI_BASE_URL or AZURE_OPENAI_RESOURCE_NAME.",
+	)
+}
+
+func ensureAzureOpenAIAPIVersion(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	apiVersion := strings.TrimSpace(os.Getenv("AZURE_OPENAI_API_VERSION"))
+	if apiVersion == "" {
+		apiVersion = defaultAzureAPIVersion
+	}
+	query := parsed.Query()
+	if query.Get("api-version") == "" {
+		query.Set("api-version", apiVersion)
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }
 
 func openAIStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, error) {

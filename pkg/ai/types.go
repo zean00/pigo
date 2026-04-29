@@ -50,6 +50,8 @@ type ChatOptions struct {
 	HTTPClient *http.Client
 	// Timeout for requests when set.
 	Timeout time.Duration
+	// Headers provides request-time provider headers.
+	Headers map[string]string
 	// ToolChoice controls OpenAI-style tool call behavior.
 	ToolChoice string
 }

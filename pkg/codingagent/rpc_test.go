@@ -147,11 +147,18 @@ func TestRPCModelAndModes(t *testing.T) {
 		t.Fatalf("set_model failed = %#v", responses[0])
 	}
 	models := responses[1]["data"].(map[string]any)["models"].([]any)
-	if len(models) != 1 {
+	if len(models) <= 1 {
 		t.Fatalf("available models = %#v", models)
 	}
-	if _, hasData := responses[2]["data"]; hasData && responses[2]["data"] != nil {
-		t.Fatalf("cycle_model should return null when only one model: %#v", responses[2])
+	data := responses[2]["data"].(map[string]any)
+	modelPayload, ok := data["model"].(map[string]any)
+	if !ok {
+		t.Fatalf("cycle_model should return model payload: %#v", data)
+	}
+	nextProvider, providerOK := modelPayload["provider"].(string)
+	nextModel, modelOK := modelPayload["id"].(string)
+	if !providerOK || !modelOK || nextProvider == "" || nextModel == "" {
+		t.Fatalf("cycle_model should return model: %#v", data)
 	}
 	state := responses[5]["data"].(map[string]any)
 	if state["steeringMode"] != "all" || state["followUpMode"] != "all" {

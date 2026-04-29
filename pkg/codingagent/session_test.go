@@ -54,6 +54,28 @@ func TestResolveWorkspacePathRejectsEscape(t *testing.T) {
 	}
 }
 
+func TestNewSessionSeedsAvailableModels(t *testing.T) {
+	session := NewSession(t.TempDir(), nil)
+	if len(session.AvailableModels) == 0 {
+		t.Fatal("expected default available models")
+	}
+	modelsByProvider := map[string]struct{}{}
+	for _, model := range session.AvailableModels {
+		modelsByProvider[model.Provider+"/"+model.ModelID] = struct{}{}
+	}
+	var expected int
+	for _, expectedModel := range ai.DefaultModels() {
+		key := expectedModel.Provider + "/" + expectedModel.ModelID
+		if _, ok := modelsByProvider[key]; !ok {
+			t.Fatalf("missing default model %s", key)
+		}
+		expected++
+	}
+	if len(session.AvailableModels) < expected {
+		t.Fatalf("expected at least %d models, got %d", expected, len(session.AvailableModels))
+	}
+}
+
 func TestWorkspaceEdit(t *testing.T) {
 	root := t.TempDir()
 	if err := WriteWorkspaceFile(root, "notes.txt", "hello old world\n"); err != nil {

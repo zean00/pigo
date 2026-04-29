@@ -179,6 +179,7 @@ func RunProviderLoop(ctx context.Context, input ProviderLoopInput) (LoopResult, 
 				BaseURL:     input.Options.BaseURL,
 				HTTPClient:  input.Options.HTTPClient,
 				Timeout:     input.Options.Timeout,
+				Headers:     input.Options.Headers,
 			},
 		}
 		resultMessage, _, err := ai.Complete(ctx, request)

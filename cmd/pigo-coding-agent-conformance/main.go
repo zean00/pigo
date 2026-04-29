@@ -1,0 +1,25 @@
+package main
+
+import (
+	"log"
+
+	"github.com/badlogic/pigo/pkg/conformance"
+)
+
+func main() {
+	casePath, err := conformance.CasePathFromFlags()
+	if err != nil {
+		log.Fatal(err)
+	}
+	testCase, err := conformance.ReadJSON[conformance.CodingAgentCase](casePath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	output, err := conformance.RunCodingAgent(testCase)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := conformance.WriteJSON(output); err != nil {
+		log.Fatal(err)
+	}
+}

@@ -1,0 +1,45 @@
+{
+	"name": "coding_agent_headless_read_error",
+	"model": {
+		"provider": "faux",
+		"id": "faux-1"
+	},
+	"workspace": {
+		"files": {}
+	},
+	"prompts": ["Try to read a missing file, then summarize."],
+	"assistantTurns": [
+		{
+			"stopReason": "toolUse",
+			"content": [
+				{
+					"type": "toolCall",
+					"id": "read-1",
+					"name": "read",
+					"arguments": {
+						"path": "missing.txt"
+					}
+				}
+			]
+		},
+		{
+			"stopReason": "stop",
+			"content": "Read failed as expected."
+		}
+	],
+	"options": {
+		"tools": ["read"]
+	},
+	"expect": {
+		"finalMessageRoles": ["user", "assistant", "toolResult", "assistant"],
+		"finalTextContains": ["Read failed as expected."],
+		"sessionEntryTypes": ["model_change", "thinking_level_change", "message"],
+		"toolResults": [
+			{
+				"toolName": "read",
+				"textContains": "missing.txt",
+				"isError": true
+			}
+		]
+	}
+}

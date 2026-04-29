@@ -1,0 +1,103 @@
+{
+	"name": "agent_multi_tool",
+	"model": {
+		"provider": "openai",
+		"id": "gpt-4o-mini"
+	},
+	"context": {
+		"systemPrompt": "Use tools when useful.",
+		"messages": [],
+		"tools": [
+			{
+				"name": "first",
+				"description": "Return the first value",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"value": { "type": "string" }
+					},
+					"required": ["value"]
+				},
+				"result": {
+					"text": "first: alpha"
+				}
+			},
+			{
+				"name": "second",
+				"description": "Return the second value",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"value": { "type": "string" }
+					},
+					"required": ["value"]
+				},
+				"result": {
+					"text": "second: beta"
+				}
+			}
+		]
+	},
+	"prompts": [
+		{
+			"role": "user",
+			"content": "Call both tools, then finish."
+		}
+	],
+	"assistantTurns": [
+		{
+			"stopReason": "toolUse",
+			"content": [
+				{
+					"type": "toolCall",
+					"id": "tool-1",
+					"name": "first",
+					"arguments": { "value": "alpha" }
+				},
+				{
+					"type": "toolCall",
+					"id": "tool-2",
+					"name": "second",
+					"arguments": { "value": "beta" }
+				}
+			]
+		},
+		{
+			"stopReason": "stop",
+			"content": [{ "type": "text", "text": "done with both" }]
+		}
+	],
+	"options": {
+		"toolExecution": "sequential"
+	},
+	"expect": {
+		"finalMessageRoles": ["user", "assistant", "toolResult", "toolResult", "assistant"],
+		"finalTextContains": ["done with both"],
+		"toolExecutions": [
+			{
+				"toolCallId": "tool-1",
+				"toolName": "first",
+				"isError": false
+			},
+			{
+				"toolCallId": "tool-2",
+				"toolName": "second",
+				"isError": false
+			}
+		],
+		"toolResults": [
+			{
+				"toolCallId": "tool-1",
+				"toolName": "first",
+				"textContains": "first: alpha",
+				"isError": false
+			},
+			{
+				"toolCallId": "tool-2",
+				"toolName": "second",
+				"textContains": "second: beta",
+				"isError": false
+			}
+		]
+	}
+}

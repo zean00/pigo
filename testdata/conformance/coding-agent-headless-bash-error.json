@@ -1,0 +1,45 @@
+{
+	"name": "coding_agent_headless_bash_error",
+	"model": {
+		"provider": "faux",
+		"id": "faux-1"
+	},
+	"workspace": {
+		"files": {}
+	},
+	"prompts": ["Run a failing command, then summarize."],
+	"assistantTurns": [
+		{
+			"stopReason": "toolUse",
+			"content": [
+				{
+					"type": "toolCall",
+					"id": "bash-1",
+					"name": "bash",
+					"arguments": {
+						"command": "printf nope && exit 7"
+					}
+				}
+			]
+		},
+		{
+			"stopReason": "stop",
+			"content": "Command failed as expected."
+		}
+	],
+	"options": {
+		"tools": ["bash"]
+	},
+	"expect": {
+		"finalMessageRoles": ["user", "assistant", "toolResult", "assistant"],
+		"finalTextContains": ["Command failed as expected."],
+		"sessionEntryTypes": ["model_change", "thinking_level_change", "message"],
+		"toolResults": [
+			{
+				"toolName": "bash",
+				"textContains": "code 7",
+				"isError": true
+			}
+		]
+	}
+}

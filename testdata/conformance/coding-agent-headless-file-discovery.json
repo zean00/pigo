@@ -1,0 +1,95 @@
+{
+	"name": "coding_agent_headless_file_discovery",
+	"model": {
+		"provider": "faux",
+		"id": "faux-1"
+	},
+	"workspace": {
+		"files": {
+			"README.md": "hello docs\n",
+			"src/main.go": "package main\nfunc main() {}\n"
+		}
+	},
+	"prompts": ["Inspect the workspace files, then summarize."],
+	"assistantTurns": [
+		{
+			"stopReason": "toolUse",
+			"content": [
+				{
+					"type": "toolCall",
+					"id": "ls-1",
+					"name": "ls",
+					"arguments": {
+						"path": "."
+					}
+				}
+			]
+		},
+		{
+			"stopReason": "toolUse",
+			"content": [
+				{
+					"type": "toolCall",
+					"id": "grep-1",
+					"name": "grep",
+					"arguments": {
+						"path": ".",
+						"pattern": "hello"
+					}
+				}
+			]
+		},
+		{
+			"stopReason": "toolUse",
+			"content": [
+				{
+					"type": "toolCall",
+					"id": "find-1",
+					"name": "find",
+					"arguments": {
+						"path": ".",
+						"pattern": "*.go"
+					}
+				}
+			]
+		},
+		{
+			"stopReason": "stop",
+			"content": "Inspected workspace files."
+		}
+	],
+	"options": {
+		"tools": ["ls", "grep", "find"]
+	},
+	"expect": {
+		"finalMessageRoles": [
+			"user",
+			"assistant",
+			"toolResult",
+			"assistant",
+			"toolResult",
+			"assistant",
+			"toolResult",
+			"assistant"
+		],
+		"finalTextContains": ["Inspected workspace files."],
+		"sessionEntryTypes": ["model_change", "thinking_level_change", "message"],
+		"toolResults": [
+			{
+				"toolName": "ls",
+				"textContains": "README.md",
+				"isError": false
+			},
+			{
+				"toolName": "grep",
+				"textContains": "README.md",
+				"isError": false
+			},
+			{
+				"toolName": "find",
+				"textContains": "src/main.go",
+				"isError": false
+			}
+		]
+	}
+}

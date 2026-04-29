@@ -1,0 +1,827 @@
+package codingagent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/badlogic/pigo/pkg/agentcore"
+	"github.com/badlogic/pigo/pkg/ai"
+	"golang.org/x/text/unicode/norm"
+)
+
+type AssistantTurn = agentcore.AssistantTurn
+
+type SessionInput struct {
+	WorkspaceFiles map[string]string
+	Prompts        []string
+	Turns          []AssistantTurn
+	ExpectedFiles  []string
+}
+
+type SessionResult struct {
+	Events            []agentcore.Event
+	Messages          []agentcore.Message
+	SessionEntryTypes []string
+	Files             map[string]string
+}
+
+func RunHeadlessSession(ctx context.Context, root string, input SessionInput) (SessionResult, error) {
+	for name, content := range input.WorkspaceFiles {
+		if err := WriteWorkspaceFile(root, name, content); err != nil {
+			return SessionResult{}, err
+		}
+	}
+
+	session := NewSession(root, input.Turns)
+	for _, prompt := range input.Prompts {
+		if err := session.Prompt(ctx, prompt); err != nil {
+			return SessionResult{}, err
+		}
+	}
+
+	files := map[string]string{}
+	for _, name := range input.ExpectedFiles {
+		path, err := ResolveWorkspacePath(root, name)
+		if err != nil {
+			return SessionResult{}, err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return SessionResult{}, err
+		}
+		files[name] = string(data)
+	}
+
+	return SessionResult{
+		Events:            session.Events,
+		Messages:          session.Messages,
+		SessionEntryTypes: session.SessionEntryTypes,
+		Files:             files,
+	}, nil
+}
+
+func BuiltinTools(root string) []agentcore.Tool {
+	return []agentcore.Tool{
+		{
+			Name: "bash",
+			Execute: func(ctx context.Context, call ai.ContentBlock) agentcore.ToolResult {
+				command, _ := call.Arguments["command"].(string)
+				timeoutSeconds, _ := call.Arguments["timeout"].(float64)
+				output, exitCode, err := RunBashCommand(ctx, root, command, timeoutSeconds)
+				if err != nil {
+					return agentcore.ToolResult{Text: err.Error(), IsError: true}
+				}
+				if output == "" {
+					output = "(no output)"
+				}
+				if exitCode != 0 {
+					return agentcore.ToolResult{
+						Text:    fmt.Sprintf("%s\n\nCommand exited with code %d", strings.TrimRight(output, "\n"), exitCode),
+						IsError: true,
+					}
+				}
+				return agentcore.ToolResult{Text: output}
+			},
+		},
+		{
+			Name: "write",
+			Execute: func(_ context.Context, call ai.ContentBlock) agentcore.ToolResult {
+				path, _ := call.Arguments["path"].(string)
+				content, _ := call.Arguments["content"].(string)
+				if err := WriteWorkspaceFile(root, path, content); err != nil {
+					return agentcore.ToolResult{Text: err.Error(), IsError: true}
+				}
+				return agentcore.ToolResult{Text: fmt.Sprintf("Successfully wrote %d bytes to %s", len(content), path)}
+			},
+		},
+		{
+			Name: "read",
+			Execute: func(_ context.Context, call ai.ContentBlock) agentcore.ToolResult {
+				path, _ := call.Arguments["path"].(string)
+				absolutePath, err := ResolveWorkspacePath(root, path)
+				if err != nil {
+					return agentcore.ToolResult{Text: err.Error(), IsError: true}
+				}
+				data, err := os.ReadFile(absolutePath)
+				if err != nil {
+					return agentcore.ToolResult{Text: err.Error(), IsError: true}
+				}
+				return agentcore.ToolResult{Text: string(data)}
+			},
+		},
+		{
+			Name: "edit",
+			Execute: func(_ context.Context, call ai.ContentBlock) agentcore.ToolResult {
+				path, _ := call.Arguments["path"].(string)
+				edits, err := parseWorkspaceEdits(call.Arguments)
+				if err != nil {
+					return agentcore.ToolResult{Text: err.Error(), IsError: true}
+				}
+				if err := EditWorkspaceFile(root, path, edits); err != nil {
+					return agentcore.ToolResult{Text: err.Error(), IsError: true}
+				}
+				return agentcore.ToolResult{
+					Text: fmt.Sprintf("Successfully replaced %d block(s) in %s.", len(edits), path),
+				}
+			},
+		},
+		{
+			Name: "ls",
+			Execute: func(_ context.Context, call ai.ContentBlock) agentcore.ToolResult {
+				path, _ := call.Arguments["path"].(string)
+				if path == "" {
+					path = "."
+				}
+				absolutePath, err := ResolveWorkspacePath(root, path)
+				if err != nil {
+					return agentcore.ToolResult{Text: err.Error(), IsError: true}
+				}
+				entries, err := os.ReadDir(absolutePath)
+				if err != nil {
+					return agentcore.ToolResult{Text: err.Error(), IsError: true}
+				}
+				names := make([]string, 0, len(entries))
+				for _, entry := range entries {
+					name := entry.Name()
+					if entry.IsDir() {
+						name += "/"
+					}
+					names = append(names, name)
+				}
+				return agentcore.ToolResult{Text: strings.Join(names, "\n")}
+			},
+		},
+		{
+			Name: "grep",
+			Execute: func(_ context.Context, call ai.ContentBlock) agentcore.ToolResult {
+				pattern, _ := call.Arguments["pattern"].(string)
+				path, _ := call.Arguments["path"].(string)
+				if path == "" {
+					path = "."
+				}
+				text, err := GrepWorkspace(root, path, pattern)
+				if err != nil {
+					return agentcore.ToolResult{Text: err.Error(), IsError: true}
+				}
+				return agentcore.ToolResult{Text: text}
+			},
+		},
+		{
+			Name: "find",
+			Execute: func(_ context.Context, call ai.ContentBlock) agentcore.ToolResult {
+				pattern, _ := call.Arguments["pattern"].(string)
+				path, _ := call.Arguments["path"].(string)
+				if path == "" {
+					path = "."
+				}
+				text, err := FindWorkspace(root, path, pattern)
+				if err != nil {
+					return agentcore.ToolResult{Text: err.Error(), IsError: true}
+				}
+				return agentcore.ToolResult{Text: text}
+			},
+		},
+	}
+}
+
+func BuiltinToolSpecs() []ai.Tool {
+	return []ai.Tool{
+		{
+			Name:        "bash",
+			Description: "Execute a shell command",
+			Parameters: map[string]any{
+				"type":                 "object",
+				"properties":           map[string]any{"command": map[string]any{"type": "string"}, "timeout": map[string]any{"type": "number"}},
+				"required":             []string{"command"},
+				"additionalProperties": false,
+			},
+		},
+		{
+			Name:        "write",
+			Description: "Write a complete file",
+			Parameters: map[string]any{
+				"type":                 "object",
+				"properties":           map[string]any{"path": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}},
+				"required":             []string{"path", "content"},
+				"additionalProperties": false,
+			},
+		},
+		{
+			Name:        "read",
+			Description: "Read a file",
+			Parameters: map[string]any{
+				"type":                 "object",
+				"properties":           map[string]any{"path": map[string]any{"type": "string"}},
+				"required":             []string{"path"},
+				"additionalProperties": false,
+			},
+		},
+		{
+			Name:        "edit",
+			Description: "Apply text edits to a file",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"path": map[string]any{"type": "string"},
+					"edits": map[string]any{
+						"type":     "array",
+						"items":    map[string]any{"type": "object"},
+						"required": []string{"oldText", "newText"},
+					},
+				},
+				"required":             []string{"path", "edits"},
+				"additionalProperties": false,
+			},
+		},
+		{
+			Name:        "ls",
+			Description: "List files in a directory",
+			Parameters: map[string]any{
+				"type":                 "object",
+				"properties":           map[string]any{"path": map[string]any{"type": "string"}},
+				"additionalProperties": false,
+			},
+		},
+		{
+			Name:        "grep",
+			Description: "Search file contents",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"pattern": map[string]any{"type": "string"},
+					"path":    map[string]any{"type": "string"},
+				},
+				"required":             []string{"pattern", "path"},
+				"additionalProperties": false,
+			},
+		},
+		{
+			Name:        "find",
+			Description: "Find files using glob pattern",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"pattern": map[string]any{"type": "string"},
+					"path":    map[string]any{"type": "string"},
+				},
+				"required":             []string{"pattern", "path"},
+				"additionalProperties": false,
+			},
+		},
+	}
+}
+
+func RunBashCommand(ctx context.Context, root, command string, timeoutSeconds float64) (string, int, error) {
+	if command == "" {
+		return "", 0, fmt.Errorf("bash command is empty")
+	}
+	if timeoutSeconds > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(timeoutSeconds*float64(time.Second)))
+		defer cancel()
+	}
+	cmd := exec.CommandContext(ctx, "bash", "-lc", command)
+	cmd.Dir = root
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		text := string(output)
+		if text != "" {
+			text += "\n\n"
+		}
+		return "", 0, fmt.Errorf("%sCommand timed out after %g seconds", text, timeoutSeconds)
+	}
+	exitCode := 0
+	if err != nil {
+		exitCode = 1
+		if exitError, ok := err.(*exec.ExitError); ok {
+			exitCode = exitError.ExitCode()
+		}
+	}
+	return string(output), exitCode, nil
+}
+
+func WriteWorkspaceFile(root, name, content string) error {
+	path, err := ResolveWorkspacePath(root, name)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+type WorkspaceEdit struct {
+	OldText string
+	NewText string
+}
+
+const utf8BOM = "\ufeff"
+
+func normalizeToLF(text string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
+}
+
+func detectLineEnding(content string) string {
+	crlfIdx := strings.Index(content, "\r\n")
+	lfIdx := strings.Index(content, "\n")
+	if lfIdx == -1 {
+		return "\n"
+	}
+	if crlfIdx == -1 {
+		return "\n"
+	}
+	if crlfIdx < lfIdx {
+		return "\r\n"
+	}
+	return "\n"
+}
+
+func restoreLineEndings(text, ending string) string {
+	if ending == "\r\n" {
+		return strings.ReplaceAll(text, "\n", "\r\n")
+	}
+	return text
+}
+
+func stripBOM(content string) (string, string) {
+	if !strings.HasPrefix(content, utf8BOM) {
+		return "", content
+	}
+	return utf8BOM, content[len(utf8BOM):]
+}
+
+func normalizeForFuzzyMatch(text string) string {
+	normalized, _ := normalizeForFuzzyMatchWithMap(text)
+	return normalized
+}
+
+func normalizeForFuzzyMatchWithMap(text string) (string, []int) {
+	var builder strings.Builder
+	normalizedToOriginal := []int{0}
+	lineStart := 0
+	for lineStart <= len(text) {
+		lineEnd := strings.IndexByte(text[lineStart:], '\n')
+		hasNewline := lineEnd != -1
+		if hasNewline {
+			lineEnd += lineStart
+		} else {
+			lineEnd = len(text)
+		}
+
+		appendNormalizedLine(&builder, &normalizedToOriginal, text, lineStart, lineEnd)
+		if hasNewline {
+			builder.WriteByte('\n')
+			normalizedToOriginal = append(normalizedToOriginal, lineEnd+1)
+			lineStart = lineEnd + 1
+			continue
+		}
+		break
+	}
+	return builder.String(), normalizedToOriginal
+}
+
+func appendNormalizedLine(builder *strings.Builder, normalizedToOriginal *[]int, text string, start, end int) {
+	trimEnd := end
+	for trimEnd > start {
+		r, size := runeBefore(text[start:trimEnd])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		trimEnd -= size
+	}
+
+	for index := start; index < trimEnd; {
+		r, size := rune(text[index]), 1
+		if r >= utf8.RuneSelf {
+			r, size = utf8.DecodeRuneInString(text[index:trimEnd])
+		}
+		normalizedRune := normalizeReplacementRunes(norm.NFKC.String(string(r)))
+		builder.WriteString(normalizedRune)
+		for i := 0; i < len(normalizedRune); i++ {
+			*normalizedToOriginal = append(*normalizedToOriginal, index+size)
+		}
+		index += size
+	}
+}
+
+func runeBefore(text string) (rune, int) {
+	r, size := utf8.DecodeLastRuneInString(text)
+	return r, size
+}
+
+func normalizeReplacementRunes(text string) string {
+	normalized := norm.NFKC.String(text)
+	normalized = strings.NewReplacer(
+		"\u2018", "'",
+		"\u2019", "'",
+		"\u201A", "'",
+		"\u201B", "'",
+		"\u201C", "\"",
+		"\u201D", "\"",
+		"\u201E", "\"",
+		"\u201F", "\"",
+		"\u2010", "-",
+		"\u2011", "-",
+		"\u2012", "-",
+		"\u2013", "-",
+		"\u2014", "-",
+		"\u2015", "-",
+		"\u2212", "-",
+		"\u00A0", " ",
+		"\u2002", " ",
+		"\u2003", " ",
+		"\u2004", " ",
+		"\u2005", " ",
+		"\u2006", " ",
+		"\u2007", " ",
+		"\u2008", " ",
+		"\u2009", " ",
+		"\u200A", " ",
+		"\u202F", " ",
+		"\u205F", " ",
+		"\u3000", " ",
+	).Replace(normalized)
+	return normalized
+}
+
+type fuzzyMatchResult struct {
+	found                 bool
+	index                 int
+	matchLength           int
+	usedFuzzyMatch        bool
+	contentForReplacement string
+}
+
+type matchedEdit struct {
+	index     int
+	length    int
+	newText   string
+	editIndex int
+}
+
+func fuzzyFindText(content, oldText string) fuzzyMatchResult {
+	exactIndex := strings.Index(content, oldText)
+	if exactIndex != -1 {
+		return fuzzyMatchResult{
+			found:                 true,
+			index:                 exactIndex,
+			matchLength:           len(oldText),
+			usedFuzzyMatch:        false,
+			contentForReplacement: content,
+		}
+	}
+
+	fuzzyContent := normalizeForFuzzyMatch(content)
+	fuzzyOldText := normalizeForFuzzyMatch(oldText)
+	fuzzyIndex := strings.Index(fuzzyContent, fuzzyOldText)
+	if fuzzyIndex == -1 {
+		return fuzzyMatchResult{
+			found: false,
+			index: -1,
+		}
+	}
+	return fuzzyMatchResult{
+		found:                 true,
+		index:                 fuzzyIndex,
+		matchLength:           len(fuzzyOldText),
+		usedFuzzyMatch:        true,
+		contentForReplacement: fuzzyContent,
+	}
+}
+
+func editNotFoundError(path string, editIndex int, totalEdits int) string {
+	if totalEdits == 1 {
+		return fmt.Sprintf("Could not find the exact text in %s. The old text must match exactly including all whitespace and newlines.", path)
+	}
+	return fmt.Sprintf("Could not find edits[%d] in %s. The old text must match exactly including all whitespace and newlines.", editIndex, path)
+}
+
+func editDuplicateError(path string, editIndex int, totalEdits int, occurrences int) string {
+	if totalEdits == 1 {
+		return fmt.Sprintf(
+			"Found %d occurrences of the text in %s. The text must be unique. Please provide more context to make it unique.",
+			occurrences,
+			path,
+		)
+	}
+	return fmt.Sprintf(
+		"Found %d occurrences of edits[%d] in %s. Each oldText must be unique. Please provide more context to make it unique.",
+		occurrences,
+		editIndex,
+		path,
+	)
+}
+
+func editEmptyOldTextError(path string, editIndex int, totalEdits int) string {
+	if totalEdits == 1 {
+		return fmt.Sprintf("oldText must not be empty in %s.", path)
+	}
+	return fmt.Sprintf("edits[%d].oldText must not be empty in %s.", editIndex, path)
+}
+
+func editNoChangeError(path string, totalEdits int) string {
+	if totalEdits == 1 {
+		return fmt.Sprintf(
+			"No changes made to %s. The replacement produced identical content. This might indicate an issue with special characters or the text not existing as expected.",
+			path,
+		)
+	}
+	return fmt.Sprintf("No changes made to %s. The replacements produced identical content.", path)
+}
+
+func applyWorkspaceEdits(content string, edits []WorkspaceEdit, path string) ([]matchedEdit, string, error) {
+	if len(edits) == 0 {
+		return nil, "", errors.New("Edit tool input is invalid. edits must contain at least one replacement.")
+	}
+
+	normalizedEdits := make([]WorkspaceEdit, 0, len(edits))
+	for _, edit := range edits {
+		normalizedEdits = append(normalizedEdits, WorkspaceEdit{
+			OldText: normalizeToLF(edit.OldText),
+			NewText: normalizeToLF(edit.NewText),
+		})
+	}
+
+	contentForMatching := content
+	oldTextForMatching := make([]string, 0, len(normalizedEdits))
+	for _, edit := range normalizedEdits {
+		oldTextForMatching = append(oldTextForMatching, edit.OldText)
+	}
+	usedFuzzyMatching := false
+	var normalizedToOriginal []int
+	for _, edit := range normalizedEdits {
+		match := fuzzyFindText(contentForMatching, edit.OldText)
+		if match.usedFuzzyMatch {
+			usedFuzzyMatching = true
+			contentForMatching, normalizedToOriginal = normalizeForFuzzyMatchWithMap(content)
+			for i := range normalizedEdits {
+				oldTextForMatching[i] = normalizeForFuzzyMatch(normalizedEdits[i].OldText)
+			}
+			break
+		}
+	}
+
+	matched := make([]matchedEdit, 0, len(normalizedEdits))
+	for i := range edits {
+		oldText := oldTextForMatching[i]
+		if oldText == "" {
+			return nil, "", errors.New(editEmptyOldTextError(path, i, len(edits)))
+		}
+
+		count := strings.Count(contentForMatching, oldText)
+		if count == 0 {
+			return nil, "", errors.New(editNotFoundError(path, i, len(edits)))
+		}
+		if count > 1 {
+			return nil, "", errors.New(editDuplicateError(path, i, len(edits), count))
+		}
+
+		index := strings.Index(contentForMatching, oldText)
+		if index < 0 {
+			return nil, "", errors.New(editNotFoundError(path, i, len(edits)))
+		}
+		length := len(oldText)
+		if usedFuzzyMatching {
+			end := index + length
+			if index >= len(normalizedToOriginal) || end >= len(normalizedToOriginal) {
+				return nil, "", errors.New(editNotFoundError(path, i, len(edits)))
+			}
+			originalStart := normalizedToOriginal[index]
+			originalEnd := normalizedToOriginal[end]
+			index = originalStart
+			length = originalEnd - originalStart
+		}
+		matched = append(matched, matchedEdit{
+			index:     index,
+			length:    length,
+			newText:   normalizeToLF(normalizedEdits[i].NewText),
+			editIndex: i,
+		})
+	}
+
+	sort.Slice(matched, func(i, j int) bool {
+		if matched[i].index == matched[j].index {
+			return matched[i].editIndex < matched[j].editIndex
+		}
+		return matched[i].index < matched[j].index
+	})
+
+	for i := 1; i < len(matched); i++ {
+		previous := matched[i-1]
+		current := matched[i]
+		if previous.index+previous.length > current.index {
+			return nil, "", fmt.Errorf("edits[%d] and edits[%d] overlap in %s. Merge them into one edit or target disjoint regions.", previous.editIndex, current.editIndex, path)
+		}
+	}
+
+	updated := content
+	for i := len(matched) - 1; i >= 0; i-- {
+		e := matched[i]
+		updated = updated[:e.index] + e.newText + updated[e.index+e.length:]
+	}
+
+	if updated == content {
+		return nil, "", errors.New(editNoChangeError(path, len(edits)))
+	}
+
+	return matched, updated, nil
+}
+
+func EditWorkspaceFile(root, name string, edits []WorkspaceEdit) error {
+	path, err := ResolveWorkspacePath(root, name)
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	rawContent := string(data)
+	bom, text := stripBOM(rawContent)
+	lineEnding := detectLineEnding(text)
+	baseContent := normalizeToLF(text)
+
+	_, updated, err := applyWorkspaceEdits(baseContent, edits, name)
+	if err != nil {
+		return err
+	}
+
+	finalContent := bom + restoreLineEndings(updated, lineEnding)
+	return os.WriteFile(path, []byte(finalContent), 0o644)
+}
+
+func parseWorkspaceEdits(toolArgs map[string]any) ([]WorkspaceEdit, error) {
+	if toolArgs == nil {
+		return nil, errors.New("edits must be an array")
+	}
+
+	var edits []WorkspaceEdit
+	editsValue, hasEdits := toolArgs["edits"]
+	if hasEdits {
+		switch typed := editsValue.(type) {
+		case string:
+			if err := json.Unmarshal([]byte(typed), &edits); err != nil {
+				return nil, errors.New("edits must be an array")
+			}
+		case []any:
+			parsed, err := parseWorkspaceEditList(typed)
+			if err != nil {
+				return nil, err
+			}
+			edits = append(edits, parsed...)
+		default:
+			return nil, errors.New("edits must be an array")
+		}
+	}
+
+	legacyOldText, legacyOldTextOk := toolArgs["oldText"].(string)
+	legacyNewText, legacyNewTextOk := toolArgs["newText"].(string)
+	if legacyOldTextOk && legacyNewTextOk {
+		edits = append(edits, WorkspaceEdit{
+			OldText: legacyOldText,
+			NewText: legacyNewText,
+		})
+	}
+
+	if len(edits) == 0 {
+		return nil, errors.New("Edit tool input is invalid. edits must contain at least one replacement.")
+	}
+
+	return edits, nil
+}
+
+func parseWorkspaceEditList(rawEdits []any) ([]WorkspaceEdit, error) {
+	if len(rawEdits) == 0 {
+		return nil, errors.New("Edit tool input is invalid. edits must contain at least one replacement.")
+	}
+
+	edits := make([]WorkspaceEdit, 0, len(rawEdits))
+	for index, item := range rawEdits {
+		raw, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("edit %d must be an object", index)
+		}
+		oldText, oldTextOk := raw["oldText"].(string)
+		newText, newTextOk := raw["newText"].(string)
+		if !oldTextOk || !newTextOk {
+			return nil, errors.New("edit input must contain string oldText and newText")
+		}
+		edits = append(edits, WorkspaceEdit{OldText: oldText, NewText: newText})
+	}
+	return edits, nil
+}
+
+func ResolveWorkspacePath(root, name string) (string, error) {
+	if name == "" {
+		return "", fmt.Errorf("workspace path is empty")
+	}
+	clean := filepath.Clean(name)
+	if strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
+		return "", fmt.Errorf("workspace path escapes root: %s", name)
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(rootAbs, clean)
+	if path != rootAbs && !strings.HasPrefix(path, rootAbs+string(os.PathSeparator)) {
+		return "", fmt.Errorf("workspace path escapes root: %s", name)
+	}
+	return path, nil
+}
+
+func GrepWorkspace(root, path, pattern string) (string, error) {
+	if pattern == "" {
+		return "", fmt.Errorf("grep pattern is empty")
+	}
+	absolutePath, err := ResolveWorkspacePath(root, path)
+	if err != nil {
+		return "", err
+	}
+	matches := []string{}
+	err = filepath.WalkDir(absolutePath, func(current string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		data, err := os.ReadFile(current)
+		if err != nil {
+			return nil
+		}
+		if strings.Contains(string(data), pattern) {
+			relative, err := filepath.Rel(root, current)
+			if err != nil {
+				return err
+			}
+			matches = append(matches, relative)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return strings.Join(matches, "\n"), nil
+}
+
+func FindWorkspace(root, path, pattern string) (string, error) {
+	absolutePath, err := ResolveWorkspacePath(root, path)
+	if err != nil {
+		return "", err
+	}
+	matches := []string{}
+	err = filepath.WalkDir(absolutePath, func(current string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if current == absolutePath {
+			return nil
+		}
+		name := entry.Name()
+		relative, err := filepath.Rel(root, current)
+		if err != nil {
+			return err
+		}
+		if pattern == "" || matchesFindPattern(relative, name, pattern) {
+			displayPath := relative
+			if entry.IsDir() {
+				displayPath += "/"
+			}
+			matches = append(matches, filepath.ToSlash(displayPath))
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return strings.Join(matches, "\n"), nil
+}
+
+func matchesFindPattern(relativePath, name, pattern string) bool {
+	if hasGlobMeta(pattern) {
+		target := name
+		if strings.Contains(pattern, "/") {
+			target = filepath.ToSlash(relativePath)
+		}
+		matched, err := filepath.Match(filepath.ToSlash(pattern), target)
+		return err == nil && matched
+	}
+	return strings.Contains(name, pattern) || strings.Contains(filepath.ToSlash(relativePath), pattern)
+}
+
+func hasGlobMeta(pattern string) bool {
+	return strings.ContainsAny(pattern, "*?[")
+}

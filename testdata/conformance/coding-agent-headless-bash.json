@@ -1,0 +1,67 @@
+{
+	"name": "coding_agent_headless_bash",
+	"model": {
+		"provider": "faux",
+		"id": "faux-1"
+	},
+	"workspace": {
+		"files": {
+			"notes.txt": "hello from bash\n"
+		}
+	},
+	"prompts": ["Read notes.txt using bash, then summarize."],
+	"assistantTurns": [
+		{
+			"stopReason": "toolUse",
+			"content": [
+				{
+					"type": "toolCall",
+					"id": "bash-1",
+					"name": "bash",
+					"arguments": {
+						"command": "cat notes.txt"
+					}
+				}
+			]
+		},
+		{
+			"stopReason": "stop",
+			"content": "Read notes.txt with bash."
+		}
+	],
+	"options": {
+		"tools": ["bash"]
+	},
+	"expect": {
+		"eventTypesInOrder": [
+			"agent_start",
+			"turn_start",
+			"message_start",
+			"message_end",
+			"message_start",
+			"message_update",
+			"message_end",
+			"tool_execution_start",
+			"tool_execution_end",
+			"message_start",
+			"message_end",
+			"turn_end",
+			"turn_start",
+			"message_start",
+			"message_update",
+			"message_end",
+			"turn_end",
+			"agent_end"
+		],
+		"finalMessageRoles": ["user", "assistant", "toolResult", "assistant"],
+		"finalTextContains": ["Read notes.txt with bash."],
+		"sessionEntryTypes": ["model_change", "thinking_level_change", "message"],
+		"toolResults": [
+			{
+				"toolName": "bash",
+				"textContains": "hello from bash",
+				"isError": false
+			}
+		]
+	}
+}

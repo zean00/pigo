@@ -1,0 +1,56 @@
+{
+	"name": "coding_agent_headless_edit_error",
+	"model": {
+		"provider": "faux",
+		"id": "faux-1"
+	},
+	"workspace": {
+		"files": {
+			"notes.txt": "hello old world\n"
+		}
+	},
+	"prompts": ["Try an invalid edit, then summarize."],
+	"assistantTurns": [
+		{
+			"stopReason": "toolUse",
+			"content": [
+				{
+					"type": "toolCall",
+					"id": "edit-1",
+					"name": "edit",
+					"arguments": {
+						"path": "notes.txt",
+						"edits": [
+							{
+								"oldText": "missing",
+								"newText": "new"
+							}
+						]
+					}
+				}
+			]
+		},
+		{
+			"stopReason": "stop",
+			"content": "Edit failed as expected."
+		}
+	],
+	"options": {
+		"tools": ["edit"]
+	},
+	"expect": {
+		"finalMessageRoles": ["user", "assistant", "toolResult", "assistant"],
+		"finalTextContains": ["Edit failed as expected."],
+		"sessionEntryTypes": ["model_change", "thinking_level_change", "message"],
+		"files": {
+			"notes.txt": "hello old world\n"
+		},
+		"toolResults": [
+			{
+				"toolName": "edit",
+				"textContains": "Could not find",
+				"isError": true
+			}
+		]
+	}
+}

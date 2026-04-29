@@ -1,0 +1,94 @@
+{
+	"name": "agent_basic_tool",
+	"model": {
+		"provider": "openai",
+		"id": "gpt-4o-mini"
+	},
+	"context": {
+		"systemPrompt": "Use tools when useful.",
+		"messages": [],
+		"tools": [
+			{
+				"name": "echo",
+				"description": "Echo a value",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"value": { "type": "string" }
+					},
+					"required": ["value"]
+				},
+				"result": {
+					"text": "echoed: hello",
+					"details": { "value": "hello" }
+				}
+			}
+		]
+	},
+	"prompts": [
+		{
+			"role": "user",
+			"content": "Echo hello, then finish."
+		}
+	],
+	"assistantTurns": [
+		{
+			"stopReason": "toolUse",
+			"content": [
+				{
+					"type": "toolCall",
+					"id": "tool-1",
+					"name": "echo",
+					"arguments": { "value": "hello" }
+				}
+			]
+		},
+		{
+			"stopReason": "stop",
+			"content": [{ "type": "text", "text": "done" }]
+		}
+	],
+	"options": {
+		"toolExecution": "sequential"
+	},
+	"expect": {
+		"eventTypesInOrder": [
+			"agent_start",
+			"turn_start",
+			"message_start",
+			"message_end",
+			"message_start",
+			"message_update",
+			"message_end",
+			"tool_execution_start",
+			"tool_execution_update",
+			"tool_execution_end",
+			"message_start",
+			"message_end",
+			"turn_end",
+			"turn_start",
+			"message_start",
+			"message_update",
+			"message_end",
+			"turn_end",
+			"agent_end"
+		],
+		"finalMessageRoles": ["user", "assistant", "toolResult", "assistant"],
+		"finalTextContains": ["done"],
+		"toolExecutions": [
+			{
+				"toolCallId": "tool-1",
+				"toolName": "echo",
+				"isError": false
+			}
+		],
+		"toolResults": [
+			{
+				"toolCallId": "tool-1",
+				"toolName": "echo",
+				"textContains": "echoed: hello",
+				"isError": false
+			}
+		]
+	}
+}

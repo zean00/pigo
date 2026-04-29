@@ -1,0 +1,41 @@
+{
+	"name": "coding_agent_headless_edit_ambiguous",
+	"model": {
+		"provider": "faux",
+		"id": "faux-1"
+	},
+	"workspace": {
+		"files": {
+			"notes.txt": "one two one\n"
+		}
+	},
+	"prompts": ["Try an ambiguous edit, then summarize."],
+	"assistantTurns": [
+		{
+			"stopReason": "toolUse",
+			"content": [
+				{
+					"type": "toolCall",
+					"id": "edit-1",
+					"name": "edit",
+					"arguments": {
+						"path": "notes.txt",
+						"edits": [
+							{
+								"oldText": "one",
+								"newText": "single"
+							}
+						]
+					}
+				}
+			]
+		},
+		{
+			"stopReason": "stop",
+			"content": "Ambiguous edit was rejected."
+		}
+	],
+	"options": {
+		"tools": ["edit"]
+	}
+}

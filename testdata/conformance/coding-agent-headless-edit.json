@@ -1,0 +1,76 @@
+{
+	"name": "coding_agent_headless_edit",
+	"model": {
+		"provider": "faux",
+		"id": "faux-1"
+	},
+	"workspace": {
+		"files": {
+			"notes.txt": "hello old world\n"
+		}
+	},
+	"prompts": ["Edit notes.txt, then summarize."],
+	"assistantTurns": [
+		{
+			"stopReason": "toolUse",
+			"content": [
+				{
+					"type": "toolCall",
+					"id": "edit-1",
+					"name": "edit",
+					"arguments": {
+						"path": "notes.txt",
+						"edits": [
+							{
+								"oldText": "old",
+								"newText": "new"
+							}
+						]
+					}
+				}
+			]
+		},
+		{
+			"stopReason": "stop",
+			"content": "Edited notes.txt."
+		}
+	],
+	"options": {
+		"tools": ["read", "write", "edit"]
+	},
+	"expect": {
+		"eventTypesInOrder": [
+			"agent_start",
+			"turn_start",
+			"message_start",
+			"message_end",
+			"message_start",
+			"message_update",
+			"message_end",
+			"tool_execution_start",
+			"tool_execution_end",
+			"message_start",
+			"message_end",
+			"turn_end",
+			"turn_start",
+			"message_start",
+			"message_update",
+			"message_end",
+			"turn_end",
+			"agent_end"
+		],
+		"finalMessageRoles": ["user", "assistant", "toolResult", "assistant"],
+		"finalTextContains": ["Edited notes.txt."],
+		"sessionEntryTypes": ["model_change", "thinking_level_change", "message"],
+		"files": {
+			"notes.txt": "hello new world\n"
+		},
+		"toolResults": [
+			{
+				"toolName": "edit",
+				"textContains": "Successfully",
+				"isError": false
+			}
+		]
+	}
+}

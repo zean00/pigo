@@ -1,0 +1,26 @@
+{
+	"name": "image_content",
+	"model": {
+		"provider": "openai",
+		"id": "gpt-4o-mini"
+	},
+	"context": {
+		"messages": [
+			{
+				"role": "user",
+				"content": "Return an image block."
+			}
+		]
+	},
+	"expect": {
+		"stopReason": "stop",
+		"imageBlocks": [
+			{
+				"mimeType": "image/png",
+				"dataContains": "iVBOR"
+			}
+		],
+		"eventTypesInOrder": ["start", "done"],
+		"usage": "present"
+	}
+}

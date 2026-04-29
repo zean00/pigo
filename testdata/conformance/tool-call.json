@@ -1,0 +1,51 @@
+{
+	"name": "tool_call",
+	"model": {
+		"provider": "openai",
+		"id": "gpt-4o-mini"
+	},
+	"context": {
+		"systemPrompt": "You are a helpful assistant. Use tools when asked.",
+		"messages": [
+			{
+				"role": "user",
+				"content": "Use the math_operation tool to calculate 15 + 27."
+			}
+		],
+		"tools": [
+			{
+				"name": "math_operation",
+				"description": "Perform basic arithmetic operations",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"a": { "type": "number" },
+						"b": { "type": "number" },
+						"operation": {
+							"type": "string",
+							"enum": ["add", "subtract", "multiply", "divide"]
+						}
+					},
+					"required": ["a", "b", "operation"]
+				}
+			}
+		]
+	},
+	"options": {
+		"maxTokens": 256
+	},
+	"expect": {
+		"stopReason": "toolUse",
+		"toolCalls": [
+			{
+				"name": "math_operation",
+				"argumentsInclude": {
+					"a": 15,
+					"b": 27
+				}
+			}
+		],
+		"eventTypesInOrder": ["start", "toolcall_start", "toolcall_delta", "toolcall_end", "done"],
+		"usage": "present"
+	}
+}

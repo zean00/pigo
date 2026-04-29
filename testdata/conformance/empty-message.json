@@ -1,0 +1,23 @@
+{
+	"name": "empty_message",
+	"model": {
+		"provider": "openai",
+		"id": "gpt-4o-mini"
+	},
+	"context": {
+		"messages": [
+			{
+				"role": "user",
+				"content": ""
+			}
+		]
+	},
+	"options": {
+		"maxTokens": 64
+	},
+	"expect": {
+		"allowStopReasons": ["stop", "error"],
+		"eventTypesInOrder": ["start"],
+		"usage": "presentOrError"
+	}
+}

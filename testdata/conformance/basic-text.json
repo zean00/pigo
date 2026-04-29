@@ -1,0 +1,25 @@
+{
+	"name": "basic_text",
+	"model": {
+		"provider": "openai",
+		"id": "gpt-4o-mini"
+	},
+	"context": {
+		"systemPrompt": "You are a concise assistant.",
+		"messages": [
+			{
+				"role": "user",
+				"content": "Reply with exactly: Hello conformance"
+			}
+		]
+	},
+	"options": {
+		"maxTokens": 64
+	},
+	"expect": {
+		"stopReason": "stop",
+		"textContains": ["Hello conformance"],
+		"eventTypesInOrder": ["start", "text_start", "text_delta", "text_end", "done"],
+		"usage": "present"
+	}
+}

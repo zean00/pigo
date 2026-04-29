@@ -1,0 +1,57 @@
+{
+	"name": "agent_missing_tool",
+	"model": {
+		"provider": "openai",
+		"id": "gpt-4o-mini"
+	},
+	"context": {
+		"systemPrompt": "Use tools when useful.",
+		"messages": [],
+		"tools": []
+	},
+	"prompts": [
+		{
+			"role": "user",
+			"content": "Call a missing tool, then finish."
+		}
+	],
+	"assistantTurns": [
+		{
+			"stopReason": "toolUse",
+			"content": [
+				{
+					"type": "toolCall",
+					"id": "tool-1",
+					"name": "missing",
+					"arguments": {}
+				}
+			]
+		},
+		{
+			"stopReason": "stop",
+			"content": [{ "type": "text", "text": "done after missing tool" }]
+		}
+	],
+	"options": {
+		"toolExecution": "sequential"
+	},
+	"expect": {
+		"finalMessageRoles": ["user", "assistant", "toolResult", "assistant"],
+		"finalTextContains": ["done after missing tool"],
+		"toolExecutions": [
+			{
+				"toolCallId": "tool-1",
+				"toolName": "missing",
+				"isError": true
+			}
+		],
+		"toolResults": [
+			{
+				"toolCallId": "tool-1",
+				"toolName": "missing",
+				"textContains": "not found",
+				"isError": true
+			}
+		]
+	}
+}

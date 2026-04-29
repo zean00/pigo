@@ -1,0 +1,98 @@
+{
+	"name": "coding_agent_headless_write_read",
+	"model": {
+		"provider": "faux",
+		"id": "faux-1"
+	},
+	"workspace": {
+		"files": {
+			"README.md": "before\n"
+		}
+	},
+	"prompts": ["Create notes.txt, read it back, then summarize."],
+	"assistantTurns": [
+		{
+			"stopReason": "toolUse",
+			"content": [
+				{
+					"type": "toolCall",
+					"id": "write-1",
+					"name": "write",
+					"arguments": {
+						"path": "notes.txt",
+						"content": "hello from coding conformance\n"
+					}
+				}
+			]
+		},
+		{
+			"stopReason": "toolUse",
+			"content": [
+				{
+					"type": "toolCall",
+					"id": "read-1",
+					"name": "read",
+					"arguments": {
+						"path": "notes.txt"
+					}
+				}
+			]
+		},
+		{
+			"stopReason": "stop",
+			"content": "Created and read notes.txt."
+		}
+	],
+	"options": {
+		"tools": ["read", "write"]
+	},
+	"expect": {
+		"eventTypesInOrder": [
+			"agent_start",
+			"turn_start",
+			"message_start",
+			"message_end",
+			"message_start",
+			"message_update",
+			"message_end",
+			"tool_execution_start",
+			"tool_execution_end",
+			"message_start",
+			"message_end",
+			"turn_end",
+			"turn_start",
+			"message_start",
+			"message_update",
+			"message_end",
+			"tool_execution_start",
+			"tool_execution_end",
+			"message_start",
+			"message_end",
+			"turn_end",
+			"turn_start",
+			"message_start",
+			"message_update",
+			"message_end",
+			"turn_end",
+			"agent_end"
+		],
+		"finalMessageRoles": ["user", "assistant", "toolResult", "assistant", "toolResult", "assistant"],
+		"finalTextContains": ["Created and read notes.txt."],
+		"sessionEntryTypes": ["model_change", "thinking_level_change", "message"],
+		"files": {
+			"notes.txt": "hello from coding conformance\n"
+		},
+		"toolResults": [
+			{
+				"toolName": "write",
+				"textContains": "Successfully wrote",
+				"isError": false
+			},
+			{
+				"toolName": "read",
+				"textContains": "hello from coding conformance",
+				"isError": false
+			}
+		]
+	}
+}

@@ -1,0 +1,31 @@
+{
+	"name": "thinking",
+	"model": {
+		"provider": "openai",
+		"id": "gpt-4o-mini"
+	},
+	"context": {
+		"messages": [
+			{
+				"role": "user",
+				"content": "Think briefly, then answer."
+			}
+		]
+	},
+	"expect": {
+		"stopReason": "stop",
+		"textContains": ["final answer"],
+		"thinkingContains": ["brief thought"],
+		"eventTypesInOrder": [
+			"start",
+			"thinking_start",
+			"thinking_delta",
+			"thinking_end",
+			"text_start",
+			"text_delta",
+			"text_end",
+			"done"
+		],
+		"usage": "present"
+	}
+}

@@ -539,10 +539,15 @@ func sessionMessagesToAI(messages []Message) []ai.Message {
 			callID, _ := message["toolCallId"].(string)
 			toolName, _ := message["toolName"].(string)
 			text := messageText(message)
-			if text != "" {
-				isError, _ := message["isError"].(bool)
-				out = append(out, ai.Message{Role: "toolResult", ToolCallID: callID, ToolName: toolName, Content: text, IsError: isError})
+			content, hasContent := message["content"]
+			if !hasContent || content == nil || content == "" {
+				content = text
 			}
+			if content == nil || content == "" {
+				continue
+			}
+			isError, _ := message["isError"].(bool)
+			out = append(out, ai.Message{Role: "toolResult", ToolCallID: callID, ToolName: toolName, Content: content, IsError: isError})
 		}
 	}
 	return out

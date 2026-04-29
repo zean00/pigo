@@ -32,6 +32,7 @@ type googleContent struct {
 type googlePart struct {
 	Text             string                  `json:"text,omitempty"`
 	Thought          bool                    `json:"thought,omitempty"`
+	ThoughtSignature string                  `json:"thoughtSignature,omitempty"`
 	InlineData       *googleInlineData       `json:"inlineData,omitempty"`
 	FunctionCall     *googleFunctionCall     `json:"functionCall,omitempty"`
 	FunctionResponse *googleFunctionResponse `json:"functionResponse,omitempty"`
@@ -298,9 +299,11 @@ func googleSSEToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, err
 							Type:       "toolcall_end",
 							ContentIdx: contentIndex,
 							ToolCall: &NormalizedTool{
-								Name:      part.FunctionCall.Name,
-								Arguments: arguments,
-								HasID:     strings.TrimSpace(part.FunctionCall.ID) != "",
+								ID:               part.FunctionCall.ID,
+								Name:             part.FunctionCall.Name,
+								Arguments:        arguments,
+								HasID:            strings.TrimSpace(part.FunctionCall.ID) != "",
+								ThoughtSignature: part.ThoughtSignature,
 							},
 						},
 					)
@@ -443,14 +446,15 @@ func googleAssistantParts(message Message) []googlePart {
 		switch block.Type {
 		case "text":
 			if strings.TrimSpace(block.Text) != "" {
-				parts = append(parts, googlePart{Text: block.Text})
+				parts = append(parts, googlePart{Text: block.Text, ThoughtSignature: block.TextSignature})
 			}
 		case "thinking":
 			if strings.TrimSpace(block.Thinking) != "" {
-				parts = append(parts, googlePart{Text: block.Thinking, Thought: true})
+				parts = append(parts, googlePart{Text: block.Thinking, Thought: true, ThoughtSignature: block.ThinkingSignature})
 			}
 		case "toolCall":
 			parts = append(parts, googlePart{
+				ThoughtSignature: block.ThoughtSignature,
 				FunctionCall: &googleFunctionCall{
 					ID:   block.ID,
 					Name: block.Name,
@@ -514,17 +518,18 @@ func googleResponseToNormalized(response googleResponse) NormalizedResult {
 						arguments = map[string]any{}
 					}
 					blocks = append(blocks, ContentBlock{
-						Type:      "toolCall",
-						ID:        part.FunctionCall.ID,
-						Name:      part.FunctionCall.Name,
-						Arguments: arguments,
+						Type:             "toolCall",
+						ID:               part.FunctionCall.ID,
+						Name:             part.FunctionCall.Name,
+						Arguments:        arguments,
+						ThoughtSignature: part.ThoughtSignature,
 					})
 					stopReason = "toolUse"
 				case strings.TrimSpace(part.Text) != "":
 					if part.Thought {
-						blocks = append(blocks, ContentBlock{Type: "thinking", Thinking: part.Text})
+						blocks = append(blocks, ContentBlock{Type: "thinking", Thinking: part.Text, ThinkingSignature: part.ThoughtSignature})
 					} else {
-						blocks = append(blocks, ContentBlock{Type: "text", Text: part.Text})
+						blocks = append(blocks, ContentBlock{Type: "text", Text: part.Text, TextSignature: part.ThoughtSignature})
 					}
 				}
 			}
@@ -534,6 +539,7 @@ func googleResponseToNormalized(response googleResponse) NormalizedResult {
 	result := NormalizedResult{
 		Role:       "assistant",
 		StopReason: stopReason,
+		ResponseID: response.ResponseID,
 		Text:       ContentText(blocks),
 		Content:    NormalizedContent(blocks),
 	}

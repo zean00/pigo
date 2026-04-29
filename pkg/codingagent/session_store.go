@@ -15,16 +15,24 @@ import (
 
 type SessionEntry struct {
 	Type             string               `json:"type"`
+	Version          int                  `json:"version,omitempty"`
 	ID               string               `json:"id,omitempty"`
 	ParentID         string               `json:"parentId,omitempty"`
 	Timestamp        string               `json:"timestamp"`
+	CWD              string               `json:"cwd,omitempty"`
+	ParentSession    string               `json:"parentSession,omitempty"`
 	Message          agentcore.Message    `json:"message,omitempty"`
 	Provider         string               `json:"provider,omitempty"`
 	ModelID          string               `json:"modelId,omitempty"`
 	Level            string               `json:"level,omitempty"`
 	Name             string               `json:"name,omitempty"`
 	UserText         string               `json:"userText,omitempty"`
+	TargetID         string               `json:"targetId,omitempty"`
+	Label            string               `json:"label,omitempty"`
+	CustomType       string               `json:"customType,omitempty"`
+	Data             any                  `json:"data,omitempty"`
 	Summary          string               `json:"summary,omitempty"`
+	FromID           string               `json:"fromId,omitempty"`
 	FirstKeptEntryID string               `json:"firstKeptEntryId,omitempty"`
 	TokensBefore     int                  `json:"tokensBefore,omitempty"`
 	OAuthProvider    string               `json:"oauthProvider,omitempty"`

@@ -1,6 +1,9 @@
 package ai
 
 import (
+	"bytes"
+	_ "embed"
+	"encoding/json"
 	"sort"
 	"strings"
 	"sync"
@@ -14,17 +17,22 @@ type ModelCost struct {
 }
 
 type Model struct {
-	ID            string
-	Name          string
-	API           string
-	Provider      string
-	BaseURL       string
-	Reasoning     bool
-	Input         []string
-	Cost          ModelCost
-	ContextWindow int
-	MaxTokens     int
+	ID            string            `json:"id"`
+	Name          string            `json:"name"`
+	API           string            `json:"api"`
+	Provider      string            `json:"provider"`
+	BaseURL       string            `json:"baseUrl"`
+	Reasoning     bool              `json:"reasoning"`
+	Input         []string          `json:"input"`
+	Cost          ModelCost         `json:"cost"`
+	ContextWindow int               `json:"contextWindow"`
+	MaxTokens     int               `json:"maxTokens"`
+	Headers       map[string]string `json:"headers"`
+	Compat        map[string]any    `json:"compat"`
 }
+
+//go:embed models.generated.json
+var generatedModelCatalogJSON []byte
 
 var (
 	modelsMu       sync.RWMutex
@@ -34,9 +42,17 @@ var (
 
 func init() {
 	ResetModels()
+	ResetAPIProviders()
 }
 
 func buildDefaultModelCatalog() map[string]map[string]Model {
+	if catalog, err := parseGeneratedModelCatalog(generatedModelCatalogJSON); err == nil && len(catalog) > 0 {
+		return catalog
+	}
+	return buildLegacyDefaultModelCatalog()
+}
+
+func buildLegacyDefaultModelCatalog() map[string]map[string]Model {
 	out := map[string]map[string]Model{}
 	for _, spec := range providerProfiles() {
 		modelID := strings.TrimSpace(spec.DefaultModel)
@@ -85,6 +101,21 @@ func apiForProviderMode(mode string) string {
 	}
 }
 
+func KnownAPIs() []string {
+	return []string{
+		"openai-completions",
+		"mistral-conversations",
+		"openai-responses",
+		"azure-openai-responses",
+		"openai-codex-responses",
+		"anthropic-messages",
+		"bedrock-converse-stream",
+		"google-generative-ai",
+		"google-gemini-cli",
+		"google-vertex",
+	}
+}
+
 func modelSupportsReasoning(modelID string) bool {
 	modelID = strings.ToLower(strings.TrimSpace(modelID))
 	return strings.Contains(modelID, "gpt-5") ||
@@ -107,6 +138,8 @@ func defaultModelInput(mode string) []string {
 
 func cloneModel(model Model) Model {
 	model.Input = append([]string(nil), model.Input...)
+	model.Headers = copyStringMap(model.Headers)
+	model.Compat = cloneCompatMap(model.Compat)
 	return model
 }
 
@@ -182,10 +215,130 @@ func RegisterModel(model Model) {
 	providerModels[model.ID] = cloneModel(model)
 }
 
+func parseGeneratedModelCatalog(data []byte) (map[string]map[string]Model, error) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil, nil
+	}
+	rawCatalog := map[string]map[string]Model{}
+	if err := json.Unmarshal(data, &rawCatalog); err != nil {
+		return nil, err
+	}
+	modelCatalog := map[string]map[string]Model{}
+	for rawProvider, rawModels := range rawCatalog {
+		provider := canonicalProviderName(rawProvider)
+		providerModels := modelCatalog[provider]
+		if providerModels == nil {
+			providerModels = map[string]Model{}
+			modelCatalog[provider] = providerModels
+		}
+		spec, hasSpec := ProviderSpecForProvider(provider)
+
+		for _, model := range rawModels {
+			modelID := strings.TrimSpace(model.ID)
+			if modelID == "" {
+				continue
+			}
+
+			model.Provider = provider
+			model.Name = strings.TrimSpace(model.Name)
+			if model.Name == "" {
+				model.Name = modelID
+			}
+			model.API = strings.TrimSpace(model.API)
+			if model.API == "" && hasSpec {
+				model.API = apiForProviderMode(spec.Mode)
+			}
+			model.BaseURL = strings.TrimSpace(model.BaseURL)
+			if model.BaseURL == "" && hasSpec {
+				model.BaseURL = spec.BaseURL
+			}
+			if len(model.Input) == 0 && hasSpec {
+				model.Input = defaultModelInput(spec.Mode)
+			}
+			if hasSpec {
+				model.Headers = mergeHeaders(spec.DefaultHeader, model.Headers)
+			}
+
+			providerModels[modelID] = cloneModel(model)
+		}
+	}
+	if len(modelCatalog) == 0 {
+		return nil, nil
+	}
+	return modelCatalog, nil
+}
+
+func mergeHeaders(base, over map[string]string) map[string]string {
+	if len(base) == 0 && len(over) == 0 {
+		return nil
+	}
+	merged := map[string]string{}
+	for key, value := range base {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		merged[key] = value
+	}
+	for key, value := range over {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		merged[key] = value
+	}
+	return merged
+}
+
+func copyStringMap(value map[string]string) map[string]string {
+	if len(value) == 0 {
+		return nil
+	}
+	copied := make(map[string]string, len(value))
+	for key, val := range value {
+		copied[key] = val
+	}
+	return copied
+}
+
+func cloneCompatMap(value map[string]any) map[string]any {
+	if len(value) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(value))
+	for key, raw := range value {
+		out[key] = cloneAnyValue(raw)
+	}
+	return out
+}
+
+func cloneAnyValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		copied := make(map[string]any, len(typed))
+		for key, entry := range typed {
+			copied[key] = cloneAnyValue(entry)
+		}
+		return copied
+	case []any:
+		copied := make([]any, 0, len(typed))
+		for _, entry := range typed {
+			copied = append(copied, cloneAnyValue(entry))
+		}
+		return copied
+	default:
+		return value
+	}
+}
+
 func ClearModels() {
 	modelsMu.Lock()
 	defer modelsMu.Unlock()
 	modelRegistry = map[string]map[string]Model{}
+}
+
+func ClearProviderModels(provider string) {
+	modelsMu.Lock()
+	defer modelsMu.Unlock()
+	delete(modelRegistry, canonicalProviderName(provider))
 }
 
 func ResetModels() {
@@ -216,6 +369,10 @@ func CalculateCost(model Model, usage Usage) Usage {
 		Total:      inputCost + outputCost + cacheReadCost + cacheWriteCost,
 	}
 	return result
+}
+
+func CalculateCostValue(model Model, usage Usage) Cost {
+	return CalculateCost(model, usage).Cost
 }
 
 func SupportsXhigh(model Model) bool {

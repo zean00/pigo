@@ -38,6 +38,7 @@ type anthropicMessage struct {
 }
 
 type anthropicResponse struct {
+	ID         string           `json:"id,omitempty"`
 	Content    []map[string]any `json:"content"`
 	Usage      anthropicUsage   `json:"usage"`
 	StopReason string           `json:"stop_reason"`
@@ -207,6 +208,7 @@ func (provider *anthropicProvider) Complete(ctx context.Context, req CompletionR
 func anthropicStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, error) {
 	blocksByIndex := map[int]map[string]any{}
 	stopReason := ""
+	responseID := ""
 	usage := &Usage{}
 	events := []NormalizedEvent{{Type: "start"}}
 
@@ -222,6 +224,7 @@ func anthropicStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEven
 		switch event.Event {
 		case "message_start":
 			if message, ok := item["message"].(map[string]any); ok {
+				responseID = asString(message["id"])
 				if usageMap, ok := message["usage"].(map[string]any); ok {
 					usage.Input = int(asFloat64(usageMap["input_tokens"]))
 					usage.Output = int(asFloat64(usageMap["output_tokens"]))
@@ -243,7 +246,24 @@ func anthropicStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEven
 					events = append(events, NormalizedEvent{Type: "text_delta", ContentIdx: index, Delta: text})
 				}
 			case "thinking":
-				blocksByIndex[index] = map[string]any{"type": "thinking", "thinking": asString(block["thinking"])}
+				blocksByIndex[index] = map[string]any{
+					"type":               "thinking",
+					"thinking":           asString(block["thinking"]),
+					"thinkingSignature":  asString(block["signature"]),
+					"thinking_signature": asString(block["signature"]),
+				}
+				events = append(events, NormalizedEvent{Type: "thinking_start", ContentIdx: index})
+				if thinking := asString(block["thinking"]); thinking != "" {
+					events = append(events, NormalizedEvent{Type: "thinking_delta", ContentIdx: index, Delta: thinking})
+				}
+			case "redacted_thinking":
+				blocksByIndex[index] = map[string]any{
+					"type":               "thinking",
+					"thinking":           "[Reasoning redacted]",
+					"thinkingSignature":  asString(block["data"]),
+					"thinking_signature": asString(block["data"]),
+					"redacted":           true,
+				}
 				events = append(events, NormalizedEvent{Type: "thinking_start", ContentIdx: index})
 				if thinking := asString(block["thinking"]); thinking != "" {
 					events = append(events, NormalizedEvent{Type: "thinking_delta", ContentIdx: index, Delta: thinking})
@@ -281,6 +301,12 @@ func anthropicStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEven
 				block["thinking"] = asString(block["thinking"]) + value
 				if value != "" {
 					events = append(events, NormalizedEvent{Type: "thinking_delta", ContentIdx: index, Delta: value})
+				}
+			case "signature_delta":
+				value := asString(delta["signature"])
+				if value != "" {
+					block["thinkingSignature"] = asString(block["thinkingSignature"]) + value
+					block["thinking_signature"] = asString(block["thinking_signature"]) + value
 				}
 			case "input_json_delta":
 				value := asString(delta["partial_json"])
@@ -343,6 +369,7 @@ func anthropicStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEven
 	result := NormalizedResult{
 		Role:       "assistant",
 		StopReason: mapAnthropicStopReason(stopReason, len(content) > 0),
+		ResponseID: responseID,
 		Usage:      usage,
 	}
 	blocks, hasToolCalls := anthropicContentToBlocks(content)
@@ -530,8 +557,22 @@ func anthropicAssistantContent(message Message) []any {
 				content = append(content, map[string]any{"type": "text", "text": block.Text})
 			}
 		case "thinking":
+			if block.Redacted {
+				if strings.TrimSpace(block.ThinkingSignature) != "" {
+					content = append(content, map[string]any{"type": "redacted_thinking", "data": block.ThinkingSignature})
+				}
+				continue
+			}
 			if strings.TrimSpace(block.Thinking) != "" {
-				content = append(content, map[string]any{"type": "thinking", "thinking": block.Thinking})
+				if strings.TrimSpace(block.ThinkingSignature) == "" {
+					content = append(content, map[string]any{"type": "text", "text": block.Thinking})
+				} else {
+					content = append(content, map[string]any{
+						"type":      "thinking",
+						"thinking":  block.Thinking,
+						"signature": block.ThinkingSignature,
+					})
+				}
 			}
 		case "toolCall":
 			content = append(content, map[string]any{
@@ -555,6 +596,7 @@ func anthropicResponseToResult(body io.Reader) (NormalizedResult, error) {
 	result := NormalizedResult{
 		Role:       "assistant",
 		StopReason: mapAnthropicStopReason(response.StopReason, hasToolCalls),
+		ResponseID: response.ID,
 		Text:       ContentText(blocks),
 		Content:    NormalizedContent(blocks),
 		Usage: &Usage{
@@ -585,8 +627,20 @@ func anthropicContentToBlocks(content []map[string]any) ([]ContentBlock, bool) {
 		case "thinking":
 			thinking := asString(item["thinking"])
 			if strings.TrimSpace(thinking) != "" {
-				blocks = append(blocks, ContentBlock{Type: "thinking", Thinking: thinking})
+				blocks = append(blocks, ContentBlock{
+					Type:              "thinking",
+					Thinking:          thinking,
+					ThinkingSignature: firstNonEmptyString(item["thinkingSignature"], item["thinking_signature"], item["signature"]),
+					Redacted:          asBool(item["redacted"]),
+				})
 			}
+		case "redacted_thinking":
+			blocks = append(blocks, ContentBlock{
+				Type:              "thinking",
+				Thinking:          "[Reasoning redacted]",
+				ThinkingSignature: asString(item["data"]),
+				Redacted:          true,
+			})
 		case "tool_use":
 			hasToolCalls = true
 			arguments, _ := item["input"].(map[string]any)

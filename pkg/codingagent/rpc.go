@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/badlogic/pigo/pkg/ai"
 )
@@ -21,6 +22,9 @@ type rpcCommand struct {
 	Images             any    `json:"images,omitempty"`
 	Command            string `json:"command,omitempty"`
 	Name               string `json:"name,omitempty"`
+	Label              string `json:"label,omitempty"`
+	CustomType         string `json:"customType,omitempty"`
+	Data               any    `json:"data,omitempty"`
 	Level              string `json:"level,omitempty"`
 	Provider           string `json:"provider,omitempty"`
 	ModelID            string `json:"modelId,omitempty"`
@@ -29,11 +33,17 @@ type rpcCommand struct {
 	Enabled            *bool  `json:"enabled,omitempty"`
 	Mode               string `json:"mode,omitempty"`
 	CustomInstructions string `json:"customInstructions,omitempty"`
+	Summary            string `json:"summary,omitempty"`
 	Path               string `json:"path,omitempty"`
 	// "name" is used by set_session_name.
 	SessionPath      string               `json:"sessionPath,omitempty"`
 	EntryID          string               `json:"entryId,omitempty"`
 	OutputPath       string               `json:"outputPath,omitempty"`
+	AgentDir         string               `json:"agentDir,omitempty"`
+	PromptPaths      []string             `json:"promptPaths,omitempty"`
+	SkillPaths       []string             `json:"skillPaths,omitempty"`
+	IncludeDefaults  *bool                `json:"includeDefaults,omitempty"`
+	Commands         []SlashCommandInfo   `json:"commands,omitempty"`
 	OAuthCredentials *ai.OAuthCredentials `json:"oauthCredentials,omitempty"`
 	OAuthStorePath   string               `json:"oauthStorePath,omitempty"`
 }
@@ -112,13 +122,65 @@ func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse 
 		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true}
 
 	case "new_session":
-		s.Session.NewSession()
+		s.Session.NewSessionWithParent(command.ParentSession)
 		return rpcResponse{
 			ID:      command.ID,
 			Type:    "response",
 			Command: command.Type,
 			Success: true,
 			Data:    map[string]any{"cancelled": false},
+		}
+
+	case "branch":
+		var err error
+		if strings.TrimSpace(command.Summary) != "" {
+			err = s.Session.BranchWithSummary(command.EntryID, command.Summary)
+		} else {
+			err = s.Session.Branch(command.EntryID)
+		}
+		if err != nil {
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+		}
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true}
+
+	case "tree":
+		return rpcResponse{
+			ID:      command.ID,
+			Type:    "response",
+			Command: command.Type,
+			Success: true,
+			Data:    map[string]any{"nodes": s.Session.Tree()},
+		}
+
+	case "set_label":
+		if err := s.Session.SetLabel(command.EntryID, command.Label); err != nil {
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+		}
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true}
+
+	case "get_label":
+		return rpcResponse{
+			ID:      command.ID,
+			Type:    "response",
+			Command: command.Type,
+			Success: true,
+			Data:    map[string]any{"label": s.Session.GetLabel(command.EntryID)},
+		}
+
+	case "append_custom_entry":
+		entryID, err := s.Session.AppendCustomEntry(command.CustomType, command.Data)
+		if err != nil {
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+		}
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: map[string]any{"entryId": entryID}}
+
+	case "get_custom_entries":
+		return rpcResponse{
+			ID:      command.ID,
+			Type:    "response",
+			Command: command.Type,
+			Success: true,
+			Data:    map[string]any{"entries": s.Session.CustomEntries(command.CustomType)},
 		}
 
 	case "get_state":
@@ -287,6 +349,48 @@ func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse 
 		}
 		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: map[string]any{"path": path}}
 
+	case "export":
+		outputPath := command.OutputPath
+		if outputPath == "" {
+			outputPath = command.Path
+		}
+		if outputPath != "" && strings.HasSuffix(strings.ToLower(outputPath), ".jsonl") {
+			path, err := s.Session.ExportToJSONL(outputPath)
+			if err != nil {
+				return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+			}
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: map[string]any{"path": path, "format": "jsonl"}}
+		}
+		path, err := s.Session.ExportToHTML(outputPath)
+		if err != nil {
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+		}
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: map[string]any{"path": path, "format": "html"}}
+
+	case "share":
+		outputPath := command.OutputPath
+		if outputPath == "" {
+			outputPath = command.Path
+		}
+		url, err := s.Session.Share(outputPath)
+		if err != nil {
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+		}
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: map[string]any{"url": url}}
+
+	case "import":
+		sessionPath := command.SessionPath
+		if sessionPath == "" {
+			sessionPath = command.Path
+		}
+		if sessionPath == "" {
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: "missing sessionPath"}
+		}
+		if err := s.Session.SwitchSession(sessionPath); err != nil {
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+		}
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: map[string]any{"cancelled": false}}
+
 	case "switch_session":
 		if err := s.Session.SwitchSession(command.SessionPath); err != nil {
 			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
@@ -360,15 +464,39 @@ func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse 
 		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: map[string]any{"messages": s.Session.Messages}}
 
 	case "get_commands":
+		commands := make([]rpcSlashCommand, 0, 2+len(s.Session.extensionCommands)+len(s.Session.promptTemplates)+len(s.Session.skills))
+		for _, command := range s.Session.GetSlashCommands() {
+			commands = append(commands, rpcSlashCommand{
+				Name:        command.Name,
+				Description: command.Description,
+				Source:      command.Source,
+				SourceInfo:  command.SourceInfo,
+			})
+		}
 		return rpcResponse{
 			ID:      command.ID,
 			Type:    "response",
 			Command: command.Type,
 			Success: true,
-			Data: map[string]any{
-				"commands": []rpcSlashCommand{},
-			},
+			Data:    map[string]any{"commands": commands},
 		}
+
+	case "register_commands":
+		s.Session.SetExtensionCommands(command.Commands)
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true}
+
+	case "reload_resources":
+		includeDefaults := true
+		if command.IncludeDefaults != nil {
+			includeDefaults = *command.IncludeDefaults
+		}
+		s.Session.LoadSlashCommandResources(ResourceLoadOptions{
+			AgentDir:        command.AgentDir,
+			PromptPaths:     command.PromptPaths,
+			SkillPaths:      command.SkillPaths,
+			IncludeDefaults: includeDefaults,
+		})
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true}
 
 	default:
 		return rpcResponse{

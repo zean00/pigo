@@ -296,6 +296,171 @@ func TestRPCThinkingAndCommands(t *testing.T) {
 	}
 }
 
+func TestRPCGetCommandsIncludesRegisteredSources(t *testing.T) {
+	session := NewSession(t.TempDir(), nil)
+	session.SetExtensionCommands([]SlashCommandInfo{{
+		Name:        "ext-cmd",
+		Description: "extension command",
+		Source:      "extension",
+		SourceInfo:  map[string]any{"path": "extension"},
+	}})
+	session.SetPromptTemplates([]SlashCommandInfo{{
+		Name:        "tpl-cmd",
+		Description: "template command",
+		Source:      "prompt",
+		SourceInfo:  map[string]any{"path": "template"},
+	}})
+	session.SetSkills([]SlashCommandInfo{{
+		Name:        "skill:demo",
+		Description: "skill command",
+		Source:      "skill",
+		SourceInfo:  map[string]any{"path": "skill"},
+	}})
+
+	var out bytes.Buffer
+	server := RPCServer{Session: session}
+	if err := server.Serve(context.Background(), strings.NewReader(`{"id":"g1","type":"get_commands"}`+"\n"), &out); err != nil {
+		t.Fatal(err)
+	}
+	responses := decodeRPCResponses(t, out.String())
+	if len(responses) != 1 || responses[0]["success"] != true {
+		t.Fatalf("get_commands response = %#v", responses)
+	}
+	commands := responses[0]["data"].(map[string]any)["commands"].([]any)
+	if len(commands) < 5 {
+		t.Fatalf("commands = %#v", commands)
+	}
+	found := map[string]bool{}
+	for _, command := range commands {
+		item := command.(map[string]any)
+		name, _ := item["name"].(string)
+		source, _ := item["source"].(string)
+		found[name+"|"+source] = true
+	}
+	for _, wanted := range []string{
+		"ext-cmd|extension",
+		"tpl-cmd|prompt",
+		"skill:demo|skill",
+		"branch|prompt",
+		"tree|prompt",
+	} {
+		if !found[wanted] {
+			t.Fatalf("missing command %q in %#v", wanted, commands)
+		}
+	}
+}
+
+func TestRPCRegisterCommandsAndReloadResources(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "prompts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "prompts", "fix.md"), []byte("---\ndescription: Fix issue\n---\nFix it\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	session := NewSession(root, nil)
+	var out bytes.Buffer
+	server := RPCServer{Session: session}
+	input := strings.NewReader(
+		`{"id":"r1","type":"register_commands","commands":[{"name":"ext","description":"ext desc","source":"extension","sourceInfo":{"path":"ext"}}]}` + "\n" +
+			`{"id":"r2","type":"reload_resources","includeDefaults":false,"promptPaths":["prompts"]}` + "\n" +
+			`{"id":"g1","type":"get_commands"}` + "\n",
+	)
+	if err := server.Serve(context.Background(), input, &out); err != nil {
+		t.Fatal(err)
+	}
+	responses := decodeRPCResponses(t, out.String())
+	if len(responses) != 3 {
+		t.Fatalf("responses len = %d", len(responses))
+	}
+	if responses[0]["success"] != true || responses[1]["success"] != true || responses[2]["success"] != true {
+		t.Fatalf("responses = %#v", responses)
+	}
+	commands := responses[2]["data"].(map[string]any)["commands"].([]any)
+	found := map[string]bool{}
+	for _, rawCommand := range commands {
+		command := rawCommand.(map[string]any)
+		found[command["name"].(string)+"|"+command["source"].(string)] = true
+	}
+	if !found["ext|extension"] {
+		t.Fatalf("missing registered extension command: %#v", commands)
+	}
+	if !found["fix|prompt"] {
+		t.Fatalf("missing reloaded prompt command: %#v", commands)
+	}
+}
+
+func TestRPCPromptExpandsReloadedPromptTemplate(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "prompts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "prompts", "fix.md"), []byte("---\ndescription: Fix target\n---\nFix $1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	session := NewSession(root, []AssistantTurn{{StopReason: "stop", Content: []ai.ContentBlock{{Type: "text", Text: "ok"}}}})
+	var out bytes.Buffer
+	server := RPCServer{Session: session}
+	input := strings.NewReader(
+		`{"id":"r1","type":"reload_resources","includeDefaults":false,"promptPaths":["prompts"]}` + "\n" +
+			`{"id":"p1","type":"prompt","message":"/fix parser"}` + "\n" +
+			`{"id":"m1","type":"get_messages"}` + "\n",
+	)
+	if err := server.Serve(context.Background(), input, &out); err != nil {
+		t.Fatal(err)
+	}
+	responses := decodeRPCResponses(t, out.String())
+	if len(responses) != 3 {
+		t.Fatalf("responses len = %d", len(responses))
+	}
+	messages := responses[2]["data"].(map[string]any)["messages"].([]any)
+	first := messages[0].(map[string]any)
+	if first["text"] != "Fix parser\n" {
+		t.Fatalf("expanded rpc prompt = %#v", first)
+	}
+}
+
+func TestRPCExportAndShareCommands(t *testing.T) {
+	session := NewSession(t.TempDir(), nil)
+	session.Messages = append(session.Messages, map[string]any{
+		"role": "user", "text": "hello",
+	})
+	var out bytes.Buffer
+	server := RPCServer{Session: session}
+	input := strings.NewReader(
+		`{"id":"e1","type":"export","outputPath":"session.html"}` + "\n" +
+			`{"id":"e2","type":"export","outputPath":"session.jsonl"}` + "\n" +
+			`{"id":"s1","type":"share","outputPath":"shared.jsonl"}` + "\n",
+	)
+	if err := server.Serve(context.Background(), input, &out); err != nil {
+		t.Fatal(err)
+	}
+	responses := decodeRPCResponses(t, out.String())
+	if len(responses) != 3 {
+		t.Fatalf("responses len = %d", len(responses))
+	}
+	if responses[0]["success"] != true || responses[1]["success"] != true || responses[2]["success"] != true {
+		t.Fatalf("responses = %#v", responses)
+	}
+	htmlPath := responses[0]["data"].(map[string]any)["path"].(string)
+	if _, err := os.Stat(htmlPath); err != nil {
+		t.Fatalf("html export missing: %v", err)
+	}
+	jsonlPath := responses[1]["data"].(map[string]any)["path"].(string)
+	if _, err := os.Stat(jsonlPath); err != nil {
+		t.Fatalf("jsonl export missing: %v", err)
+	}
+	shareURL := responses[2]["data"].(map[string]any)["url"].(string)
+	if !strings.HasPrefix(shareURL, "file://") {
+		t.Fatalf("share url = %q", shareURL)
+	}
+	sharePath := strings.TrimPrefix(shareURL, "file://")
+	if _, err := os.Stat(sharePath); err != nil {
+		t.Fatalf("shared file missing: %v", err)
+	}
+}
+
 func TestRPCSessionTreeCommands(t *testing.T) {
 	session := NewSession(t.TempDir(), nil)
 	if err := session.appendEntry(SessionEntry{ID: "node-1", Type: "message", Message: map[string]any{
@@ -345,6 +510,180 @@ func TestRPCSessionTreeCommands(t *testing.T) {
 	}
 	if responses[3]["success"] != true {
 		t.Fatalf("new_session failed = %#v", responses[3])
+	}
+}
+
+func TestRPCBranchAndTreeCommands(t *testing.T) {
+	session := NewSession(t.TempDir(), nil)
+	if err := session.appendEntry(SessionEntry{ID: "u-1", Type: "message", Message: map[string]any{
+		"role": "user", "text": "first",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.appendEntry(SessionEntry{ID: "a-1", Type: "message", Message: map[string]any{
+		"role": "assistant", "text": "reply",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.appendEntry(SessionEntry{ID: "u-2", Type: "message", Message: map[string]any{
+		"role": "user", "text": "second",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	server := RPCServer{Session: session}
+	input := strings.NewReader(
+		`{"id":"b1","type":"branch","entryId":"u-1"}` + "\n" +
+			`{"id":"m1","type":"get_messages"}` + "\n" +
+			`{"id":"t1","type":"tree"}` + "\n",
+	)
+	if err := server.Serve(context.Background(), input, &out); err != nil {
+		t.Fatal(err)
+	}
+	responses := decodeRPCResponses(t, out.String())
+	if len(responses) != 3 {
+		t.Fatalf("responses len = %d", len(responses))
+	}
+	if responses[0]["success"] != true {
+		t.Fatalf("branch failed = %#v", responses[0])
+	}
+	messages := responses[1]["data"].(map[string]any)["messages"].([]any)
+	if len(messages) != 1 {
+		t.Fatalf("messages after branch = %d", len(messages))
+	}
+	tree := responses[2]["data"].(map[string]any)["nodes"].([]any)
+	if len(tree) != 1 {
+		t.Fatalf("tree nodes = %d", len(tree))
+	}
+}
+
+func TestRPCBranchCommandAcceptsSummary(t *testing.T) {
+	session := NewSession(t.TempDir(), nil)
+	if err := session.appendEntry(SessionEntry{ID: "u1", Type: "message", Message: map[string]any{
+		"role": "user", "text": "first",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.appendEntry(SessionEntry{ID: "a1", Type: "message", Message: map[string]any{
+		"role": "assistant", "text": "answer",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	server := RPCServer{Session: session}
+	input := strings.NewReader(
+		`{"id":"b1","type":"branch","entryId":"u1","summary":"came from answer"}` + "\n" +
+			`{"id":"m1","type":"get_messages"}` + "\n",
+	)
+	if err := server.Serve(context.Background(), input, &out); err != nil {
+		t.Fatal(err)
+	}
+	responses := decodeRPCResponses(t, out.String())
+	if len(responses) != 2 || responses[0]["success"] != true {
+		t.Fatalf("responses = %#v", responses)
+	}
+	messages := responses[1]["data"].(map[string]any)["messages"].([]any)
+	if len(messages) != 2 {
+		t.Fatalf("messages = %#v", messages)
+	}
+	summary := messages[1].(map[string]any)
+	if summary["role"] != "branchSummary" || summary["summary"] != "came from answer" {
+		t.Fatalf("summary = %#v", summary)
+	}
+}
+
+func TestRPCSetAndGetLabel(t *testing.T) {
+	session := NewSession(t.TempDir(), nil)
+	if err := session.appendEntry(SessionEntry{ID: "u1", Type: "message", Message: map[string]any{
+		"role": "user", "text": "first",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	server := RPCServer{Session: session}
+	input := strings.NewReader(
+		`{"id":"l1","type":"set_label","entryId":"u1","label":"start"}` + "\n" +
+			`{"id":"l2","type":"get_label","entryId":"u1"}` + "\n" +
+			`{"id":"t1","type":"tree"}` + "\n",
+	)
+	if err := server.Serve(context.Background(), input, &out); err != nil {
+		t.Fatal(err)
+	}
+	responses := decodeRPCResponses(t, out.String())
+	if len(responses) != 3 || responses[0]["success"] != true {
+		t.Fatalf("responses = %#v", responses)
+	}
+	if responses[1]["data"].(map[string]any)["label"] != "start" {
+		t.Fatalf("label response = %#v", responses[1])
+	}
+	nodes := responses[2]["data"].(map[string]any)["nodes"].([]any)
+	node := nodes[0].(map[string]any)
+	if node["label"] != "start" {
+		t.Fatalf("tree node = %#v", node)
+	}
+}
+
+func TestRPCAppendAndGetCustomEntries(t *testing.T) {
+	session := NewSession(t.TempDir(), nil)
+	var out bytes.Buffer
+	server := RPCServer{Session: session}
+	input := strings.NewReader(
+		`{"id":"c1","type":"append_custom_entry","customType":"demo","data":{"value":"one"}}` + "\n" +
+			`{"id":"c2","type":"get_custom_entries","customType":"demo"}` + "\n",
+	)
+	if err := server.Serve(context.Background(), input, &out); err != nil {
+		t.Fatal(err)
+	}
+	responses := decodeRPCResponses(t, out.String())
+	if len(responses) != 2 || responses[0]["success"] != true || responses[1]["success"] != true {
+		t.Fatalf("responses = %#v", responses)
+	}
+	if responses[0]["data"].(map[string]any)["entryId"] == "" {
+		t.Fatalf("missing custom entry id: %#v", responses[0])
+	}
+	entries := responses[1]["data"].(map[string]any)["entries"].([]any)
+	if len(entries) != 1 {
+		t.Fatalf("entries = %#v", entries)
+	}
+	data := entries[0].(map[string]any)["data"].(map[string]any)
+	if data["value"] != "one" {
+		t.Fatalf("data = %#v", data)
+	}
+}
+
+func TestRPCNewSessionAcceptsParentSession(t *testing.T) {
+	root := t.TempDir()
+	sessionPath := filepath.Join(root, "session.jsonl")
+	parentPath := filepath.Join(root, "parent-session.jsonl")
+	session := NewSession(root, nil)
+	session.Store = NewSessionStore(sessionPath)
+
+	var out bytes.Buffer
+	server := RPCServer{Session: session}
+	input := strings.NewReader(`{"id":"n1","type":"new_session","parentSession":"` + parentPath + `"}` + "\n")
+
+	if err := server.Serve(context.Background(), input, &out); err != nil {
+		t.Fatal(err)
+	}
+	responses := decodeRPCResponses(t, out.String())
+	if len(responses) != 1 || responses[0]["success"] != true {
+		t.Fatalf("new_session response = %#v", responses)
+	}
+	entries, err := session.Store.ReadEntries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("new session entries = %d", len(entries))
+	}
+	if entries[0].Type != "session" {
+		t.Fatalf("new session entry type = %q", entries[0].Type)
+	}
+	if entries[0].ParentSession != parentPath {
+		t.Fatalf("new session parent = %q", entries[0].ParentSession)
 	}
 }
 

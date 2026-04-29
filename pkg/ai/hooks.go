@@ -6,7 +6,14 @@ func applyPayloadHook(req CompletionRequest, payload any) (any, error) {
 	if req.Options.OnPayload == nil {
 		return payload, nil
 	}
-	return req.Options.OnPayload(payload, req)
+	next, err := req.Options.OnPayload(payload, req)
+	if err != nil {
+		return nil, err
+	}
+	if next == nil {
+		return payload, nil
+	}
+	return next, nil
 }
 
 func notifyResponseHook(req CompletionRequest, resp *http.Response) error {

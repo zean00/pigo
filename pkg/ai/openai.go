@@ -34,6 +34,7 @@ type openAIRequest struct {
 }
 
 type openAIResponse struct {
+	ID      string         `json:"id,omitempty"`
 	Choices []openAIChoice `json:"choices"`
 	Usage   *openAIUsage   `json:"usage,omitempty"`
 }
@@ -81,6 +82,7 @@ type openAIArguments struct {
 }
 
 type openAIStreamChunk struct {
+	ID      string               `json:"id,omitempty"`
 	Choices []openAIStreamChoice `json:"choices"`
 }
 
@@ -102,6 +104,7 @@ type openAIResponsesRequest struct {
 }
 
 type openAIResponsesResponse struct {
+	ID     string                `json:"id,omitempty"`
 	Output []any                 `json:"output"`
 	Usage  *openAIResponsesUsage `json:"usage"`
 	Status string                `json:"status"`
@@ -593,6 +596,7 @@ func (provider *openAIProvider) Complete(ctx context.Context, req CompletionRequ
 		}
 
 		result := openAIChoiceToNormalized(completion.Choices[0])
+		result.ResponseID = completion.ID
 		if completion.Usage != nil {
 			result.Usage = &Usage{
 				Input:       completion.Usage.PromptTokens,
@@ -940,6 +944,7 @@ func openAIResponsesToResult(body io.Reader) (NormalizedResult, []NormalizedEven
 	result := NormalizedResult{
 		Role:       "assistant",
 		StopReason: mapOpenAIStopReason(stopReason),
+		ResponseID: response.ID,
 		Text:       ContentText(blocks),
 		Content:    NormalizedContent(blocks),
 	}
@@ -1135,6 +1140,7 @@ func openAIStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, 
 	builder := strings.Builder{}
 	toolCalls := map[int]*openAIStreamingCall{}
 	stopReason := "stop"
+	responseID := ""
 	events := []NormalizedEvent{{Type: "start"}}
 	textStarted := false
 	toolBlockIndexes := map[int]int{}
@@ -1153,6 +1159,9 @@ func openAIStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, 
 		var chunk openAIStreamChunk
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
 			return NormalizedResult{}, nil, fmt.Errorf("parse openai stream chunk: %w", err)
+		}
+		if chunk.ID != "" && responseID == "" {
+			responseID = chunk.ID
 		}
 		for _, choice := range chunk.Choices {
 			if choice.FinishReason != "" {
@@ -1232,6 +1241,7 @@ func openAIStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, 
 			Type:       "toolcall_end",
 			ContentIdx: len(blocks) - 1,
 			ToolCall: &NormalizedTool{
+				ID:        call.ID,
 				Name:      call.Name,
 				Arguments: arguments,
 				HasID:     call.ID != "",
@@ -1249,6 +1259,7 @@ func openAIStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, 
 	result := NormalizedResult{
 		Role:       "assistant",
 		StopReason: mapOpenAIStopReason(stopReason),
+		ResponseID: responseID,
 		Text:       ContentText(blocks),
 		Content:    NormalizedContent(blocks),
 	}

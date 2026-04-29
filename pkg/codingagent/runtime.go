@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,14 @@ type Session struct {
 	entriesByID   map[string]SessionEntry
 	leafID        string
 	entrySequence int
+	parentSession string
+	labelsByID    map[string]string
+	labelTimes    map[string]string
+	customEntries []SessionEntry
+
+	extensionCommands []SlashCommandInfo
+	promptTemplates   []SlashCommandInfo
+	skills            []SlashCommandInfo
 }
 
 type ModelInfo struct {
@@ -53,9 +62,40 @@ type ModelInfo struct {
 	ModelID  string `json:"id"`
 }
 
+type SlashCommandInfo struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Source      string         `json:"source"`
+	SourceInfo  map[string]any `json:"sourceInfo"`
+	Content     string         `json:"-"`
+	FilePath    string         `json:"-"`
+	BaseDir     string         `json:"-"`
+	Disabled    bool           `json:"-"`
+}
+
+const (
+	bashExecutionTextPrefix = "Ran `%s`\n"
+	branchSummaryPrefix     = "The following is a summary of a branch that this conversation came back from:\n\n<summary>\n"
+	branchSummarySuffix     = "\n</summary>\n"
+	compactionSummaryPrefix = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n"
+	compactionSummarySuffix = "\n</summary>\n"
+)
+
 type ForkMessage struct {
 	EntryID string `json:"entryId"`
 	Text    string `json:"text"`
+}
+
+type SessionTreeNode struct {
+	ID             string            `json:"id"`
+	Type           string            `json:"type"`
+	ParentID       string            `json:"parentId"`
+	Role           string            `json:"role,omitempty"`
+	Timestamp      string            `json:"timestamp"`
+	Text           string            `json:"text,omitempty"`
+	Label          string            `json:"label,omitempty"`
+	LabelTimestamp string            `json:"labelTimestamp,omitempty"`
+	Children       []SessionTreeNode `json:"children"`
 }
 
 type CompactionResult struct {
@@ -118,10 +158,396 @@ func NewSession(root string, turns []AssistantTurn) *Session {
 	return session
 }
 
+func (s *Session) ExtensionCommands() []SlashCommandInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	commands := make([]SlashCommandInfo, len(s.extensionCommands))
+	copy(commands, s.extensionCommands)
+	return commands
+}
+
+func (s *Session) SetExtensionCommands(commands []SlashCommandInfo) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.extensionCommands = copySlashCommands(commands)
+}
+
+func (s *Session) PromptTemplates() []SlashCommandInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	commands := make([]SlashCommandInfo, len(s.promptTemplates))
+	copy(commands, s.promptTemplates)
+	return commands
+}
+
+func (s *Session) SetPromptTemplates(commands []SlashCommandInfo) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.promptTemplates = copySlashCommands(commands)
+}
+
+func (s *Session) Skills() []SlashCommandInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	commands := make([]SlashCommandInfo, len(s.skills))
+	copy(commands, s.skills)
+	return commands
+}
+
+func (s *Session) SetSkills(commands []SlashCommandInfo) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.skills = copySlashCommands(commands)
+}
+
+func (s *Session) SendCustomMessage(customType string, content any, display bool, details any) error {
+	customType = strings.TrimSpace(customType)
+	if customType == "" {
+		return fmt.Errorf("missing customType")
+	}
+	message := agentcore.Message{
+		"role":       "custom",
+		"customType": customType,
+		"display":    display,
+		"content":    content,
+		"details":    details,
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	return s.appendEntry(SessionEntry{
+		Type:    "message",
+		Message: message,
+	})
+}
+
+func (s *Session) AppendCustomEntry(customType string, data any) (string, error) {
+	customType = strings.TrimSpace(customType)
+	if customType == "" {
+		return "", fmt.Errorf("missing customType")
+	}
+	entry := SessionEntry{
+		Type:       "custom",
+		ID:         s.newEntryID(),
+		CustomType: customType,
+		Data:       data,
+	}
+	if err := s.appendEntry(entry); err != nil {
+		return "", err
+	}
+	return entry.ID, nil
+}
+
+func (s *Session) CustomEntries(customType string) []SessionEntry {
+	customType = strings.TrimSpace(customType)
+	out := make([]SessionEntry, 0, len(s.customEntries))
+	for _, entry := range s.customEntries {
+		if customType != "" && entry.CustomType != customType {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func copySlashCommands(commands []SlashCommandInfo) []SlashCommandInfo {
+	if len(commands) == 0 {
+		return nil
+	}
+	cloned := make([]SlashCommandInfo, 0, len(commands))
+	for _, command := range commands {
+		cloned = append(cloned, cloneSlashCommand(command))
+	}
+	return cloned
+}
+
+func cloneSlashCommand(command SlashCommandInfo) SlashCommandInfo {
+	sourceInfo := make(map[string]any, len(command.SourceInfo))
+	for key, value := range command.SourceInfo {
+		sourceInfo[key] = value
+	}
+	return SlashCommandInfo{
+		Name:        strings.TrimSpace(command.Name),
+		Description: strings.TrimSpace(command.Description),
+		Source:      strings.TrimSpace(command.Source),
+		SourceInfo:  sourceInfo,
+		Content:     command.Content,
+		FilePath:    command.FilePath,
+		BaseDir:     command.BaseDir,
+		Disabled:    command.Disabled,
+	}
+}
+
+func (s *Session) GetSlashCommands() []SlashCommandInfo {
+	var commands []SlashCommandInfo
+	commands = append(commands, SlashCommandInfo{
+		Name:        "branch",
+		Description: "branch conversation history at an entry",
+		Source:      "prompt",
+		SourceInfo:  map[string]any{},
+	})
+	commands = append(commands, SlashCommandInfo{
+		Name:        "tree",
+		Description: "read conversation branch tree",
+		Source:      "prompt",
+		SourceInfo:  map[string]any{},
+	})
+
+	for _, command := range s.ExtensionCommands() {
+		commands = append(commands, command)
+	}
+	for _, command := range s.PromptTemplates() {
+		commands = append(commands, command)
+	}
+	for _, command := range s.Skills() {
+		commands = append(commands, command)
+	}
+	return dedupeSlashCommands(commands)
+}
+
+func dedupeSlashCommands(commands []SlashCommandInfo) []SlashCommandInfo {
+	seen := map[string]struct{}{}
+	out := make([]SlashCommandInfo, 0, len(commands))
+	for _, command := range commands {
+		name := strings.TrimSpace(command.Name)
+		if name == "" || command.Source == "" {
+			continue
+		}
+		key := strings.ToLower(name) + "|" + strings.ToLower(command.Source)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		command.Name = name
+		if command.SourceInfo == nil {
+			command.SourceInfo = map[string]any{}
+		}
+		out = append(out, command)
+	}
+	return out
+}
+
+func (s *Session) expandPromptTemplate(prompt string) string {
+	if !strings.HasPrefix(prompt, "/") {
+		return prompt
+	}
+	name, args := splitCommandPrompt(prompt)
+	if name == "" {
+		return prompt
+	}
+	for _, template := range s.PromptTemplates() {
+		if template.Name != name {
+			continue
+		}
+		if template.Content == "" {
+			return prompt
+		}
+		return substitutePromptArgs(template.Content, parseCommandArgs(args))
+	}
+	if strings.HasPrefix(name, "skill:") {
+		skillName := strings.TrimPrefix(name, "skill:")
+		for _, skill := range s.Skills() {
+			if strings.TrimPrefix(skill.Name, "skill:") != skillName {
+				continue
+			}
+			return formatSkillInvocationPrompt(skill, args)
+		}
+	}
+	return prompt
+}
+
+func splitCommandPrompt(prompt string) (string, string) {
+	trimmed := strings.TrimSpace(strings.TrimPrefix(prompt, "/"))
+	if trimmed == "" {
+		return "", ""
+	}
+	name, args, ok := strings.Cut(trimmed, " ")
+	if !ok {
+		return trimmed, ""
+	}
+	return strings.TrimSpace(name), strings.TrimSpace(args)
+}
+
+func parseCommandArgs(argsString string) []string {
+	args := []string{}
+	current := strings.Builder{}
+	var quote rune
+	for _, char := range argsString {
+		if quote != 0 {
+			if char == quote {
+				quote = 0
+				continue
+			}
+			current.WriteRune(char)
+			continue
+		}
+		if char == '"' || char == '\'' {
+			quote = char
+			continue
+		}
+		if char == ' ' || char == '\t' {
+			if current.Len() > 0 {
+				args = append(args, current.String())
+				current.Reset()
+			}
+			continue
+		}
+		current.WriteRune(char)
+	}
+	if current.Len() > 0 {
+		args = append(args, current.String())
+	}
+	return args
+}
+
+func substitutePromptArgs(content string, args []string) string {
+	result := content
+	for i, arg := range args {
+		result = strings.ReplaceAll(result, fmt.Sprintf("$%d", i+1), arg)
+	}
+	for i := 1; i <= 32; i++ {
+		if i > len(args) {
+			result = strings.ReplaceAll(result, fmt.Sprintf("$%d", i), "")
+		}
+	}
+	allArgs := strings.Join(args, " ")
+	result = substitutePromptArgSlices(result, args)
+	result = strings.ReplaceAll(result, "$ARGUMENTS", allArgs)
+	result = strings.ReplaceAll(result, "$@", allArgs)
+	return result
+}
+
+func substitutePromptArgSlices(content string, args []string) string {
+	result := content
+	for {
+		start := strings.Index(result, "${@:")
+		if start < 0 {
+			return result
+		}
+		end := strings.Index(result[start:], "}")
+		if end < 0 {
+			return result
+		}
+		end += start
+		expression := result[start+4 : end]
+		parts := strings.Split(expression, ":")
+		from := parsePositiveInt(parts[0]) - 1
+		if from < 0 {
+			from = 0
+		}
+		to := len(args)
+		if len(parts) > 1 {
+			length := parsePositiveInt(parts[1])
+			if length >= 0 {
+				to = from + length
+			}
+		}
+		if from > len(args) {
+			from = len(args)
+		}
+		if to > len(args) {
+			to = len(args)
+		}
+		replacement := strings.Join(args[from:to], " ")
+		result = result[:start] + replacement + result[end+1:]
+	}
+}
+
+func parsePositiveInt(raw string) int {
+	value := 0
+	for _, char := range strings.TrimSpace(raw) {
+		if char < '0' || char > '9' {
+			return 0
+		}
+		value = value*10 + int(char-'0')
+	}
+	return value
+}
+
+func defaultString(value string, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
+func formatSkillInvocationPrompt(skill SlashCommandInfo, args string) string {
+	var builder strings.Builder
+	builder.WriteString("Use the following skill for this request.\n\n")
+	builder.WriteString(formatSkillForPrompt(skill))
+	if strings.TrimSpace(args) != "" {
+		builder.WriteString("\n\nRequest:\n")
+		builder.WriteString(strings.TrimSpace(args))
+	}
+	return builder.String()
+}
+
+func (s *Session) transformContextWithSkills(messages []ai.Message) []ai.Message {
+	skillPrompt := s.formatSkillsForPrompt()
+	if strings.TrimSpace(skillPrompt) == "" {
+		return messages
+	}
+	out := make([]ai.Message, 0, len(messages)+1)
+	out = append(out, ai.Message{Role: "user", Content: skillPrompt})
+	out = append(out, messages...)
+	return out
+}
+
+func (s *Session) formatSkillsForPrompt() string {
+	skills := s.Skills()
+	if len(skills) == 0 {
+		return ""
+	}
+	lines := []string{
+		"The following skills provide specialized instructions for specific tasks.",
+		"Use the read tool to load a skill's file when the task matches its description.",
+		"When a skill file references a relative path, resolve it against the skill directory and use that absolute path in tool commands.",
+		"",
+		"<available_skills>",
+	}
+	visible := 0
+	for _, skill := range skills {
+		if skill.Disabled {
+			continue
+		}
+		visible++
+		lines = append(lines, formatSkillForPrompt(skill))
+	}
+	if visible == 0 {
+		return ""
+	}
+	lines = append(lines, "</available_skills>")
+	return strings.Join(lines, "\n")
+}
+
+func formatSkillForPrompt(skill SlashCommandInfo) string {
+	location := skill.FilePath
+	if location == "" {
+		if raw, ok := skill.SourceInfo["path"].(string); ok {
+			location = raw
+		}
+	}
+	return strings.Join([]string{
+		"  <skill>",
+		"    <name>" + escapeXML(strings.TrimPrefix(skill.Name, "skill:")) + "</name>",
+		"    <description>" + escapeXML(skill.Description) + "</description>",
+		"    <location>" + escapeXML(location) + "</location>",
+		"  </skill>",
+	}, "\n")
+}
+
+func escapeXML(value string) string {
+	value = strings.ReplaceAll(value, "&", "&amp;")
+	value = strings.ReplaceAll(value, "<", "&lt;")
+	value = strings.ReplaceAll(value, ">", "&gt;")
+	value = strings.ReplaceAll(value, `"`, "&quot;")
+	value = strings.ReplaceAll(value, "'", "&apos;")
+	return value
+}
+
 func (s *Session) Prompt(ctx context.Context, prompt string) error {
 	if s.IsStreaming {
 		return fmt.Errorf("session is already streaming")
 	}
+	prompt = s.expandPromptTemplate(prompt)
 
 	s.mu.Lock()
 	opCtx, cancel := context.WithCancel(ctx)
@@ -166,6 +592,7 @@ func (s *Session) Prompt(ctx context.Context, prompt string) error {
 			GetAPIKey: func(provider string) string {
 				return s.resolveProviderAPIKey(opCtx, provider)
 			},
+			TransformContext: s.transformContextWithSkills,
 		})
 	}
 	cancel()
@@ -222,16 +649,22 @@ func (s *Session) Abort() {
 }
 
 func (s *Session) NewSession() {
+	s.NewSessionWithParent("")
+}
+
+func (s *Session) NewSessionWithParent(parentSession string) {
 	s.turnIndex = 0
 	s.Events = nil
 	s.Messages = nil
 	s.AvailableModels = nil
 	s.OAuthCredentials = map[string]ai.OAuthCredentials{}
-	s.seedDefaultModels()
 	s.entries = nil
 	s.entriesByID = map[string]SessionEntry{}
 	s.leafID = ""
 	s.entrySequence = 0
+	s.labelsByID = map[string]string{}
+	s.labelTimes = map[string]string{}
+	s.customEntries = nil
 	s.SessionEntryTypes = []string{"model_change", "thinking_level_change"}
 	s.Name = ""
 	s.ThinkingLevel = "off"
@@ -240,6 +673,36 @@ func (s *Session) NewSession() {
 	s.SteeringMode = "one-at-a-time"
 	s.FollowUpMode = "one-at-a-time"
 	s.IsStreaming = false
+	s.parentSession = strings.TrimSpace(parentSession)
+	s.seedDefaultModels()
+
+	if s.Store != nil {
+		headerPath := s.nextSessionPathOrCurrent()
+		if headerPath == "" {
+			headerPath = s.Store.Path
+		} else {
+			s.Store = NewSessionStore(headerPath)
+		}
+		if headerPath != "" {
+			_ = writeSessionEntries(headerPath, []SessionEntry{{
+				Type:          "session",
+				ID:            s.newEntryID(),
+				ParentSession: s.parentSession,
+				Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
+			}})
+		}
+	}
+}
+
+func (s *Session) nextSessionPathOrCurrent() string {
+	if s.Store == nil || s.Store.Path == "" {
+		return ""
+	}
+	target, err := s.nextSessionPath("session")
+	if err != nil {
+		return ""
+	}
+	return target
 }
 
 func (s *Session) seedDefaultModels() {
@@ -423,6 +886,15 @@ func (s *Session) Compact(customInstructions string) CompactionResult {
 		FirstKeptEntryID: kept,
 		TokensBefore:     tokensBefore,
 	})
+	_ = s.appendEntry(SessionEntry{
+		Type: "message",
+		Message: map[string]any{
+			"role":           "compactionSummary",
+			"summary":        summary,
+			"tokensBefore":   tokensBefore,
+			"fromCompaction": true,
+		},
+	})
 	return CompactionResult{
 		Summary:        summary,
 		FirstKeptEntry: kept,
@@ -484,8 +956,11 @@ func (s *Session) Bash(ctx context.Context, command string) (BashResult, error) 
 }
 
 func (s *Session) ExportToHTML(outputPath string) (string, error) {
+	outputPath = strings.TrimSpace(outputPath)
 	if outputPath == "" {
 		outputPath = filepath.Join(s.Root, "session.html")
+	} else if !filepath.IsAbs(outputPath) {
+		outputPath = filepath.Join(s.Root, outputPath)
 	}
 	payload := map[string]any{
 		"sessionId": "pigo-session",
@@ -496,10 +971,46 @@ func (s *Session) ExportToHTML(outputPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		return "", err
+	}
 	if err := os.WriteFile(outputPath, []byte("<!doctype html><html><body><pre>"+html.EscapeString(string(marshaled))+"</pre></body></html>"), 0o644); err != nil {
 		return "", err
 	}
 	return outputPath, nil
+}
+
+func (s *Session) ExportToJSONL(outputPath string) (string, error) {
+	outputPath = strings.TrimSpace(outputPath)
+	if outputPath == "" {
+		outputPath = filepath.Join(s.Root, "session.jsonl")
+	} else if !filepath.IsAbs(outputPath) {
+		outputPath = filepath.Join(s.Root, outputPath)
+	}
+
+	header := SessionEntry{
+		Type:          "session",
+		Version:       3,
+		ID:            s.newEntryID(),
+		ParentSession: s.parentSession,
+		CWD:           s.Root,
+		Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	branch := s.resolveBranchEntries(s.leafID)
+	linear := linearizeSessionEntries(branch)
+	labels := s.labelEntriesForBranch(branch)
+	exportEntries := append([]SessionEntry{header}, linear...)
+	exportEntries = append(exportEntries, labels...)
+	return outputPath, writeSessionEntries(outputPath, exportEntries)
+}
+
+func (s *Session) Share(outputPath string) (string, error) {
+	path, err := s.ExportToJSONL(outputPath)
+	if err != nil {
+		return "", err
+	}
+	url := "file://" + filepath.ToSlash(path)
+	return url, nil
 }
 
 func (s *Session) SwitchSession(sessionPath string) error {
@@ -547,7 +1058,16 @@ func (s *Session) Fork(entryID string) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	if err := writeSessionEntries(targetPath, path); err != nil {
+	header := SessionEntry{
+		Type:      "session",
+		ID:        s.newEntryID(),
+		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if s.Store != nil {
+		header.ParentSession = s.Store.Path
+	}
+	sessionEntries := append([]SessionEntry{header}, path...)
+	if err := writeSessionEntries(targetPath, sessionEntries); err != nil {
 		return "", false, err
 	}
 	if err := s.SwitchSession(targetPath); err != nil {
@@ -565,13 +1085,139 @@ func (s *Session) Clone() (bool, error) {
 		return false, err
 	}
 	path := s.resolveBranchEntries(s.leafID)
-	if err := writeSessionEntries(targetPath, path); err != nil {
+	header := SessionEntry{
+		Type:      "session",
+		ID:        s.newEntryID(),
+		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if s.Store != nil {
+		header.ParentSession = s.Store.Path
+	}
+	sessionEntries := append([]SessionEntry{header}, path...)
+	if err := writeSessionEntries(targetPath, sessionEntries); err != nil {
 		return false, err
 	}
 	if err := s.SwitchSession(targetPath); err != nil {
 		return false, err
 	}
 	return false, nil
+}
+
+func (s *Session) Branch(entryID string) error {
+	entryID = strings.TrimSpace(entryID)
+	if entryID == "" || strings.EqualFold(entryID, "root") {
+		s.leafID = ""
+		s.rebuildStateFromLeaf("")
+		return nil
+	}
+	if s.entriesByID == nil {
+		s.entriesByID = map[string]SessionEntry{}
+	}
+	entry, ok := s.entriesByID[entryID]
+	if !ok || entry.ID == "" {
+		return fmt.Errorf("Invalid entry ID for branching")
+	}
+	s.leafID = entry.ID
+	s.rebuildStateFromLeaf(s.leafID)
+	return nil
+}
+
+func (s *Session) BranchWithSummary(entryID string, summary string) error {
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return s.Branch(entryID)
+	}
+	fromID := s.leafID
+	if err := s.Branch(entryID); err != nil {
+		return err
+	}
+	parentID := s.leafID
+	if strings.TrimSpace(entryID) == "" || strings.EqualFold(entryID, "root") {
+		parentID = ""
+	}
+	return s.appendEntry(SessionEntry{
+		Type:     "branch_summary",
+		ParentID: parentID,
+		Summary:  summary,
+		FromID:   defaultString(fromID, "root"),
+	})
+}
+
+func (s *Session) SetLabel(entryID string, label string) error {
+	entryID = strings.TrimSpace(entryID)
+	if entryID == "" {
+		return fmt.Errorf("missing entryId")
+	}
+	if s.entriesByID == nil || s.entriesByID[entryID].ID == "" {
+		return fmt.Errorf("Entry %s not found", entryID)
+	}
+	return s.appendMetadataEntry(SessionEntry{
+		Type:     "label",
+		TargetID: entryID,
+		Label:    strings.TrimSpace(label),
+	})
+}
+
+func (s *Session) GetLabel(entryID string) string {
+	if s.labelsByID == nil {
+		return ""
+	}
+	return s.labelsByID[entryID]
+}
+
+func (s *Session) Tree() []SessionTreeNode {
+	nodeMap := map[string]*SessionTreeNode{}
+	roots := []*SessionTreeNode{}
+
+	for _, entry := range s.entries {
+		if entry.Type == "session" || entry.Type == "label" {
+			continue
+		}
+		node := &SessionTreeNode{
+			ID:        entry.ID,
+			Type:      entry.Type,
+			ParentID:  entry.ParentID,
+			Timestamp: entry.Timestamp,
+			Children:  []SessionTreeNode{},
+		}
+		if label := s.GetLabel(entry.ID); label != "" {
+			node.Label = label
+			node.LabelTimestamp = s.labelTimes[entry.ID]
+		}
+		if entry.Type == "message" {
+			role, _ := entry.Message["role"].(string)
+			node.Role = role
+			node.Text = messageTextFromSessionEntry(entry)
+		} else if entry.Type == "branch_summary" {
+			node.Role = "branchSummary"
+			node.Text = entry.Summary
+		}
+		nodeMap[entry.ID] = node
+	}
+
+	for _, entry := range s.entries {
+		if entry.Type == "session" || entry.Type == "label" {
+			continue
+		}
+		node := nodeMap[entry.ID]
+		if node == nil {
+			continue
+		}
+		if entry.ParentID == "" || entry.ParentID == entry.ID {
+			roots = append(roots, node)
+			continue
+		}
+		parent := nodeMap[entry.ParentID]
+		if parent == nil {
+			roots = append(roots, node)
+			continue
+		}
+		parent.Children = append(parent.Children, *node)
+		node = nil
+	}
+
+	sortSessionTreeNodes(roots)
+	return derefSessionTreeNodes(roots)
 }
 
 func (s *Session) GetForkMessages() []ForkMessage {
@@ -704,11 +1350,34 @@ func (s *Session) appendEntry(entry SessionEntry) error {
 	return nil
 }
 
+func (s *Session) appendMetadataEntry(entry SessionEntry) error {
+	leafID := s.leafID
+	entry = s.prepareEntry(entry)
+	entry.ParentID = ""
+	s.entries = append(s.entries, entry)
+	s.entriesByID[entry.ID] = entry
+	s.leafID = leafID
+
+	s.applyEntry(entry)
+	if err := s.Store.Append(entry); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *Session) applyEntry(entry SessionEntry) {
 	s.SessionEntryTypes = append(s.SessionEntryTypes, entry.Type)
 	switch entry.Type {
 	case "message":
 		s.Messages = append(s.Messages, entry.Message)
+	case "branch_summary":
+		if entry.Summary != "" {
+			s.Messages = append(s.Messages, agentcore.Message{
+				"role":    "branchSummary",
+				"summary": entry.Summary,
+				"fromId":  entry.FromID,
+			})
+		}
 	case "model_change":
 		s.Provider = entry.Provider
 		s.ModelID = entry.ModelID
@@ -722,6 +1391,24 @@ func (s *Session) applyEntry(entry SessionEntry) {
 		s.ThinkingLevel = entry.Level
 	case "session_name":
 		s.Name = entry.Name
+	case "label":
+		if entry.TargetID != "" {
+			if s.labelsByID == nil {
+				s.labelsByID = map[string]string{}
+			}
+			if s.labelTimes == nil {
+				s.labelTimes = map[string]string{}
+			}
+			if strings.TrimSpace(entry.Label) == "" {
+				delete(s.labelsByID, entry.TargetID)
+				delete(s.labelTimes, entry.TargetID)
+			} else {
+				s.labelsByID[entry.TargetID] = entry.Label
+				s.labelTimes[entry.TargetID] = entry.Timestamp
+			}
+		}
+	case "custom":
+		s.customEntries = append(s.customEntries, entry)
 	case "oauth_login":
 		if entry.OAuthProvider != "" && entry.OAuthCredentials != nil {
 			if s.OAuthCredentials == nil {
@@ -742,16 +1429,21 @@ func (s *Session) loadSession(entries []SessionEntry) {
 	s.entriesByID = map[string]SessionEntry{}
 	s.leafID = ""
 	s.entrySequence = 0
+	s.labelsByID = map[string]string{}
+	s.labelTimes = map[string]string{}
+	s.customEntries = nil
 	s.SessionEntryTypes = []string{"model_change", "thinking_level_change"}
 	s.Name = ""
 	s.ThinkingLevel = "off"
 	s.Provider = ""
 	s.ModelID = ""
+	s.parentSession = ""
 
 	if len(entries) == 0 {
 		s.entries = make([]SessionEntry, 0)
 		return
 	}
+
 	for i, entry := range entries {
 		if strings.TrimSpace(entry.ID) == "" || s.entriesByID[entry.ID].ID != "" {
 			entry.ID = s.newEntryID()
@@ -759,13 +1451,53 @@ func (s *Session) loadSession(entries []SessionEntry) {
 		if entry.Timestamp == "" {
 			entry.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
 		}
+		if entry.Type == "session" && s.parentSession == "" {
+			s.parentSession = entry.ParentSession
+		}
 		entries[i] = entry
 		s.entries = append(s.entries, entry)
 		s.entriesByID[entry.ID] = entry
-		s.leafID = entry.ID
 	}
-	for _, entry := range s.resolveBranchEntries(s.leafID) {
+
+	for i := len(s.entries) - 1; i >= 0; i-- {
+		if s.entries[i].Type == "session" || s.entries[i].Type == "label" {
+			continue
+		}
+		s.leafID = s.entries[i].ID
+		break
+	}
+	s.rebuildStateFromLeaf(s.leafID)
+}
+
+func (s *Session) rebuildStateFromLeaf(leafID string) {
+	s.Events = nil
+	s.Messages = nil
+	s.AvailableModels = nil
+	s.OAuthCredentials = map[string]ai.OAuthCredentials{}
+	s.SessionEntryTypes = []string{"model_change", "thinking_level_change"}
+	s.labelsByID = map[string]string{}
+	s.labelTimes = map[string]string{}
+	s.customEntries = nil
+	s.Name = ""
+	s.ThinkingLevel = "off"
+	s.Provider = ""
+	s.ModelID = ""
+
+	branch := s.resolveBranchEntries(leafID)
+	for _, entry := range branch {
 		s.applyEntry(entry)
+	}
+	branchIDs := map[string]struct{}{}
+	for _, entry := range branch {
+		branchIDs[entry.ID] = struct{}{}
+	}
+	for _, entry := range s.entries {
+		if entry.Type != "label" {
+			continue
+		}
+		if _, ok := branchIDs[entry.TargetID]; ok {
+			s.applyEntry(entry)
+		}
 	}
 }
 
@@ -873,6 +1605,52 @@ func writeSessionEntries(path string, entries []SessionEntry) error {
 		}
 	}
 	return nil
+}
+
+func linearizeSessionEntries(entries []SessionEntry) []SessionEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]SessionEntry, 0, len(entries))
+	previousID := ""
+	for _, entry := range entries {
+		if entry.Type == "session" {
+			continue
+		}
+		entry.ParentID = previousID
+		out = append(out, entry)
+		previousID = entry.ID
+	}
+	return out
+}
+
+func (s *Session) labelEntriesForBranch(branch []SessionEntry) []SessionEntry {
+	if len(branch) == 0 || len(s.labelsByID) == 0 {
+		return nil
+	}
+	ids := map[string]struct{}{}
+	for _, entry := range branch {
+		if entry.ID != "" {
+			ids[entry.ID] = struct{}{}
+		}
+	}
+	labels := make([]SessionEntry, 0, len(s.labelsByID))
+	for targetID, label := range s.labelsByID {
+		if _, ok := ids[targetID]; !ok {
+			continue
+		}
+		labels = append(labels, SessionEntry{
+			Type:      "label",
+			ID:        s.newEntryID(),
+			TargetID:  targetID,
+			Label:     label,
+			Timestamp: defaultString(s.labelTimes[targetID], time.Now().UTC().Format(time.RFC3339Nano)),
+		})
+	}
+	sort.Slice(labels, func(i, j int) bool {
+		return labels[i].TargetID < labels[j].TargetID
+	})
+	return labels
 }
 
 func appendModelIfMissing(models []ModelInfo, model ModelInfo) []ModelInfo {
@@ -992,14 +1770,84 @@ func sessionMessagesToAI(messages []agentcore.Message) []ai.Message {
 			out = append(out, ai.Message{Role: "assistant", Content: content})
 		case "toolResult":
 			callID, _ := message["toolCallId"].(string)
-			content := messageTextFromSession(message)
-			if content == "" {
+			content, hasContent := message["content"]
+			if !hasContent || content == nil || content == "" {
+				content = messageTextFromSession(message)
+			}
+			if content == nil || content == "" {
 				continue
 			}
 			out = append(out, ai.Message{Role: "toolResult", ToolCallID: callID, Content: content})
+		case "custom", "bashExecution", "branchSummary", "compactionSummary":
+			content, ok := sessionMessageToContent(role, message)
+			if !ok || content == nil || content == "" {
+				continue
+			}
+			out = append(out, ai.Message{Role: "user", Content: content})
 		}
 	}
 	return out
+}
+
+func sessionMessageToContent(role string, message agentcore.Message) (any, bool) {
+	switch role {
+	case "custom":
+		content, ok := message["content"]
+		if !ok || content == nil {
+			return nil, false
+		}
+		if text, ok := content.(string); ok {
+			if text == "" {
+				return nil, false
+			}
+			return []ai.ContentBlock{{Type: "text", Text: text}}, true
+		}
+		if blocks, ok := content.([]ai.ContentBlock); ok {
+			return blocks, true
+		}
+		return content, true
+	case "bashExecution":
+		command, _ := message["command"].(string)
+		output, _ := message["output"].(string)
+		text := fmt.Sprintf(bashExecutionTextPrefix, command)
+		if output != "" {
+			text += fmt.Sprintf("```\n%s\n```", output)
+		} else {
+			text += "(no output)"
+		}
+		if exitCode, ok := message["exitCode"].(int); ok && exitCode != 0 {
+			text += fmt.Sprintf("\n\nCommand exited with code %d", exitCode)
+		}
+		return []ai.ContentBlock{{Type: "text", Text: text}}, true
+	case "branchSummary":
+		summary, _ := message["summary"].(string)
+		fromID, _ := message["fromId"].(string)
+		if summary == "" {
+			return nil, false
+		}
+		text := branchSummaryPrefix + summary
+		if fromID != "" {
+			text += "\nfrom: " + fromID
+		}
+		text += branchSummarySuffix
+		return []ai.ContentBlock{{Type: "text", Text: text}}, true
+	case "compactionSummary":
+		summary, _ := message["summary"].(string)
+		if summary == "" {
+			return nil, false
+		}
+		text := compactionSummaryPrefix + summary + compactionSummarySuffix
+		return []ai.ContentBlock{{Type: "text", Text: text}}, true
+	default:
+		return nil, false
+	}
+}
+
+func messageTextFromSessionEntry(entry SessionEntry) string {
+	if entry.ID == "" {
+		return ""
+	}
+	return messageTextFromSession(entry.Message)
 }
 
 func messageTextFromSession(message agentcore.Message) string {
@@ -1029,6 +1877,58 @@ func messageTextFromSession(message agentcore.Message) string {
 		parts = append(parts, text)
 	}
 	return strings.Join(parts, "")
+}
+
+func sortSessionTreeNodes(nodes []*SessionTreeNode) {
+	if len(nodes) == 0 {
+		return
+	}
+	sort.Slice(nodes, func(i, j int) bool {
+		iTime := parseTreeNodeTime(nodes[i].Timestamp)
+		jTime := parseTreeNodeTime(nodes[j].Timestamp)
+		return iTime.Before(jTime)
+	})
+	for _, node := range nodes {
+		children := make([]*SessionTreeNode, 0, len(node.Children))
+		for i := range node.Children {
+			children = append(children, &node.Children[i])
+		}
+		sortSessionTreeNodes(children)
+	}
+}
+
+func derefSessionTreeNodes(nodes []*SessionTreeNode) []SessionTreeNode {
+	out := make([]SessionTreeNode, len(nodes))
+	for i, node := range nodes {
+		if node == nil {
+			continue
+		}
+		out[i] = *node
+		out[i].Children = derefSessionTreeNodes(childrenToPointers(out[i].Children))
+	}
+	return out
+}
+
+func childrenToPointers(nodes []SessionTreeNode) []*SessionTreeNode {
+	if len(nodes) == 0 {
+		return nil
+	}
+	children := make([]*SessionTreeNode, len(nodes))
+	for i := range nodes {
+		children[i] = &nodes[i]
+	}
+	return children
+}
+
+func parseTreeNodeTime(value string) time.Time {
+	if value == "" {
+		return time.Time{}
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed
 }
 
 func asInt(value any) int {

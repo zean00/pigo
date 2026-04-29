@@ -173,7 +173,7 @@ func TestAnthropicProviderStreamingResponse(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = fmt.Fprint(w, "event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":5}}}\n\n")
+		_, _ = fmt.Fprint(w, "event: message_start\ndata: {\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":5}}}\n\n")
 		_, _ = fmt.Fprint(w, "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
 		_, _ = fmt.Fprint(w, "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n")
 		_, _ = fmt.Fprint(w, "event: content_block_start\ndata: {\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"math\",\"input\":{}}}\n\n")
@@ -202,6 +202,9 @@ func TestAnthropicProviderStreamingResponse(t *testing.T) {
 	if result.Text != "hello" {
 		t.Fatalf("text = %q", result.Text)
 	}
+	if result.ResponseID != "msg_1" {
+		t.Fatalf("responseId = %q", result.ResponseID)
+	}
 	if len(events) < 6 {
 		t.Fatalf("events = %#v", events)
 	}
@@ -210,6 +213,87 @@ func TestAnthropicProviderStreamingResponse(t *testing.T) {
 	}
 	if events[3].Type != "toolcall_start" || events[4].Type != "toolcall_delta" {
 		t.Fatalf("unexpected tool events = %#v", events)
+	}
+}
+
+func TestAnthropicProviderPreservesThinkingSignatures(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		_, _ = fmt.Fprint(w, `{
+			"id": "msg_1",
+			"content": [
+				{"type": "thinking", "thinking": "reason", "signature": "sig-1"},
+				{"type": "redacted_thinking", "data": "opaque-1"},
+				{"type": "text", "text": "ok"}
+			],
+			"usage": {"input_tokens": 1, "output_tokens": 1},
+			"stop_reason": "end_turn"
+		}`)
+	}))
+	defer server.Close()
+
+	result, _, err := AnthropicProvider().Complete(context.Background(), CompletionRequest{
+		Provider: "anthropic",
+		Model:    "claude-test",
+		Options: ChatOptions{
+			APIKey:  "test-key",
+			BaseURL: server.URL,
+		},
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ResponseID != "msg_1" {
+		t.Fatalf("responseId = %q", result.ResponseID)
+	}
+	if len(result.Content) < 3 {
+		t.Fatalf("content = %#v", result.Content)
+	}
+	first, _ := result.Content[0].(map[string]any)
+	if first["thinkingSignature"] != "sig-1" {
+		t.Fatalf("first thinking = %#v", first)
+	}
+	second, _ := result.Content[1].(map[string]any)
+	if second["thinkingSignature"] != "opaque-1" || second["redacted"] != true {
+		t.Fatalf("second thinking = %#v", second)
+	}
+}
+
+func TestAnthropicProviderStreamingPreservesThinkingSignatureDelta(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "event: message_start\ndata: {\"message\":{\"id\":\"msg_stream\",\"usage\":{\"input_tokens\":1}}}\n\n")
+		_, _ = fmt.Fprint(w, "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n")
+		_, _ = fmt.Fprint(w, "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"reason\"}}\n\n")
+		_, _ = fmt.Fprint(w, "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig-\"}}\n\n")
+		_, _ = fmt.Fprint(w, "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"2\"}}\n\n")
+		_, _ = fmt.Fprint(w, "event: content_block_stop\ndata: {\"index\":0}\n\n")
+		_, _ = fmt.Fprint(w, "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n")
+	}))
+	defer server.Close()
+
+	result, _, err := AnthropicProvider().Complete(context.Background(), CompletionRequest{
+		Provider: "anthropic",
+		Model:    "claude-test",
+		Options: ChatOptions{
+			APIKey:  "test-key",
+			BaseURL: server.URL,
+			Stream:  true,
+		},
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ResponseID != "msg_stream" {
+		t.Fatalf("responseId = %q", result.ResponseID)
+	}
+	if len(result.Content) != 1 {
+		t.Fatalf("content = %#v", result.Content)
+	}
+	block, _ := result.Content[0].(map[string]any)
+	if block["thinkingSignature"] != "sig-2" {
+		t.Fatalf("thinking block = %#v", block)
 	}
 }
 
@@ -328,5 +412,62 @@ func TestAnthropicProviderAddsCacheControl(t *testing.T) {
 	}
 	if result.Text != "ok" {
 		t.Fatalf("text = %q", result.Text)
+	}
+}
+
+func TestAnthropicProviderSendsThinkingSignatures(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		messages, _ := payload["messages"].([]any)
+		assistant, _ := messages[0].(map[string]any)
+		content, _ := assistant["content"].([]any)
+		if len(content) != 3 {
+			t.Fatalf("content = %#v", content)
+		}
+		thinking, _ := content[0].(map[string]any)
+		if thinking["type"] != "thinking" || thinking["signature"] != "sig-1" {
+			t.Fatalf("thinking = %#v", thinking)
+		}
+		redacted, _ := content[1].(map[string]any)
+		if redacted["type"] != "redacted_thinking" || redacted["data"] != "opaque-1" {
+			t.Fatalf("redacted = %#v", redacted)
+		}
+		fallback, _ := content[2].(map[string]any)
+		if fallback["type"] != "text" || fallback["text"] != "unsigned" {
+			t.Fatalf("fallback = %#v", fallback)
+		}
+		_, _ = fmt.Fprint(w, `{
+			"content": [{"type": "text", "text": "ok"}],
+			"usage": {"input_tokens": 1, "output_tokens": 1},
+			"stop_reason": "end_turn"
+		}`)
+	}))
+	defer server.Close()
+
+	_, _, err := AnthropicProvider().Complete(context.Background(), CompletionRequest{
+		Provider: "anthropic",
+		Model:    "claude-test",
+		Options: ChatOptions{
+			APIKey:  "test-key",
+			BaseURL: server.URL,
+		},
+		Messages: []Message{{
+			Role: "assistant",
+			Content: []ContentBlock{
+				{Type: "thinking", Thinking: "signed", ThinkingSignature: "sig-1"},
+				{Type: "thinking", Thinking: "[Reasoning redacted]", ThinkingSignature: "opaque-1", Redacted: true},
+				{Type: "thinking", Thinking: "unsigned"},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

@@ -1,10 +1,18 @@
 package ai
 
-import "context"
+import (
+	"context"
+	"sync"
+)
 
 type EventStream struct {
-	events chan NormalizedEvent
-	done   chan streamResult
+	events     chan NormalizedEvent
+	done       chan streamResult
+	resultOnce sync.Once
+	closeOnce  sync.Once
+	closeMu    sync.RWMutex
+	closed     bool
+	result     streamResult
 }
 
 type streamResult struct {
@@ -17,32 +25,58 @@ func (stream *EventStream) Events() <-chan NormalizedEvent {
 }
 
 func (stream *EventStream) Result() (NormalizedResult, error) {
-	result := <-stream.done
-	return result.result, result.err
+	stream.resultOnce.Do(func() {
+		stream.result = <-stream.done
+	})
+	return stream.result.result, stream.result.err
+}
+
+func CreateEventStream() *EventStream {
+	return &EventStream{
+		events: make(chan NormalizedEvent, 32),
+		done:   make(chan streamResult, 1),
+	}
+}
+
+func (stream *EventStream) Push(event NormalizedEvent) bool {
+	stream.closeMu.RLock()
+	defer stream.closeMu.RUnlock()
+	if stream.closed {
+		return false
+	}
+	stream.events <- event
+	return true
+}
+
+func (stream *EventStream) Close(result NormalizedResult, err error) {
+	stream.closeOnce.Do(func() {
+		stream.closeMu.Lock()
+		stream.closed = true
+		close(stream.events)
+		stream.closeMu.Unlock()
+		stream.done <- streamResult{result: result, err: err}
+		close(stream.done)
+	})
 }
 
 func Stream(ctx context.Context, req CompletionRequest) *EventStream {
 	req.Options.Stream = true
-	stream := &EventStream{
-		events: make(chan NormalizedEvent, 32),
-		done:   make(chan streamResult, 1),
-	}
+	stream := CreateEventStream()
 
 	go func() {
-		defer close(stream.events)
 		result, events, err := Complete(ctx, req)
 		if err != nil {
-			if result.Role == "" {
+			if result.StopReason == "" {
 				stopReason := "error"
 				if ctx.Err() != nil {
 					stopReason = "aborted"
 				}
-				result = NormalizedResult{
-					Role:         "assistant",
-					StopReason:   stopReason,
-					ErrorMessage: err.Error(),
+				result.StopReason = stopReason
+				if result.ErrorMessage == "" {
+					result.ErrorMessage = err.Error()
 				}
 			}
+			result = FillResultMetadata(result, req)
 			if len(events) == 0 {
 				events = []NormalizedEvent{
 					{Type: "start"},
@@ -50,18 +84,40 @@ func Stream(ctx context.Context, req CompletionRequest) *EventStream {
 				}
 			}
 		}
-		for _, event := range events {
+		result = FillResultMetadata(result, req)
+		for _, event := range AttachEventPayloads(events, result) {
 			select {
 			case <-ctx.Done():
-				stream.done <- streamResult{result: result, err: err}
-				close(stream.done)
+				stream.Close(result, err)
 				return
 			case stream.events <- event:
 			}
 		}
-		stream.done <- streamResult{result: result, err: err}
-		close(stream.done)
+		stream.Close(result, err)
 	}()
 
+	return stream
+}
+
+func errorEventStream(ctx context.Context, err error) *EventStream {
+	stream := CreateEventStream()
+	go func() {
+		stopReason := "error"
+		if ctx.Err() != nil {
+			stopReason = "aborted"
+		}
+		result := NormalizedResult{
+			Role:         "assistant",
+			StopReason:   stopReason,
+			ErrorMessage: err.Error(),
+		}
+		for _, event := range AttachEventPayloads([]NormalizedEvent{
+			{Type: "start"},
+			{Type: "error", Reason: stopReason, ErrorMessage: err.Error()},
+		}, result) {
+			stream.events <- event
+		}
+		stream.Close(result, err)
+	}()
 	return stream
 }

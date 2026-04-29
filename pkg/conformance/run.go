@@ -2,6 +2,8 @@ package conformance
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,6 +113,10 @@ func RunCodingAgent(testCase CodingAgentCase) (CodingAgentOutput, error) {
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				files[name] = ""
+				continue
+			}
 			return CodingAgentOutput{}, err
 		}
 		files[name] = string(data)
@@ -136,11 +142,26 @@ func expectedFileNames(testCase CodingAgentCase) []string {
 }
 
 func sessionFilePath(root, name string) (string, error) {
-	clean := filepath.Clean(name)
-	if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") {
+	if name == "" {
 		return "", os.ErrPermission
 	}
-	return filepath.Join(root, clean), nil
+	clean := filepath.Clean(name)
+	if filepath.IsAbs(clean) {
+		return "", os.ErrPermission
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(rootAbs, clean)
+	relative, err := filepath.Rel(rootAbs, path)
+	if err != nil {
+		return "", err
+	}
+	if relative == ".." || strings.HasPrefix(relative, fmt.Sprintf("..%s", string(os.PathSeparator))) || relative == "." {
+		return "", os.ErrPermission
+	}
+	return path, nil
 }
 
 func firstAssistantUpdate(blocks []ai.ContentBlock) string {

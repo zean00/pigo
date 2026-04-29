@@ -58,11 +58,13 @@ type mistralToolInvocation struct {
 }
 
 type mistralResponse struct {
+	ID      string          `json:"id,omitempty"`
 	Choices []mistralChoice `json:"choices"`
 	Usage   *mistralUsage   `json:"usage,omitempty"`
 }
 
 type mistralStreamResponse struct {
+	ID      string                `json:"id,omitempty"`
 	Choices []mistralStreamChoice `json:"choices"`
 }
 
@@ -282,6 +284,7 @@ func (provider *mistralProvider) Complete(ctx context.Context, req CompletionReq
 		}
 
 		result := mistralChoiceToNormalized(completion.Choices[0])
+		result.ResponseID = completion.ID
 		if completion.Usage != nil {
 			result.Usage = &Usage{
 				Input:       completion.Usage.PromptTokens,
@@ -300,6 +303,7 @@ func mistralStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent,
 	textBuilder := strings.Builder{}
 	toolCalls := map[int]*mistralToolCall{}
 	stopReason := "stop"
+	responseID := ""
 	events := []NormalizedEvent{{Type: "start"}}
 	textStarted := false
 	toolBlockIndexes := map[int]int{}
@@ -312,6 +316,9 @@ func mistralStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent,
 		var chunk mistralStreamResponse
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
 			return fmt.Errorf("parse mistral stream chunk: %w", err)
+		}
+		if chunk.ID != "" && responseID == "" {
+			responseID = chunk.ID
 		}
 		for _, choice := range chunk.Choices {
 			if choice.FinishReason != "" {
@@ -413,6 +420,7 @@ func mistralStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent,
 			Type:       "toolcall_end",
 			ContentIdx: len(blocks) - 1,
 			ToolCall: &NormalizedTool{
+				ID:        call.ID,
 				Name:      call.Function.Name,
 				Arguments: arguments,
 				HasID:     call.ID != "",
@@ -426,6 +434,7 @@ func mistralStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent,
 	result := NormalizedResult{
 		Role:       "assistant",
 		StopReason: mapMistralStopReason(stopReason),
+		ResponseID: responseID,
 		Text:       ContentText(blocks),
 		Content:    NormalizedContent(blocks),
 	}

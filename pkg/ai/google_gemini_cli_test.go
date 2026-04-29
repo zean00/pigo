@@ -51,7 +51,7 @@ func TestGoogleGeminiCLIProviderParsesSSEToolCalls(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = fmt.Fprint(w, "data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Working on it.\"},{\"functionCall\":{\"id\":\"call-1\",\"name\":\"math\",\"args\":{\"a\":15,\"b\":27}}}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":6,\"thoughtsTokenCount\":2,\"cachedContentTokenCount\":3,\"totalTokenCount\":18}}}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Working on it.\",\"thoughtSignature\":\"text-sig\"},{\"functionCall\":{\"id\":\"call-1\",\"name\":\"math\",\"args\":{\"a\":15,\"b\":27}},\"thoughtSignature\":\"tool-sig\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":6,\"thoughtsTokenCount\":2,\"cachedContentTokenCount\":3,\"totalTokenCount\":18}}}\n\n")
 	}))
 	defer server.Close()
 
@@ -84,6 +84,17 @@ func TestGoogleGeminiCLIProviderParsesSSEToolCalls(t *testing.T) {
 	}
 	if len(events) == 0 || events[0].Type != "start" || events[len(events)-1].Type != "done" {
 		t.Fatalf("events = %#v", events)
+	}
+	if len(result.Content) != 2 {
+		t.Fatalf("content = %#v", result.Content)
+	}
+	text, _ := result.Content[0].(map[string]any)
+	if text["textSignature"] != "text-sig" {
+		t.Fatalf("text = %#v", text)
+	}
+	tool, _ := result.Content[1].(map[string]any)
+	if tool["thoughtSignature"] != "tool-sig" {
+		t.Fatalf("tool = %#v", tool)
 	}
 }
 

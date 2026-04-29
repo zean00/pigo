@@ -69,7 +69,9 @@ func parseContentBlock(raw any) *ContentBlock {
 	}
 	block := &ContentBlock{Type: blockType}
 	block.Text = asString(rawMap["text"])
+	block.TextSignature = asString(rawMap["textSignature"])
 	block.Thinking = asString(rawMap["thinking"])
+	block.ThinkingSignature = asString(rawMap["thinkingSignature"])
 	block.Redacted = asBool(rawMap["redacted"])
 	block.Data = asString(rawMap["data"])
 	block.MimeType = asString(rawMap["mimeType"])
@@ -79,6 +81,7 @@ func parseContentBlock(raw any) *ContentBlock {
 	}
 	block.Name = asString(rawMap["name"])
 	block.Arguments = parseArgumentMap(rawMap["arguments"])
+	block.ThoughtSignature = asString(rawMap["thoughtSignature"])
 	return block
 }
 
@@ -131,6 +134,15 @@ func asFloat64(value any) float64 {
 	}
 }
 
+func firstNonEmptyString(values ...any) string {
+	for _, value := range values {
+		if text := asString(value); strings.TrimSpace(text) != "" {
+			return text
+		}
+	}
+	return ""
+}
+
 func MessageText(message Message) string {
 	if text, ok := message.Content.(string); ok {
 		return text
@@ -167,18 +179,26 @@ func NormalizedContent(blocks []ContentBlock) []any {
 	for _, block := range blocks {
 		switch block.Type {
 		case "toolCall":
-			content = append(content, map[string]any{
+			item := map[string]any{
 				"type":      "toolCall",
+				"id":        block.ID,
 				"name":      block.Name,
 				"arguments": block.Arguments,
-				"hasId":     block.ID != "",
-			})
+			}
+			if block.ThoughtSignature != "" {
+				item["thoughtSignature"] = block.ThoughtSignature
+			}
+			content = append(content, item)
 		case "thinking":
-			content = append(content, map[string]any{
+			item := map[string]any{
 				"type":     "thinking",
 				"thinking": block.Thinking,
 				"redacted": block.Redacted,
-			})
+			}
+			if block.ThinkingSignature != "" {
+				item["thinkingSignature"] = block.ThinkingSignature
+			}
+			content = append(content, item)
 		case "image":
 			content = append(content, map[string]any{
 				"type":     "image",
@@ -186,10 +206,14 @@ func NormalizedContent(blocks []ContentBlock) []any {
 				"mimeType": block.MimeType,
 			})
 		default:
-			content = append(content, map[string]any{
+			item := map[string]any{
 				"type": "text",
 				"text": block.Text,
-			})
+			}
+			if block.TextSignature != "" {
+				item["textSignature"] = block.TextSignature
+			}
+			content = append(content, item)
 		}
 	}
 	return content
@@ -207,9 +231,11 @@ func AssistantEvents(blocks []ContentBlock, stopReason string) []NormalizedEvent
 					Type:       "toolcall_end",
 					ContentIdx: index,
 					ToolCall: &NormalizedTool{
-						Name:      block.Name,
-						Arguments: block.Arguments,
-						HasID:     block.ID != "",
+						ID:               block.ID,
+						Name:             block.Name,
+						Arguments:        block.Arguments,
+						HasID:            block.ID != "",
+						ThoughtSignature: block.ThoughtSignature,
 					},
 				},
 			)
@@ -238,6 +264,41 @@ func appendTerminalEvent(events []NormalizedEvent, stopReason string) []Normaliz
 		return append(events, NormalizedEvent{Type: "error", Reason: stopReason})
 	}
 	return append(events, NormalizedEvent{Type: "done", Reason: stopReason})
+}
+
+func AttachEventPayloads(events []NormalizedEvent, result NormalizedResult) []NormalizedEvent {
+	if len(events) == 0 {
+		return nil
+	}
+	out := make([]NormalizedEvent, len(events))
+	for index, event := range events {
+		out[index] = attachEventPayload(event, result)
+	}
+	return out
+}
+
+func attachEventPayload(event NormalizedEvent, result NormalizedResult) NormalizedEvent {
+	switch event.Type {
+	case "done":
+		if event.Message == nil {
+			message := result
+			event.Message = &message
+		}
+	case "error":
+		if event.Error == nil {
+			message := result
+			if message.ErrorMessage == "" {
+				message.ErrorMessage = event.ErrorMessage
+			}
+			event.Error = &message
+		}
+	default:
+		if event.Partial == nil {
+			partial := result
+			event.Partial = &partial
+		}
+	}
+	return event
 }
 
 func mustJSON(value any) string {

@@ -1,6 +1,8 @@
 package ai
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestModelRegistryDefaults(t *testing.T) {
 	ResetModels()
@@ -22,8 +24,19 @@ func TestModelRegistryDefaults(t *testing.T) {
 	if !ok {
 		t.Fatal("expected default openai model")
 	}
-	if model.API != "openai-completions" {
+	if model.API != "openai-responses" && model.API != "openai-completions" {
 		t.Fatalf("api = %q", model.API)
+	}
+
+	githubCopilotModel, ok := GetModel("github-copilot", "claude-haiku-4.5")
+	if !ok {
+		t.Fatal("expected github-copilot model")
+	}
+	if githubCopilotModel.Headers == nil || githubCopilotModel.Headers["User-Agent"] == "" {
+		t.Fatalf("missing github-copilot header: %#v", githubCopilotModel.Headers)
+	}
+	if githubCopilotModel.Compat == nil || githubCopilotModel.Compat["supportsEagerToolInputStreaming"] == nil {
+		t.Fatalf("missing github-copilot compat: %#v", githubCopilotModel.Compat)
 	}
 }
 
@@ -56,6 +69,20 @@ func TestRegisterModelAndCalculateCost(t *testing.T) {
 	}
 	if usage.Cost.Total != 0.0045 {
 		t.Fatalf("total cost = %v", usage.Cost.Total)
+	}
+	cost := CalculateCostValue(model, Usage{Input: 1000, Output: 500, CacheRead: 200, CacheWrite: 100})
+	if cost.Total != usage.Cost.Total {
+		t.Fatalf("cost total = %v", cost.Total)
+	}
+}
+
+func TestGeneratedModelCatalogCoversProviders(t *testing.T) {
+	ResetModels()
+	for name := range providerSpecs {
+		models := GetModels(name)
+		if len(models) == 0 {
+			t.Fatalf("missing generated models for provider %q", name)
+		}
 	}
 }
 

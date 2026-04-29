@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"time"
 )
@@ -27,15 +28,18 @@ type ThinkingBudgets struct {
 }
 
 type ContentBlock struct {
-	Type      string         `json:"type"`
-	Text      string         `json:"text,omitempty"`
-	Thinking  string         `json:"thinking,omitempty"`
-	Redacted  bool           `json:"redacted,omitempty"`
-	Data      string         `json:"data,omitempty"`
-	MimeType  string         `json:"mimeType,omitempty"`
-	ID        string         `json:"id,omitempty"`
-	Name      string         `json:"name,omitempty"`
-	Arguments map[string]any `json:"arguments,omitempty"`
+	Type              string         `json:"type"`
+	Text              string         `json:"text,omitempty"`
+	TextSignature     string         `json:"textSignature,omitempty"`
+	Thinking          string         `json:"thinking,omitempty"`
+	ThinkingSignature string         `json:"thinkingSignature,omitempty"`
+	Redacted          bool           `json:"redacted,omitempty"`
+	Data              string         `json:"data,omitempty"`
+	MimeType          string         `json:"mimeType,omitempty"`
+	ID                string         `json:"id,omitempty"`
+	Name              string         `json:"name,omitempty"`
+	Arguments         map[string]any `json:"arguments,omitempty"`
+	ThoughtSignature  string         `json:"thoughtSignature,omitempty"`
 }
 
 type Message struct {
@@ -138,26 +142,105 @@ type Usage struct {
 }
 
 type NormalizedEvent struct {
-	Type         string          `json:"type"`
-	ContentIdx   int             `json:"contentIndex,omitempty"`
-	Delta        string          `json:"delta,omitempty"`
-	Content      string          `json:"content,omitempty"`
-	Reason       string          `json:"reason,omitempty"`
-	ErrorMessage string          `json:"errorMessage,omitempty"`
-	ToolCall     *NormalizedTool `json:"toolCall,omitempty"`
+	Type         string            `json:"type"`
+	ContentIdx   int               `json:"contentIndex,omitempty"`
+	Delta        string            `json:"delta,omitempty"`
+	Content      string            `json:"content,omitempty"`
+	Reason       string            `json:"reason,omitempty"`
+	ErrorMessage string            `json:"errorMessage,omitempty"`
+	ToolCall     *NormalizedTool   `json:"toolCall,omitempty"`
+	Partial      *NormalizedResult `json:"partial,omitempty"`
+	Message      *NormalizedResult `json:"message,omitempty"`
+	Error        *NormalizedResult `json:"error,omitempty"`
 }
 
 type NormalizedTool struct {
-	Name      string         `json:"name"`
-	Arguments map[string]any `json:"arguments"`
-	HasID     bool           `json:"hasId"`
+	ID               string         `json:"id,omitempty"`
+	Name             string         `json:"name"`
+	Arguments        map[string]any `json:"arguments"`
+	HasID            bool           `json:"hasId"`
+	ThoughtSignature string         `json:"thoughtSignature,omitempty"`
+}
+
+func (tool NormalizedTool) MarshalJSON() ([]byte, error) {
+	payload := map[string]any{
+		"type":      "toolCall",
+		"id":        tool.ID,
+		"name":      tool.Name,
+		"arguments": tool.Arguments,
+		"hasId":     tool.HasID,
+	}
+	if tool.ThoughtSignature != "" {
+		payload["thoughtSignature"] = tool.ThoughtSignature
+	}
+	return json.Marshal(payload)
 }
 
 type NormalizedResult struct {
 	Role         string `json:"role"`
+	API          string `json:"api,omitempty"`
+	Provider     string `json:"provider,omitempty"`
+	Model        string `json:"model,omitempty"`
 	StopReason   string `json:"stopReason"`
 	ErrorMessage string `json:"errorMessage,omitempty"`
+	ResponseID   string `json:"responseId,omitempty"`
 	Text         string `json:"text"`
 	Content      []any  `json:"content"`
 	Usage        *Usage `json:"usage,omitempty"`
+	Timestamp    int64  `json:"timestamp,omitempty"`
+}
+
+func (event NormalizedEvent) MarshalJSON() ([]byte, error) {
+	payload := map[string]any{"type": event.Type}
+	switch event.Type {
+	case "start":
+		payload["partial"] = event.Partial
+	case "text_start", "thinking_start", "toolcall_start":
+		payload["contentIndex"] = event.ContentIdx
+		payload["partial"] = event.Partial
+	case "text_delta", "thinking_delta", "toolcall_delta":
+		payload["contentIndex"] = event.ContentIdx
+		payload["delta"] = event.Delta
+		payload["partial"] = event.Partial
+	case "text_end", "thinking_end":
+		payload["contentIndex"] = event.ContentIdx
+		payload["content"] = event.Content
+		payload["partial"] = event.Partial
+	case "toolcall_end":
+		payload["contentIndex"] = event.ContentIdx
+		payload["toolCall"] = event.ToolCall
+		payload["partial"] = event.Partial
+	case "done":
+		payload["reason"] = event.Reason
+		payload["message"] = event.Message
+	case "error":
+		payload["reason"] = event.Reason
+		payload["error"] = event.Error
+	default:
+		if event.ContentIdx != 0 {
+			payload["contentIndex"] = event.ContentIdx
+		}
+		if event.Delta != "" {
+			payload["delta"] = event.Delta
+		}
+		if event.Content != "" {
+			payload["content"] = event.Content
+		}
+		if event.Reason != "" {
+			payload["reason"] = event.Reason
+		}
+		if event.ToolCall != nil {
+			payload["toolCall"] = event.ToolCall
+		}
+		if event.Partial != nil {
+			payload["partial"] = event.Partial
+		}
+		if event.Message != nil {
+			payload["message"] = event.Message
+		}
+		if event.Error != nil {
+			payload["error"] = event.Error
+		}
+	}
+	return json.Marshal(payload)
 }

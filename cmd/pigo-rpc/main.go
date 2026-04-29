@@ -5,6 +5,7 @@ import (
 	"flag"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/badlogic/pigo/pkg/codingagent"
 	"github.com/badlogic/pigo/pkg/conformance"
@@ -15,6 +16,10 @@ func main() {
 	cwd := flag.String("cwd", "", "workspace root")
 	sessionFile := flag.String("session-file", "", "optional JSONL session file")
 	authFile := flag.String("auth-file", "", "optional OAuth credential store")
+	agentDir := flag.String("agent-dir", "", "agent config directory for prompts and skills")
+	discoverResources := flag.Bool("discover-resources", true, "discover prompt templates and skills from default resource directories")
+	promptPaths := flag.String("prompt-path", "", "comma-separated prompt template files or directories")
+	skillPaths := flag.String("skill-path", "", "comma-separated skill files or directories")
 	flag.Parse()
 	root := *cwd
 	if root == "" {
@@ -45,8 +50,29 @@ func main() {
 			log.Fatal(err)
 		}
 	}
+	session.LoadSlashCommandResources(codingagent.ResourceLoadOptions{
+		AgentDir:        *agentDir,
+		PromptPaths:     splitCSV(*promptPaths),
+		SkillPaths:      splitCSV(*skillPaths),
+		IncludeDefaults: *discoverResources,
+	})
 	server := codingagent.RPCServer{Session: session}
 	if err := server.Serve(context.Background(), os.Stdin, os.Stdout); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func splitCSV(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }

@@ -3,11 +3,72 @@ package ai
 import "strings"
 
 func FindEnvKeys(provider string) []string {
-	spec, ok := ProviderSpecForProvider(provider)
-	if !ok {
+	envKeys := apiKeyEnvKeys(provider)
+	if len(envKeys) == 0 {
 		return nil
 	}
-	return append([]string(nil), spec.EnvKeys...)
+	found := make([]string, 0, len(envKeys))
+	for _, key := range envKeys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if strings.TrimSpace(getenv(key)) != "" {
+			found = append(found, key)
+		}
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	return found
+}
+
+func apiKeyEnvKeys(provider string) []string {
+	provider = canonicalProviderName(provider)
+	switch provider {
+	case "github-copilot":
+		return []string{"COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"}
+	case "anthropic":
+		return []string{"ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"}
+	case "openai":
+		return []string{"OPENAI_API_KEY"}
+	case "azure-openai-responses":
+		return []string{"AZURE_OPENAI_API_KEY"}
+	case "deepseek":
+		return []string{"DEEPSEEK_API_KEY"}
+	case "google", "google-gemini-cli", "google-antigravity":
+		return []string{"GEMINI_API_KEY"}
+	case "google-vertex":
+		return []string{"GOOGLE_CLOUD_API_KEY"}
+	case "groq":
+		return []string{"GROQ_API_KEY"}
+	case "cerebras":
+		return []string{"CEREBRAS_API_KEY"}
+	case "xai":
+		return []string{"XAI_API_KEY"}
+	case "openrouter":
+		return []string{"OPENROUTER_API_KEY"}
+	case "vercel-ai-gateway":
+		return []string{"AI_GATEWAY_API_KEY"}
+	case "zai":
+		return []string{"ZAI_API_KEY"}
+	case "mistral":
+		return []string{"MISTRAL_API_KEY"}
+	case "minimax":
+		return []string{"MINIMAX_API_KEY"}
+	case "minimax-cn":
+		return []string{"MINIMAX_CN_API_KEY"}
+	case "huggingface":
+		return []string{"HF_TOKEN"}
+	case "fireworks":
+		return []string{"FIREWORKS_API_KEY"}
+	case "opencode", "opencode-go":
+		return []string{"OPENCODE_API_KEY"}
+	case "kimi-coding":
+		return []string{"KIMI_API_KEY"}
+	default:
+		return nil
+	}
 }
 
 func GetEnvAPIKey(provider string) string {
@@ -28,6 +89,19 @@ func BuildBaseOptions(model Model, options ChatOptions, apiKey string) ChatOptio
 	if strings.TrimSpace(apiKey) != "" {
 		result.APIKey = apiKey
 	}
+	if strings.TrimSpace(result.BaseURL) == "" && strings.TrimSpace(model.BaseURL) != "" {
+		result.BaseURL = strings.TrimSpace(model.BaseURL)
+	}
+	if len(model.Headers) > 0 {
+		headers := map[string]string{}
+		for key, value := range model.Headers {
+			headers[key] = value
+		}
+		for key, value := range result.Headers {
+			headers[key] = value
+		}
+		result.Headers = headers
+	}
 	if result.MaxTokens <= 0 && model.MaxTokens > 0 {
 		if model.MaxTokens > 32000 {
 			result.MaxTokens = 32000
@@ -35,6 +109,19 @@ func BuildBaseOptions(model Model, options ChatOptions, apiKey string) ChatOptio
 			result.MaxTokens = model.MaxTokens
 		}
 	}
+	return result
+}
+
+func BuildSimpleOptions(model Model, options ChatOptions) ChatOptions {
+	result := BuildBaseOptions(model, options, options.APIKey)
+	effort := strings.TrimSpace(result.ReasoningEffort)
+	if effort != "" && effort != "off" && effort != "minimal" && effort != "low" && effort != "medium" && effort != "high" && effort != "xhigh" {
+		effort = ""
+	}
+	if effort != "" && !SupportsXhigh(model) {
+		effort = ClampReasoning(effort)
+	}
+	result.ReasoningEffort = effort
 	return result
 }
 

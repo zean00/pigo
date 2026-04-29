@@ -40,8 +40,8 @@ func TestGoogleProviderReturnsToolCalls(t *testing.T) {
 				"content": {
 					"role": "model",
 					"parts": [
-						{"text": "Working on it."},
-						{"functionCall": {"id": "call-1", "name": "math", "args": {"a": 15, "b": 27}}}
+						{"text": "Working on it.", "thoughtSignature": "text-sig"},
+						{"functionCall": {"id": "call-1", "name": "math", "args": {"a": 15, "b": 27}}, "thoughtSignature": "tool-sig"}
 					]
 				},
 				"finishReason": "STOP"
@@ -97,6 +97,14 @@ func TestGoogleProviderReturnsToolCalls(t *testing.T) {
 	if len(result.Content) != 2 {
 		t.Fatalf("content len = %d", len(result.Content))
 	}
+	text, _ := result.Content[0].(map[string]any)
+	if text["textSignature"] != "text-sig" {
+		t.Fatalf("text = %#v", text)
+	}
+	tool, _ := result.Content[1].(map[string]any)
+	if tool["thoughtSignature"] != "tool-sig" {
+		t.Fatalf("tool = %#v", tool)
+	}
 }
 
 func TestGoogleProviderStreamingResponse(t *testing.T) {
@@ -108,7 +116,7 @@ func TestGoogleProviderStreamingResponse(t *testing.T) {
 			t.Fatalf("alt = %q", req.URL.Query().Get("alt"))
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = fmt.Fprint(w, "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"hello\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1,\"totalTokenCount\":2}}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"hello\",\"thoughtSignature\":\"sig-1\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1,\"totalTokenCount\":2}}\n\n")
 	}))
 	defer server.Close()
 
@@ -128,5 +136,71 @@ func TestGoogleProviderStreamingResponse(t *testing.T) {
 	}
 	if result.Text != "hello" {
 		t.Fatalf("text = %q", result.Text)
+	}
+	if len(result.Content) != 1 {
+		t.Fatalf("content = %#v", result.Content)
+	}
+	text, _ := result.Content[0].(map[string]any)
+	if text["textSignature"] != "sig-1" {
+		t.Fatalf("text = %#v", text)
+	}
+}
+
+func TestGoogleProviderSendsThoughtSignatures(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		contents, _ := payload["contents"].([]any)
+		assistant, _ := contents[0].(map[string]any)
+		parts, _ := assistant["parts"].([]any)
+		if len(parts) != 3 {
+			t.Fatalf("parts = %#v", parts)
+		}
+		text, _ := parts[0].(map[string]any)
+		if text["thoughtSignature"] != "text-sig" {
+			t.Fatalf("text = %#v", text)
+		}
+		thinking, _ := parts[1].(map[string]any)
+		if thinking["thought"] != true || thinking["thoughtSignature"] != "thinking-sig" {
+			t.Fatalf("thinking = %#v", thinking)
+		}
+		tool, _ := parts[2].(map[string]any)
+		if tool["thoughtSignature"] != "tool-sig" {
+			t.Fatalf("tool = %#v", tool)
+		}
+		_, _ = fmt.Fprint(w, `{
+			"candidates": [{
+				"content": {"role": "model", "parts": [{"text": "ok"}]},
+				"finishReason": "STOP"
+			}],
+			"usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 1, "totalTokenCount": 2}
+		}`)
+	}))
+	defer server.Close()
+
+	_, _, err := GoogleProvider().Complete(context.Background(), CompletionRequest{
+		Provider: "google",
+		Model:    "gemini-test",
+		Options: ChatOptions{
+			APIKey:  "test-key",
+			BaseURL: server.URL + "/v1beta",
+		},
+		Messages: []Message{{
+			Role: "assistant",
+			Content: []ContentBlock{
+				{Type: "text", Text: "hello", TextSignature: "text-sig"},
+				{Type: "thinking", Thinking: "reason", ThinkingSignature: "thinking-sig"},
+				{Type: "toolCall", ID: "call-1", Name: "math", Arguments: map[string]any{"a": 1}, ThoughtSignature: "tool-sig"},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

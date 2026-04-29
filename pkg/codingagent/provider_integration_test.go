@@ -170,6 +170,52 @@ func TestSessionProviderLoopForwardsThinkingLevel(t *testing.T) {
 	}
 }
 
+func TestSessionProviderLoopInjectsSkillContext(t *testing.T) {
+	const providerName = "skill-context-provider"
+	var captured []ai.Message
+	ai.RegisterProvider(providerName, providerFunc(func(_ context.Context, req ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error) {
+		captured = append([]ai.Message(nil), req.Messages...)
+		return ai.NormalizedResult{
+			Role:       "assistant",
+			StopReason: "stop",
+			Text:       "ok",
+			Content:    []any{map[string]any{"type": "text", "text": "ok"}},
+		}, []ai.NormalizedEvent{{Type: "start"}, {Type: "text_start", ContentIdx: 0}, {Type: "text_delta", ContentIdx: 0, Delta: "ok"}, {Type: "text_end", ContentIdx: 0, Content: "ok"}, {Type: "done", Reason: "stop"}}, nil
+	}))
+
+	root := t.TempDir()
+	skillDir := filepath.Join(root, ".pi", "skills", "review-code")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	skillPath := filepath.Join(skillDir, "SKILL.md")
+	if err := os.WriteFile(skillPath, []byte("---\nname: review-code\ndescription: Review code carefully\n---\nUse this skill.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	session := NewSession(root, nil)
+	session.LoadSlashCommandResources(ResourceLoadOptions{IncludeDefaults: true})
+	if _, err := session.SetModel(providerName, "test-model"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := session.Prompt(context.Background(), "inspect code"); err != nil {
+		t.Fatal(err)
+	}
+	if len(captured) < 2 {
+		t.Fatalf("captured messages = %#v", captured)
+	}
+	if captured[0].Role != "user" || !strings.Contains(ai.MessageText(captured[0]), "<available_skills>") {
+		t.Fatalf("missing skill context: %#v", captured[0])
+	}
+	if !strings.Contains(ai.MessageText(captured[0]), skillPath) {
+		t.Fatalf("missing skill path in context: %#v", captured[0])
+	}
+	if captured[len(captured)-1].Content != "inspect code" {
+		t.Fatalf("last prompt = %#v", captured[len(captured)-1])
+	}
+}
+
 type providerFunc func(context.Context, ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error)
 
 func (fn providerFunc) Complete(ctx context.Context, req ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error) {

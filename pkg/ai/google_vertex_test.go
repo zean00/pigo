@@ -128,3 +128,70 @@ func TestGoogleVertexProviderStreamingResponse(t *testing.T) {
 		t.Fatalf("text = %q", result.Text)
 	}
 }
+
+func TestGoogleVertexProviderPayloadAndResponseHooks(t *testing.T) {
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+	t.Setenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+	hookCalled := false
+	responseCalled := false
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["hooked"] != true {
+			t.Fatalf("payload = %#v", payload)
+		}
+		w.Header().Set("X-Vertex-Hook", "ok")
+		_, _ = fmt.Fprint(w, `{
+			"candidates": [{
+				"content": {"role": "model", "parts": [{"text": "ok"}]},
+				"finishReason": "STOP"
+			}],
+			"usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 1, "totalTokenCount": 2}
+		}`)
+	}))
+	defer server.Close()
+
+	provider := GoogleVertexProvider()
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "google-vertex",
+		Model:    "gemini-vertex",
+		Options: ChatOptions{
+			APIKey:  "vertex-key",
+			BaseURL: server.URL,
+			OnPayload: func(payload any, req CompletionRequest) (any, error) {
+				hookCalled = true
+				raw, err := json.Marshal(payload)
+				if err != nil {
+					return nil, err
+				}
+				var next map[string]any
+				if err := json.Unmarshal(raw, &next); err != nil {
+					return nil, err
+				}
+				next["hooked"] = true
+				return next, nil
+			},
+			OnResponse: func(response ProviderResponse, req CompletionRequest) error {
+				responseCalled = true
+				if response.Headers["X-Vertex-Hook"] != "ok" {
+					t.Fatalf("headers = %#v", response.Headers)
+				}
+				return nil
+			},
+		},
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hookCalled || !responseCalled {
+		t.Fatalf("hookCalled=%v responseCalled=%v", hookCalled, responseCalled)
+	}
+}

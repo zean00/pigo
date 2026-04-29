@@ -131,7 +131,14 @@ func (provider *googleProvider) Complete(ctx context.Context, req CompletionRequ
 	}
 
 	payload := toGoogleRequest(req)
+	payloadValue, err := applyPayloadHook(req, payload)
+	if err != nil {
+		return NormalizedResult{}, nil, err
+	}
 	data, err := json.Marshal(payload)
+	if payloadValue != nil {
+		data, err = json.Marshal(payloadValue)
+	}
 	if err != nil {
 		return NormalizedResult{}, nil, fmt.Errorf("marshal google payload: %w", err)
 	}
@@ -146,51 +153,97 @@ func (provider *googleProvider) Complete(ctx context.Context, req CompletionRequ
 		httpClient = &cloned
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(data))
-	if err != nil {
-		return NormalizedResult{}, nil, fmt.Errorf("create google request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if hasProviderSpec {
-		for key, value := range providerSpec.DefaultHeader {
+	buildRequest := func() (*http.Request, error) {
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(data))
+		if err != nil {
+			return nil, fmt.Errorf("create google request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		if hasProviderSpec {
+			for key, value := range providerSpec.DefaultHeader {
+				httpReq.Header.Set(key, value)
+			}
+		}
+		for key, value := range req.Options.Headers {
 			httpReq.Header.Set(key, value)
 		}
-	}
-	for key, value := range req.Options.Headers {
-		httpReq.Header.Set(key, value)
+		return httpReq, nil
 	}
 
-	resp, err := httpClient.Do(httpReq)
-	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: err.Error()}, nil, err
-		}
-		return NormalizedResult{}, nil, fmt.Errorf("call google API: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		if len(body) == 0 {
-			return NormalizedResult{}, nil, fmt.Errorf("google API error: %s", resp.Status)
-		}
-		return NormalizedResult{}, nil, fmt.Errorf("google API error: %s: %s", resp.Status, strings.TrimSpace(string(body)))
-	}
-
-	if req.Options.Stream {
-		result, err := googleSSEToResult(resp.Body)
+	maxRetries := retryLimit(req.Options, defaultProviderMaxRetries)
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		httpReq, err := buildRequest()
 		if err != nil {
 			return NormalizedResult{}, nil, err
 		}
+		resp, err := httpClient.Do(httpReq)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: err.Error()}, nil, err
+			}
+			if attempt < maxRetries && shouldRetryHTTPError(err) {
+				if sleepErr := sleepWithContext(ctx, retryDelayForAttempt(attempt, 0, defaultProviderBaseDelay)); sleepErr != nil {
+					return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: sleepErr.Error()}, nil, sleepErr
+				}
+				continue
+			}
+			return NormalizedResult{}, nil, fmt.Errorf("call google API: %w", err)
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			if hookErr := notifyResponseHook(req, resp); hookErr != nil {
+				_ = resp.Body.Close()
+				return NormalizedResult{}, nil, hookErr
+			}
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			errorText := strings.TrimSpace(string(body))
+			if attempt < maxRetries && shouldRetryHTTPStatus(resp.StatusCode, errorText) {
+				serverDelay := retryAfterDelay(resp, errorText)
+				if err := validateRetryDelay(req.Options, serverDelay); err != nil {
+					return NormalizedResult{}, nil, err
+				}
+				if sleepErr := sleepWithContext(ctx, retryDelayForAttempt(attempt, serverDelay, defaultProviderBaseDelay)); sleepErr != nil {
+					return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: sleepErr.Error()}, nil, sleepErr
+				}
+				continue
+			}
+			if errorText == "" {
+				return NormalizedResult{}, nil, fmt.Errorf("google API error: %s", resp.Status)
+			}
+			return NormalizedResult{}, nil, fmt.Errorf("google API error: %s: %s", resp.Status, errorText)
+		}
+		if hookErr := notifyResponseHook(req, resp); hookErr != nil {
+			_ = resp.Body.Close()
+			return NormalizedResult{}, nil, hookErr
+		}
+
+		if req.Options.Stream {
+			result, events, err := googleSSEToResult(resp.Body)
+			_ = resp.Body.Close()
+			if err == nil {
+				return result, events, nil
+			}
+			if attempt < maxRetries && isRetriableStreamError(err) {
+				if sleepErr := sleepWithContext(ctx, retryDelayForAttempt(attempt, 0, defaultProviderBaseDelay)); sleepErr != nil {
+					return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: sleepErr.Error()}, nil, sleepErr
+				}
+				continue
+			}
+			return NormalizedResult{}, nil, err
+		}
+
+		var completion googleResponse
+		decodeErr := json.NewDecoder(resp.Body).Decode(&completion)
+		_ = resp.Body.Close()
+		if decodeErr != nil {
+			return NormalizedResult{}, nil, fmt.Errorf("parse google response: %w", decodeErr)
+		}
+		result := googleResponseToNormalized(completion)
 		return result, AssistantEvents(result.contentBlocks(), result.StopReason), nil
 	}
 
-	var completion googleResponse
-	if err := json.NewDecoder(resp.Body).Decode(&completion); err != nil {
-		return NormalizedResult{}, nil, fmt.Errorf("parse google response: %w", err)
-	}
-	result := googleResponseToNormalized(completion)
-	return result, AssistantEvents(result.contentBlocks(), result.StopReason), nil
+	return NormalizedResult{}, nil, errors.New("google retry budget exhausted")
 }
 
 func buildGoogleURL(baseURL, model, apiKey string, stream bool) (string, error) {
@@ -216,9 +269,11 @@ func buildGoogleURL(baseURL, model, apiKey string, stream bool) (string, error) 
 	return parsed.String(), nil
 }
 
-func googleSSEToResult(body io.Reader) (NormalizedResult, error) {
+func googleSSEToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, error) {
 	var final googleResponse
 	seen := false
+	events := []NormalizedEvent{{Type: "start"}}
+	contentIndex := 0
 	err := scanSSE(body, func(event sseEvent) error {
 		payload := strings.TrimSpace(event.Data)
 		if payload == "" || payload == "[DONE]" {
@@ -228,17 +283,54 @@ func googleSSEToResult(body io.Reader) (NormalizedResult, error) {
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
 			return fmt.Errorf("parse google stream chunk: %w", err)
 		}
+		if len(chunk.Candidates) > 0 && chunk.Candidates[0].Content != nil {
+			for _, part := range chunk.Candidates[0].Content.Parts {
+				switch {
+				case part.FunctionCall != nil:
+					arguments := part.FunctionCall.Args
+					if arguments == nil {
+						arguments = map[string]any{}
+					}
+					events = append(events,
+						NormalizedEvent{Type: "toolcall_start", ContentIdx: contentIndex},
+						NormalizedEvent{Type: "toolcall_delta", ContentIdx: contentIndex, Delta: mustJSON(arguments)},
+						NormalizedEvent{
+							Type:       "toolcall_end",
+							ContentIdx: contentIndex,
+							ToolCall: &NormalizedTool{
+								Name:      part.FunctionCall.Name,
+								Arguments: arguments,
+								HasID:     strings.TrimSpace(part.FunctionCall.ID) != "",
+							},
+						},
+					)
+					contentIndex++
+				case strings.TrimSpace(part.Text) != "":
+					eventType := "text"
+					if part.Thought {
+						eventType = "thinking"
+					}
+					events = append(events,
+						NormalizedEvent{Type: eventType + "_start", ContentIdx: contentIndex},
+						NormalizedEvent{Type: eventType + "_delta", ContentIdx: contentIndex, Delta: part.Text},
+						NormalizedEvent{Type: eventType + "_end", ContentIdx: contentIndex, Content: part.Text},
+					)
+					contentIndex++
+				}
+			}
+		}
 		final = mergeGoogleStreamResponse(final, chunk)
 		seen = true
 		return nil
 	})
 	if err != nil {
-		return NormalizedResult{}, err
+		return NormalizedResult{}, nil, err
 	}
 	if !seen {
-		return NormalizedResult{}, errors.New("google returned an empty response")
+		return NormalizedResult{}, nil, errors.New("google returned an empty response")
 	}
-	return googleResponseToNormalized(final), nil
+	result := googleResponseToNormalized(final)
+	return result, appendTerminalEvent(events, result.StopReason), nil
 }
 
 func toGoogleRequest(req CompletionRequest) googleRequest {

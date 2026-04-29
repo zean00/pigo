@@ -1,0 +1,78 @@
+package ai
+
+import "testing"
+
+func TestModelRegistryDefaults(t *testing.T) {
+	ResetModels()
+
+	providers := GetProviders()
+	if len(providers) == 0 {
+		t.Fatal("expected default providers")
+	}
+
+	models := GetModels("openai")
+	if len(models) == 0 {
+		t.Fatal("expected openai models")
+	}
+	if models[0].Provider != "openai" {
+		t.Fatalf("provider = %q", models[0].Provider)
+	}
+
+	model, ok := GetModel("openai", "gpt-5.4")
+	if !ok {
+		t.Fatal("expected default openai model")
+	}
+	if model.API != "openai-completions" {
+		t.Fatalf("api = %q", model.API)
+	}
+}
+
+func TestRegisterModelAndCalculateCost(t *testing.T) {
+	ResetModels()
+	RegisterModel(Model{
+		ID:       "custom-1",
+		Name:     "Custom One",
+		Provider: "openai",
+		API:      "openai-responses",
+		Cost: ModelCost{
+			Input:      2,
+			Output:     4,
+			CacheRead:  1,
+			CacheWrite: 3,
+		},
+	})
+
+	model, ok := GetModel("openai", "custom-1")
+	if !ok {
+		t.Fatal("expected registered model")
+	}
+	if model.Name != "Custom One" {
+		t.Fatalf("name = %q", model.Name)
+	}
+
+	usage := CalculateCost(model, Usage{Input: 1000, Output: 500, CacheRead: 200, CacheWrite: 100})
+	if usage.Cost.Input != 0.002 {
+		t.Fatalf("input cost = %v", usage.Cost.Input)
+	}
+	if usage.Cost.Total != 0.0045 {
+		t.Fatalf("total cost = %v", usage.Cost.Total)
+	}
+}
+
+func TestSupportsXhighAndModelEquality(t *testing.T) {
+	if !SupportsXhigh(Model{ID: "gpt-5.5"}) {
+		t.Fatal("expected gpt-5.5 to support xhigh")
+	}
+	if SupportsXhigh(Model{ID: "gpt-4.1"}) {
+		t.Fatal("did not expect gpt-4.1 to support xhigh")
+	}
+
+	a := &Model{Provider: "OpenAI", ID: "gpt-5.5"}
+	b := &Model{Provider: "openai", ID: "gpt-5.5"}
+	if !ModelsAreEqual(a, b) {
+		t.Fatal("expected models to be equal")
+	}
+	if ModelsAreEqual(a, nil) {
+		t.Fatal("expected nil model comparison to be false")
+	}
+}

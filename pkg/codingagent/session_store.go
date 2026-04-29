@@ -10,22 +10,25 @@ import (
 	"time"
 
 	"github.com/badlogic/pigo/pkg/agentcore"
+	"github.com/badlogic/pigo/pkg/ai"
 )
 
 type SessionEntry struct {
-	Type             string            `json:"type"`
-	ID               string            `json:"id,omitempty"`
-	ParentID         string            `json:"parentId,omitempty"`
-	Timestamp        string            `json:"timestamp"`
-	Message          agentcore.Message `json:"message,omitempty"`
-	Provider         string            `json:"provider,omitempty"`
-	ModelID          string            `json:"modelId,omitempty"`
-	Level            string            `json:"level,omitempty"`
-	Name             string            `json:"name,omitempty"`
-	UserText         string            `json:"userText,omitempty"`
-	Summary          string            `json:"summary,omitempty"`
-	FirstKeptEntryID string            `json:"firstKeptEntryId,omitempty"`
-	TokensBefore     int               `json:"tokensBefore,omitempty"`
+	Type             string               `json:"type"`
+	ID               string               `json:"id,omitempty"`
+	ParentID         string               `json:"parentId,omitempty"`
+	Timestamp        string               `json:"timestamp"`
+	Message          agentcore.Message    `json:"message,omitempty"`
+	Provider         string               `json:"provider,omitempty"`
+	ModelID          string               `json:"modelId,omitempty"`
+	Level            string               `json:"level,omitempty"`
+	Name             string               `json:"name,omitempty"`
+	UserText         string               `json:"userText,omitempty"`
+	Summary          string               `json:"summary,omitempty"`
+	FirstKeptEntryID string               `json:"firstKeptEntryId,omitempty"`
+	TokensBefore     int                  `json:"tokensBefore,omitempty"`
+	OAuthProvider    string               `json:"oauthProvider,omitempty"`
+	OAuthCredentials *ai.OAuthCredentials `json:"-"`
 }
 
 type SessionStore struct {
@@ -43,6 +46,7 @@ func (s *SessionStore) Append(entry SessionEntry) error {
 	if entry.Timestamp == "" {
 		entry.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
 	}
+	entry.OAuthCredentials = nil
 	if err := os.MkdirAll(filepath.Dir(s.Path), 0o755); err != nil {
 		return err
 	}

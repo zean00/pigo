@@ -230,12 +230,14 @@ func AssistantEvents(blocks []ContentBlock, stopReason string) []NormalizedEvent
 	if stopReason == "" {
 		stopReason = "stop"
 	}
+	return appendTerminalEvent(events, stopReason)
+}
+
+func appendTerminalEvent(events []NormalizedEvent, stopReason string) []NormalizedEvent {
 	if stopReason == "error" || stopReason == "aborted" {
-		events = append(events, NormalizedEvent{Type: "error", Reason: stopReason})
-	} else {
-		events = append(events, NormalizedEvent{Type: "done", Reason: stopReason})
+		return append(events, NormalizedEvent{Type: "error", Reason: stopReason})
 	}
-	return events
+	return append(events, NormalizedEvent{Type: "done", Reason: stopReason})
 }
 
 func mustJSON(value any) string {

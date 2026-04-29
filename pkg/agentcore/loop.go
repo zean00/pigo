@@ -2,6 +2,7 @@ package agentcore
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -19,16 +20,17 @@ const (
 )
 
 type ToolResult struct {
-	Text    string
-	Details map[string]any
-	IsError bool
+	Text      string
+	Details   map[string]any
+	IsError   bool
 	Terminate bool
 }
 
 type Tool struct {
-	Name          string
-	ExecutionMode ToolExecutionMode
-	Execute       func(ctx context.Context, call ai.ContentBlock) ToolResult
+	Name             string
+	ExecutionMode    ToolExecutionMode
+	PrepareArguments func(args map[string]any) (map[string]any, error)
+	Execute          func(ctx context.Context, call ai.ContentBlock) ToolResult
 }
 
 type BeforeToolCallResult struct {
@@ -61,20 +63,22 @@ type ScriptedLoopInput struct {
 }
 
 type ProviderLoopInput struct {
-	Prompts   []string
-	Tools     []Tool
-	History   []ai.Message
-	Provider  string
-	Model     string
-	ToolSpecs []ai.Tool
-	Options   ai.ChatOptions
-	MaxRounds int
-	ToolExecution ToolExecutionMode
+	Prompts             []string
+	Tools               []Tool
+	History             []ai.Message
+	Provider            string
+	Model               string
+	ToolSpecs           []ai.Tool
+	Options             ai.ChatOptions
+	MaxRounds           int
+	ToolExecution       ToolExecutionMode
+	GetAPIKey           func(provider string) string
+	TransformContext    func([]ai.Message) []ai.Message
 	GetSteeringMessages func() []ai.Message
 	GetFollowUpMessages func() []ai.Message
-	BeforeToolCall func(ctx context.Context, input BeforeToolCallContext) (BeforeToolCallResult, error)
-	AfterToolCall func(ctx context.Context, input AfterToolCallContext) (ToolResult, error)
-	EventSink func(Event)
+	BeforeToolCall      func(ctx context.Context, input BeforeToolCallContext) (BeforeToolCallResult, error)
+	AfterToolCall       func(ctx context.Context, input AfterToolCallContext) (ToolResult, error)
+	EventSink           func(Event)
 }
 
 type LoopResult struct {
@@ -212,48 +216,57 @@ func RunProviderLoop(ctx context.Context, input ProviderLoopInput) (LoopResult, 
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
+		requestMessages := append([]ai.Message(nil), conversation...)
+		if input.TransformContext != nil {
+			requestMessages = input.TransformContext(requestMessages)
+		}
+		apiKey := input.Options.APIKey
+		if input.GetAPIKey != nil {
+			if resolved := strings.TrimSpace(input.GetAPIKey(input.Provider)); resolved != "" {
+				apiKey = resolved
+			}
+		}
 		request := ai.CompletionRequest{
 			Provider: input.Provider,
 			Model:    input.Model,
-			Messages: conversation,
+			Messages: requestMessages,
 			Tools:    input.ToolSpecs,
 			Options: ai.ChatOptions{
-				Stream:      input.Options.Stream,
-				ToolChoice:  input.Options.ToolChoice,
-				MaxTokens:   input.Options.MaxTokens,
-				Temperature: input.Options.Temperature,
-				APIKey:      input.Options.APIKey,
-				BaseURL:     input.Options.BaseURL,
-				HTTPClient:  input.Options.HTTPClient,
-				Timeout:     input.Options.Timeout,
-				Headers:     input.Options.Headers,
+				Temperature:      input.Options.Temperature,
+				MaxTokens:        input.Options.MaxTokens,
+				Stream:           input.Options.Stream,
+				Transport:        input.Options.Transport,
+				APIKey:           apiKey,
+				BaseURL:          input.Options.BaseURL,
+				HTTPClient:       input.Options.HTTPClient,
+				Timeout:          input.Options.Timeout,
+				Headers:          input.Options.Headers,
+				ToolChoice:       input.Options.ToolChoice,
+				SessionID:        input.Options.SessionID,
+				CacheRetention:   input.Options.CacheRetention,
+				ReasoningEffort:  input.Options.ReasoningEffort,
+				ThinkingBudgets:  input.Options.ThinkingBudgets,
+				ReasoningSummary: input.Options.ReasoningSummary,
+				ServiceTier:      input.Options.ServiceTier,
+				TextVerbosity:    input.Options.TextVerbosity,
+				Metadata:         input.Options.Metadata,
+				OnPayload:        input.Options.OnPayload,
+				OnResponse:       input.Options.OnResponse,
+				MaxRetries:       input.Options.MaxRetries,
+				MaxRetryDelay:    input.Options.MaxRetryDelay,
 			},
 		}
-		resultMessage, _, err := ai.Complete(ctx, request)
+		resultMessage, assistant, blocks, err := runProviderAssistantTurn(ctx, input.EventSink, request, &result)
 		if err != nil {
 			return result, err
 		}
 
-		blocks := ai.ParseContentBlocks(resultMessage.Content)
-		assistant := assistantMessageFromNormalized(blocks, resultMessage.StopReason)
-		if resultMessage.Usage != nil {
-			assistant["usage"] = map[string]any{
-				"input":       resultMessage.Usage.Input,
-				"output":      resultMessage.Usage.Output,
-				"cacheRead":   resultMessage.Usage.CacheRead,
-				"cacheWrite":  resultMessage.Usage.CacheWrite,
-				"totalTokens": resultMessage.Usage.TotalTokens,
-			}
-		}
-
 		result.Messages = append(result.Messages, assistant)
 		conversation = append(conversation, ai.Message{
-			Role:    "assistant",
-			Content: assistant["content"],
+			Role:       "assistant",
+			Content:    assistant["content"],
+			StopReason: resultMessage.StopReason,
 		})
-		emit(&result, input.EventSink, Event{"type": "message_start", "message": assistant})
-		emit(&result, input.EventSink, Event{"type": "message_update", "message": assistant, "assistantEventType": firstAssistantUpdate(blocks)})
-		emit(&result, input.EventSink, Event{"type": "message_end", "message": assistant})
 
 		executed, terminate, err := executeToolBatch(ctx, input, assistant, conversation, blocks, &result)
 		if err != nil {
@@ -311,6 +324,125 @@ func RunProviderLoop(ctx context.Context, input ProviderLoopInput) (LoopResult, 
 
 	emit(&result, input.EventSink, Event{"type": "agent_end", "messageCount": len(result.Messages)})
 	return result, nil
+}
+
+func runProviderAssistantTurn(ctx context.Context, sink func(Event), request ai.CompletionRequest, result *LoopResult) (ai.NormalizedResult, Message, []ai.ContentBlock, error) {
+	if request.Options.Stream {
+		stream := ai.Stream(ctx, request)
+		partialBlocks := []ai.ContentBlock{}
+		started := false
+		for event := range stream.Events() {
+			if !started {
+				started = true
+				emit(result, sink, Event{"type": "message_start", "message": AssistantMessage(partialBlocks, "stop")})
+			}
+			if applyNormalizedEvent(&partialBlocks, event) {
+				emit(result, sink, Event{
+					"type":               "message_update",
+					"message":            AssistantMessage(partialBlocks, "stop"),
+					"assistantEventType": event.Type,
+				})
+			}
+		}
+		resultMessage, err := stream.Result()
+		if err != nil {
+			return resultMessage, nil, nil, err
+		}
+		blocks := ai.ParseContentBlocks(resultMessage.Content)
+		assistant := assistantMessageFromNormalized(blocks, resultMessage.StopReason)
+		applyUsage(assistant, resultMessage.Usage)
+		if !started {
+			emit(result, sink, Event{"type": "message_start", "message": assistant})
+		}
+		emit(result, sink, Event{"type": "message_end", "message": assistant})
+		return resultMessage, assistant, blocks, nil
+	}
+
+	resultMessage, _, err := ai.Complete(ctx, request)
+	if err != nil {
+		return resultMessage, nil, nil, err
+	}
+	blocks := ai.ParseContentBlocks(resultMessage.Content)
+	assistant := assistantMessageFromNormalized(blocks, resultMessage.StopReason)
+	applyUsage(assistant, resultMessage.Usage)
+	emit(result, sink, Event{"type": "message_start", "message": assistant})
+	emit(result, sink, Event{"type": "message_update", "message": assistant, "assistantEventType": firstAssistantUpdate(blocks)})
+	emit(result, sink, Event{"type": "message_end", "message": assistant})
+	return resultMessage, assistant, blocks, nil
+}
+
+func applyUsage(message Message, usage *ai.Usage) {
+	if usage == nil {
+		return
+	}
+	message["usage"] = map[string]any{
+		"input":       usage.Input,
+		"output":      usage.Output,
+		"cacheRead":   usage.CacheRead,
+		"cacheWrite":  usage.CacheWrite,
+		"totalTokens": usage.TotalTokens,
+	}
+}
+
+func applyNormalizedEvent(blocks *[]ai.ContentBlock, event ai.NormalizedEvent) bool {
+	switch event.Type {
+	case "start", "done", "error":
+		return false
+	case "text_start":
+		ensureBlock(blocks, event.ContentIdx, ai.ContentBlock{Type: "text"})
+		return true
+	case "thinking_start":
+		ensureBlock(blocks, event.ContentIdx, ai.ContentBlock{Type: "thinking"})
+		return true
+	case "toolcall_start":
+		ensureBlock(blocks, event.ContentIdx, ai.ContentBlock{Type: "toolCall", Arguments: map[string]any{}})
+		return true
+	case "text_delta":
+		ensureBlock(blocks, event.ContentIdx, ai.ContentBlock{Type: "text"})
+		(*blocks)[event.ContentIdx].Text += event.Delta
+		return true
+	case "thinking_delta":
+		ensureBlock(blocks, event.ContentIdx, ai.ContentBlock{Type: "thinking"})
+		(*blocks)[event.ContentIdx].Thinking += event.Delta
+		return true
+	case "toolcall_delta":
+		ensureBlock(blocks, event.ContentIdx, ai.ContentBlock{Type: "toolCall", Arguments: map[string]any{}})
+		var arguments map[string]any
+		if strings.TrimSpace(event.Delta) != "" && json.Unmarshal([]byte(event.Delta), &arguments) == nil {
+			(*blocks)[event.ContentIdx].Arguments = arguments
+		}
+		return true
+	case "text_end":
+		ensureBlock(blocks, event.ContentIdx, ai.ContentBlock{Type: "text"})
+		(*blocks)[event.ContentIdx].Text = event.Content
+		return true
+	case "thinking_end":
+		ensureBlock(blocks, event.ContentIdx, ai.ContentBlock{Type: "thinking"})
+		(*blocks)[event.ContentIdx].Thinking = event.Content
+		return true
+	case "toolcall_end":
+		ensureBlock(blocks, event.ContentIdx, ai.ContentBlock{Type: "toolCall"})
+		if event.ToolCall != nil {
+			(*blocks)[event.ContentIdx].Name = event.ToolCall.Name
+			(*blocks)[event.ContentIdx].Arguments = event.ToolCall.Arguments
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func ensureBlock(blocks *[]ai.ContentBlock, index int, template ai.ContentBlock) {
+	for len(*blocks) <= index {
+		*blocks = append(*blocks, ai.ContentBlock{})
+	}
+	block := &(*blocks)[index]
+	if block.Type == "" {
+		*block = template
+	}
+	if block.Type == "toolCall" && block.Arguments == nil {
+		block.Arguments = map[string]any{}
+	}
 }
 
 func drainMessages(fn func() []ai.Message) []ai.Message {
@@ -454,6 +586,26 @@ func executeOneToolCall(ctx context.Context, input ProviderLoopInput, assistant 
 		call.executed = true
 		return
 	}
+	if toolSpec := findToolSpec(input.ToolSpecs, call.call.Name); toolSpec != nil {
+		arguments, err := ai.ValidateToolArguments(*toolSpec, call.call)
+		if err != nil {
+			call.result = ToolResult{Text: err.Error(), IsError: true}
+			call.message = ToolResultMessage(call.call.ID, call.call.Name, call.result.Text, call.result.IsError)
+			call.executed = true
+			return
+		}
+		call.call.Arguments = arguments
+	}
+	if tool := findTool(input.Tools, call.call.Name); tool != nil && tool.PrepareArguments != nil {
+		prepared, err := tool.PrepareArguments(cloneArguments(call.call.Arguments))
+		if err != nil {
+			call.result = ToolResult{Text: err.Error(), IsError: true}
+			call.message = ToolResultMessage(call.call.ID, call.call.Name, call.result.Text, call.result.IsError)
+			call.executed = true
+			return
+		}
+		call.call.Arguments = prepared
+	}
 	toolResult := executeTool(ctx, input.Tools, call.call)
 	if input.AfterToolCall != nil {
 		updated, err := input.AfterToolCall(ctx, AfterToolCallContext{
@@ -471,6 +623,35 @@ func executeOneToolCall(ctx context.Context, input ProviderLoopInput, assistant 
 	call.result = toolResult
 	call.message = ToolResultMessage(call.call.ID, call.call.Name, toolResult.Text, toolResult.IsError)
 	call.executed = true
+}
+
+func findToolSpec(tools []ai.Tool, name string) *ai.Tool {
+	for i := range tools {
+		if tools[i].Name == name {
+			return &tools[i]
+		}
+	}
+	return nil
+}
+
+func findTool(tools []Tool, name string) *Tool {
+	for i := range tools {
+		if tools[i].Name == name {
+			return &tools[i]
+		}
+	}
+	return nil
+}
+
+func cloneArguments(arguments map[string]any) map[string]any {
+	if arguments == nil {
+		return map[string]any{}
+	}
+	out := make(map[string]any, len(arguments))
+	for key, value := range arguments {
+		out[key] = value
+	}
+	return out
 }
 
 func emitFinalizedToolCall(result *LoopResult, sink func(Event), call *executedToolCall) {

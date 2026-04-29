@@ -117,6 +117,44 @@ func TestAnthropicProviderUsesOAuthBearerHeader(t *testing.T) {
 	}
 }
 
+func TestAnthropicProviderForwardsMetadataUserID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		metadata, _ := payload["metadata"].(map[string]any)
+		if metadata["user_id"] != "user-123" {
+			t.Fatalf("metadata = %#v", metadata)
+		}
+		_, _ = fmt.Fprint(w, `{
+			"content": [{"type": "text", "text": "ok"}],
+			"usage": {"input_tokens": 1, "output_tokens": 1},
+			"stop_reason": "end_turn"
+		}`)
+	}))
+	defer server.Close()
+
+	provider := AnthropicProvider()
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "anthropic",
+		Model:    "claude-test",
+		Options: ChatOptions{
+			APIKey:   "test-key",
+			BaseURL:  server.URL,
+			Metadata: map[string]any{"user_id": "user-123"},
+		},
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAnthropicProviderStreamingResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Header.Get("x-api-key") != "test-key" {
@@ -145,7 +183,7 @@ func TestAnthropicProviderStreamingResponse(t *testing.T) {
 	defer server.Close()
 
 	provider := AnthropicProvider()
-	result, _, err := provider.Complete(context.Background(), CompletionRequest{
+	result, events, err := provider.Complete(context.Background(), CompletionRequest{
 		Provider: "anthropic",
 		Model:    "claude-test",
 		Options: ChatOptions{
@@ -162,6 +200,133 @@ func TestAnthropicProviderStreamingResponse(t *testing.T) {
 		t.Fatalf("stopReason = %q", result.StopReason)
 	}
 	if result.Text != "hello" {
+		t.Fatalf("text = %q", result.Text)
+	}
+	if len(events) < 6 {
+		t.Fatalf("events = %#v", events)
+	}
+	if events[1].Type != "text_start" || events[2].Type != "text_delta" || events[2].Delta != "hello" {
+		t.Fatalf("unexpected text events = %#v", events[:3])
+	}
+	if events[3].Type != "toolcall_start" || events[4].Type != "toolcall_delta" {
+		t.Fatalf("unexpected tool events = %#v", events)
+	}
+}
+
+func TestAnthropicProviderRetriesRateLimits(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.Header().Set("Retry-After", "0")
+			http.Error(w, `{"error":"rate limit"}`, http.StatusTooManyRequests)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{
+			"content": [{"type": "text", "text": "ok"}],
+			"usage": {"input_tokens": 1, "output_tokens": 1},
+			"stop_reason": "end_turn"
+		}`)
+	}))
+	defer server.Close()
+
+	provider := AnthropicProvider()
+	result, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "anthropic",
+		Model:    "claude-test",
+		Options: ChatOptions{
+			APIKey:     "test-key",
+			BaseURL:    server.URL,
+			MaxRetries: 1,
+		},
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d", attempts)
+	}
+	if result.Text != "ok" {
+		t.Fatalf("text = %q", result.Text)
+	}
+}
+
+func TestAnthropicProviderAddsCacheControl(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+
+		system, _ := payload["system"].([]any)
+		if len(system) != 1 {
+			t.Fatalf("system = %#v", system)
+		}
+		systemBlock, _ := system[0].(map[string]any)
+		systemCache, _ := systemBlock["cache_control"].(map[string]any)
+		if systemCache["type"] != "ephemeral" || systemCache["ttl"] != "1h" {
+			t.Fatalf("system cache_control = %#v", systemCache)
+		}
+
+		tools, _ := payload["tools"].([]any)
+		if len(tools) != 1 {
+			t.Fatalf("tools = %#v", tools)
+		}
+		tool, _ := tools[0].(map[string]any)
+		toolCache, _ := tool["cache_control"].(map[string]any)
+		if toolCache["type"] != "ephemeral" || toolCache["ttl"] != "1h" {
+			t.Fatalf("tool cache_control = %#v", toolCache)
+		}
+
+		messages, _ := payload["messages"].([]any)
+		if len(messages) != 1 {
+			t.Fatalf("messages = %#v", messages)
+		}
+		message, _ := messages[0].(map[string]any)
+		content, _ := message["content"].([]any)
+		lastBlock, _ := content[len(content)-1].(map[string]any)
+		lastCache, _ := lastBlock["cache_control"].(map[string]any)
+		if lastCache["type"] != "ephemeral" || lastCache["ttl"] != "1h" {
+			t.Fatalf("last content cache_control = %#v", lastCache)
+		}
+
+		_, _ = fmt.Fprint(w, `{
+			"content": [{"type": "text", "text": "ok"}],
+			"usage": {"input_tokens": 1, "output_tokens": 1},
+			"stop_reason": "end_turn"
+		}`)
+	}))
+	defer server.Close()
+
+	provider := AnthropicProvider()
+	result, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "anthropic",
+		Model:    "claude-test",
+		Tools: []Tool{{
+			Name: "math",
+			Parameters: map[string]any{
+				"type": "object",
+			},
+		}},
+		Options: ChatOptions{
+			APIKey:         "test-key",
+			BaseURL:        server.URL,
+			CacheRetention: CacheRetentionLong,
+		},
+		Messages: []Message{
+			{Role: "system", Content: "system prompt"},
+			{Role: "user", Content: "hi"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != "ok" {
 		t.Fatalf("text = %q", result.Text)
 	}
 }

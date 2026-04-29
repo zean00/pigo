@@ -22,13 +22,15 @@ const (
 )
 
 type openAIRequest struct {
-	Model       string           `json:"model"`
-	Messages    []openAIMessage  `json:"messages"`
-	MaxTokens   int              `json:"max_tokens,omitempty"`
-	Temperature *float64         `json:"temperature,omitempty"`
-	Tools       []openAIChatTool `json:"tools,omitempty"`
-	ToolChoice  string           `json:"tool_choice,omitempty"`
-	Stream      bool             `json:"stream,omitempty"`
+	Model                string           `json:"model"`
+	Messages             []openAIMessage  `json:"messages"`
+	MaxTokens            int              `json:"max_tokens,omitempty"`
+	Temperature          *float64         `json:"temperature,omitempty"`
+	Tools                []openAIChatTool `json:"tools,omitempty"`
+	ToolChoice           string           `json:"tool_choice,omitempty"`
+	Stream               bool             `json:"stream,omitempty"`
+	PromptCacheKey       string           `json:"prompt_cache_key,omitempty"`
+	PromptCacheRetention string           `json:"prompt_cache_retention,omitempty"`
 }
 
 type openAIResponse struct {
@@ -88,13 +90,15 @@ type openAIStreamChoice struct {
 }
 
 type openAIResponsesRequest struct {
-	Model           string           `json:"model"`
-	Input           []any            `json:"input"`
-	Tools           []openAIChatTool `json:"tools,omitempty"`
-	ToolChoice      string           `json:"tool_choice,omitempty"`
-	MaxOutputTokens int              `json:"max_output_tokens,omitempty"`
-	Temperature     *float64         `json:"temperature,omitempty"`
-	Stream          bool             `json:"stream,omitempty"`
+	Model                string           `json:"model"`
+	Input                []any            `json:"input"`
+	Tools                []openAIChatTool `json:"tools,omitempty"`
+	ToolChoice           string           `json:"tool_choice,omitempty"`
+	MaxOutputTokens      int              `json:"max_output_tokens,omitempty"`
+	Temperature          *float64         `json:"temperature,omitempty"`
+	Stream               bool             `json:"stream,omitempty"`
+	PromptCacheKey       string           `json:"prompt_cache_key,omitempty"`
+	PromptCacheRetention string           `json:"prompt_cache_retention,omitempty"`
 }
 
 type openAIResponsesResponse struct {
@@ -391,6 +395,7 @@ func (provider *openAIProvider) Complete(ctx context.Context, req CompletionRequ
 
 	var requestBody any
 	var data []byte
+	var err error
 	if useResponsesAPI {
 		payload := toOpenAIResponsesRequest(req)
 		requestBody = payload
@@ -399,6 +404,10 @@ func (provider *openAIProvider) Complete(ctx context.Context, req CompletionRequ
 			Model:    req.Model,
 			Messages: toOpenAIMessages(req.Messages),
 			Stream:   req.Options.Stream,
+		}
+		if sessionID := cacheSessionID(req.Options); sessionID != "" {
+			payload.PromptCacheKey = sessionID
+			payload.PromptCacheRetention = cacheRetentionValue(req.Options)
 		}
 		if req.Options.MaxTokens > 0 {
 			payload.MaxTokens = req.Options.MaxTokens
@@ -434,7 +443,12 @@ func (provider *openAIProvider) Complete(ctx context.Context, req CompletionRequ
 		requestBody = payload
 	}
 
-	data, err := json.Marshal(requestBody)
+	requestBody, err = applyPayloadHook(req, requestBody)
+	if err != nil {
+		return NormalizedResult{}, nil, err
+	}
+
+	data, err = json.Marshal(requestBody)
 	if err != nil {
 		return NormalizedResult{}, nil, fmt.Errorf("marshal openai payload: %w", err)
 	}
@@ -449,85 +463,149 @@ func (provider *openAIProvider) Complete(ctx context.Context, req CompletionRequ
 		httpClient = &cloned
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL, bytes.NewReader(data))
-	if err != nil {
-		return NormalizedResult{}, nil, fmt.Errorf("create openai request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if useResponsesAPI && req.Options.Stream {
-		httpReq.Header.Set("Accept", "text/event-stream")
-	}
-	if hasProviderSpec {
-		for key, value := range providerSpec.DefaultHeader {
+	buildRequest := func() (*http.Request, error) {
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL, bytes.NewReader(data))
+		if err != nil {
+			return nil, fmt.Errorf("create openai request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		if useResponsesAPI && req.Options.Stream {
+			httpReq.Header.Set("Accept", "text/event-stream")
+		}
+		if sessionID := cacheSessionID(req.Options); sessionID != "" {
+			httpReq.Header.Set("session_id", sessionID)
+			httpReq.Header.Set("x-client-request-id", sessionID)
+			httpReq.Header.Set("x-session-affinity", sessionID)
+		}
+		if hasProviderSpec {
+			for key, value := range providerSpec.DefaultHeader {
+				httpReq.Header.Set(key, value)
+			}
+		}
+		if hasProviderSpec && providerSpec.Name == "github-copilot" {
+			for key, value := range buildCopilotDynamicHeaders(req.Messages) {
+				httpReq.Header.Set(key, value)
+			}
+		}
+		for key, value := range req.Options.Headers {
 			httpReq.Header.Set(key, value)
 		}
-	}
-	if hasProviderSpec && providerSpec.Name == "github-copilot" {
-		for key, value := range buildCopilotDynamicHeaders(req.Messages) {
-			httpReq.Header.Set(key, value)
-		}
-	}
-	for key, value := range req.Options.Headers {
-		httpReq.Header.Set(key, value)
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-
-	resp, err := httpClient.Do(httpReq)
-	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: err.Error()}, nil, err
-		}
-		return NormalizedResult{}, nil, fmt.Errorf("call openai API: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		if len(body) == 0 {
-			return NormalizedResult{}, nil, fmt.Errorf("openai API error: %s", resp.Status)
-		}
-		return NormalizedResult{}, nil, fmt.Errorf("openai API error: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+		return httpReq, nil
 	}
 
-	if req.Options.Stream && !useResponsesAPI {
-		result, events, streamErr := openAIStreamToResult(resp.Body)
-		if streamErr != nil {
+	maxRetries := retryLimit(req.Options, defaultProviderMaxRetries)
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		httpReq, err := buildRequest()
+		if err != nil {
+			return NormalizedResult{}, nil, err
+		}
+		resp, err := httpClient.Do(httpReq)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: err.Error()}, nil, err
+			}
+			if attempt < maxRetries && shouldRetryHTTPError(err) {
+				delay := retryDelayForAttempt(attempt, 0, defaultProviderBaseDelay)
+				if sleepErr := sleepWithContext(ctx, delay); sleepErr != nil {
+					return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: sleepErr.Error()}, nil, sleepErr
+				}
+				continue
+			}
+			return NormalizedResult{}, nil, fmt.Errorf("call openai API: %w", err)
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			if hookErr := notifyResponseHook(req, resp); hookErr != nil {
+				_ = resp.Body.Close()
+				return NormalizedResult{}, nil, hookErr
+			}
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			errorText := strings.TrimSpace(string(body))
+			if attempt < maxRetries && shouldRetryHTTPStatus(resp.StatusCode, errorText) {
+				serverDelay := retryAfterDelay(resp, errorText)
+				if err := validateRetryDelay(req.Options, serverDelay); err != nil {
+					return NormalizedResult{}, nil, err
+				}
+				if sleepErr := sleepWithContext(ctx, retryDelayForAttempt(attempt, serverDelay, defaultProviderBaseDelay)); sleepErr != nil {
+					return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: sleepErr.Error()}, nil, sleepErr
+				}
+				continue
+			}
+			if errorText == "" {
+				return NormalizedResult{}, nil, fmt.Errorf("openai API error: %s", resp.Status)
+			}
+			return NormalizedResult{}, nil, fmt.Errorf("openai API error: %s: %s", resp.Status, errorText)
+		}
+		if hookErr := notifyResponseHook(req, resp); hookErr != nil {
+			_ = resp.Body.Close()
+			return NormalizedResult{}, nil, hookErr
+		}
+
+		if req.Options.Stream && !useResponsesAPI {
+			result, events, streamErr := openAIStreamToResult(resp.Body)
+			_ = resp.Body.Close()
+			if streamErr == nil {
+				return result, events, nil
+			}
+			if attempt < maxRetries && isRetriableStreamError(streamErr) {
+				if sleepErr := sleepWithContext(ctx, retryDelayForAttempt(attempt, 0, defaultProviderBaseDelay)); sleepErr != nil {
+					return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: sleepErr.Error()}, nil, sleepErr
+				}
+				continue
+			}
 			return NormalizedResult{}, nil, streamErr
 		}
-		return result, events, nil
+
+		if useResponsesAPI {
+			if req.Options.Stream {
+				result, events, streamErr := openAIResponsesSSEToResult(resp.Body)
+				_ = resp.Body.Close()
+				if streamErr == nil {
+					return result, events, nil
+				}
+				if attempt < maxRetries && isRetriableStreamError(streamErr) {
+					if sleepErr := sleepWithContext(ctx, retryDelayForAttempt(attempt, 0, defaultProviderBaseDelay)); sleepErr != nil {
+						return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: sleepErr.Error()}, nil, sleepErr
+					}
+					continue
+				}
+				return NormalizedResult{}, nil, streamErr
+			}
+			result, events, responseErr := openAIResponsesToResult(resp.Body)
+			_ = resp.Body.Close()
+			if responseErr != nil {
+				return NormalizedResult{}, nil, responseErr
+			}
+			return result, events, nil
+		}
+
+		var completion openAIResponse
+		decodeErr := json.NewDecoder(resp.Body).Decode(&completion)
+		_ = resp.Body.Close()
+		if decodeErr != nil {
+			return NormalizedResult{}, nil, fmt.Errorf("parse openai response: %w", decodeErr)
+		}
+		if len(completion.Choices) == 0 {
+			return NormalizedResult{Role: "assistant", StopReason: "error", ErrorMessage: "openai response missing choices"}, nil,
+				errors.New("openai response missing choices")
+		}
+
+		result := openAIChoiceToNormalized(completion.Choices[0])
+		if completion.Usage != nil {
+			result.Usage = &Usage{
+				Input:       completion.Usage.PromptTokens,
+				Output:      completion.Usage.CompletionTokens,
+				CacheRead:   0,
+				CacheWrite:  0,
+				TotalTokens: completion.Usage.TotalTokens,
+			}
+		}
+		return result, AssistantEvents(result.contentBlocks(), result.StopReason), nil
 	}
 
-	if useResponsesAPI {
-		if req.Options.Stream {
-			return openAIResponsesSSEToResult(resp.Body)
-		}
-		result, events, responseErr := openAIResponsesToResult(resp.Body)
-		if responseErr != nil {
-			return NormalizedResult{}, nil, responseErr
-		}
-		return result, events, nil
-	}
-
-	var completion openAIResponse
-	if err := json.NewDecoder(resp.Body).Decode(&completion); err != nil {
-		return NormalizedResult{}, nil, fmt.Errorf("parse openai response: %w", err)
-	}
-	if len(completion.Choices) == 0 {
-		return NormalizedResult{Role: "assistant", StopReason: "error", ErrorMessage: "openai response missing choices"}, nil,
-			errors.New("openai response missing choices")
-	}
-
-	result := openAIChoiceToNormalized(completion.Choices[0])
-	if completion.Usage != nil {
-		result.Usage = &Usage{
-			Input:       completion.Usage.PromptTokens,
-			Output:      completion.Usage.CompletionTokens,
-			CacheRead:   0,
-			CacheWrite:  0,
-			TotalTokens: completion.Usage.TotalTokens,
-		}
-	}
-	return result, AssistantEvents(result.contentBlocks(), result.StopReason), nil
+	return NormalizedResult{}, nil, errors.New("openai retry budget exhausted")
 }
 
 func shouldUseOpenAIResponses(provider, model string) bool {
@@ -552,6 +630,10 @@ func toOpenAIResponsesRequest(req CompletionRequest) openAIResponsesRequest {
 		Model:  req.Model,
 		Input:  make([]any, 0, len(req.Messages)*2),
 		Stream: req.Options.Stream,
+	}
+	if sessionID := cacheSessionID(req.Options); sessionID != "" {
+		payload.PromptCacheKey = sessionID
+		payload.PromptCacheRetention = cacheRetentionValue(req.Options)
 	}
 	if req.Options.MaxTokens > 0 {
 		payload.MaxOutputTokens = req.Options.MaxTokens
@@ -674,6 +756,22 @@ func toOpenAIResponsesRequest(req CompletionRequest) openAIResponsesRequest {
 }
 
 func openAIResponsesSSEToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, error) {
+	return openAIResponsesEventsToResult(func(handle func(map[string]any) error) error {
+		return scanSSE(body, func(event sseEvent) error {
+			payload := strings.TrimSpace(event.Data)
+			if payload == "" || payload == "[DONE]" {
+				return nil
+			}
+			var item map[string]any
+			if err := json.Unmarshal([]byte(payload), &item); err != nil {
+				return fmt.Errorf("parse openai responses stream event: %w", err)
+			}
+			return handle(item)
+		})
+	})
+}
+
+func openAIResponsesEventsToResult(iterate func(func(map[string]any) error) error) (NormalizedResult, []NormalizedEvent, error) {
 	blocks := []ContentBlock{}
 	rawToolArgs := map[int]string{}
 	currentTextIndex := -1
@@ -681,16 +779,9 @@ func openAIResponsesSSEToResult(body io.Reader) (NormalizedResult, []NormalizedE
 	currentToolIndex := -1
 	stopReason := "stop"
 	result := NormalizedResult{Role: "assistant", StopReason: "stop"}
+	events := []NormalizedEvent{{Type: "start"}}
 
-	err := scanSSE(body, func(event sseEvent) error {
-		payload := strings.TrimSpace(event.Data)
-		if payload == "" || payload == "[DONE]" {
-			return nil
-		}
-		var item map[string]any
-		if err := json.Unmarshal([]byte(payload), &item); err != nil {
-			return fmt.Errorf("parse openai responses stream event: %w", err)
-		}
+	err := iterate(func(item map[string]any) error {
 		switch asString(item["type"]) {
 		case "response.output_item.added":
 			outputItem, _ := item["item"].(map[string]any)
@@ -698,9 +789,11 @@ func openAIResponsesSSEToResult(body io.Reader) (NormalizedResult, []NormalizedE
 			case "reasoning":
 				blocks = append(blocks, ContentBlock{Type: "thinking"})
 				currentThinkingIndex = len(blocks) - 1
+				events = append(events, NormalizedEvent{Type: "thinking_start", ContentIdx: currentThinkingIndex})
 			case "message":
 				blocks = append(blocks, ContentBlock{Type: "text"})
 				currentTextIndex = len(blocks) - 1
+				events = append(events, NormalizedEvent{Type: "text_start", ContentIdx: currentTextIndex})
 			case "function_call":
 				blocks = append(blocks, ContentBlock{
 					Type:      "toolCall",
@@ -710,21 +803,34 @@ func openAIResponsesSSEToResult(body io.Reader) (NormalizedResult, []NormalizedE
 				})
 				currentToolIndex = len(blocks) - 1
 				rawToolArgs[currentToolIndex] = asString(outputItem["arguments"])
+				events = append(events, NormalizedEvent{Type: "toolcall_start", ContentIdx: currentToolIndex})
 			}
 		case "response.reasoning_summary_text.delta":
 			if currentThinkingIndex >= 0 && currentThinkingIndex < len(blocks) {
-				blocks[currentThinkingIndex].Thinking += asString(item["delta"])
+				delta := asString(item["delta"])
+				blocks[currentThinkingIndex].Thinking += delta
+				if delta != "" {
+					events = append(events, NormalizedEvent{Type: "thinking_delta", ContentIdx: currentThinkingIndex, Delta: delta})
+				}
 			}
 		case "response.output_text.delta", "response.refusal.delta":
 			if currentTextIndex >= 0 && currentTextIndex < len(blocks) {
-				blocks[currentTextIndex].Text += asString(item["delta"])
+				delta := asString(item["delta"])
+				blocks[currentTextIndex].Text += delta
+				if delta != "" {
+					events = append(events, NormalizedEvent{Type: "text_delta", ContentIdx: currentTextIndex, Delta: delta})
+				}
 			}
 		case "response.function_call_arguments.delta":
 			if currentToolIndex >= 0 && currentToolIndex < len(blocks) {
-				rawToolArgs[currentToolIndex] += asString(item["delta"])
+				delta := asString(item["delta"])
+				rawToolArgs[currentToolIndex] += delta
 				var arguments map[string]any
 				if json.Unmarshal([]byte(rawToolArgs[currentToolIndex]), &arguments) == nil {
 					blocks[currentToolIndex].Arguments = arguments
+				}
+				if delta != "" {
+					events = append(events, NormalizedEvent{Type: "toolcall_delta", ContentIdx: currentToolIndex, Delta: delta})
 				}
 			}
 		case "response.function_call_arguments.done":
@@ -739,10 +845,35 @@ func openAIResponsesSSEToResult(body io.Reader) (NormalizedResult, []NormalizedE
 			outputItem, _ := item["item"].(map[string]any)
 			switch asString(outputItem["type"]) {
 			case "reasoning":
+				if currentThinkingIndex >= 0 && currentThinkingIndex < len(blocks) {
+					events = append(events, NormalizedEvent{
+						Type:       "thinking_end",
+						ContentIdx: currentThinkingIndex,
+						Content:    blocks[currentThinkingIndex].Thinking,
+					})
+				}
 				currentThinkingIndex = -1
 			case "message":
+				if currentTextIndex >= 0 && currentTextIndex < len(blocks) {
+					events = append(events, NormalizedEvent{
+						Type:       "text_end",
+						ContentIdx: currentTextIndex,
+						Content:    blocks[currentTextIndex].Text,
+					})
+				}
 				currentTextIndex = -1
 			case "function_call":
+				if currentToolIndex >= 0 && currentToolIndex < len(blocks) {
+					events = append(events, NormalizedEvent{
+						Type:       "toolcall_end",
+						ContentIdx: currentToolIndex,
+						ToolCall: &NormalizedTool{
+							Name:      blocks[currentToolIndex].Name,
+							Arguments: blocks[currentToolIndex].Arguments,
+							HasID:     blocks[currentToolIndex].ID != "",
+						},
+					})
+				}
 				currentToolIndex = -1
 			}
 		case "response.completed":
@@ -788,7 +919,7 @@ func openAIResponsesSSEToResult(body io.Reader) (NormalizedResult, []NormalizedE
 	result.StopReason = mapOpenAIStopReason(stopReason)
 	result.Text = ContentText(blocks)
 	result.Content = NormalizedContent(blocks)
-	return result, AssistantEvents(blocks, result.StopReason), nil
+	return result, appendTerminalEvent(events, result.StopReason), nil
 }
 
 func openAIResponsesToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, error) {
@@ -1004,6 +1135,9 @@ func openAIStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, 
 	builder := strings.Builder{}
 	toolCalls := map[int]*openAIStreamingCall{}
 	stopReason := "stop"
+	events := []NormalizedEvent{{Type: "start"}}
+	textStarted := false
+	toolBlockIndexes := map[int]int{}
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -1025,13 +1159,27 @@ func openAIStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, 
 				stopReason = choice.FinishReason
 			}
 			if text, ok := choice.Delta.Content.(string); ok && text != "" {
+				if !textStarted {
+					textStarted = true
+					events = append(events, NormalizedEvent{Type: "text_start", ContentIdx: 0})
+				}
 				builder.WriteString(text)
+				events = append(events, NormalizedEvent{Type: "text_delta", ContentIdx: 0, Delta: text})
 			}
 			for _, toolCall := range choice.Delta.ToolCalls {
 				entry, ok := toolCalls[toolCall.Index]
 				if !ok {
 					entry = &openAIStreamingCall{}
 					toolCalls[toolCall.Index] = entry
+				}
+				contentIndex, ok := toolBlockIndexes[toolCall.Index]
+				if !ok {
+					contentIndex = len(toolBlockIndexes)
+					if textStarted {
+						contentIndex++
+					}
+					toolBlockIndexes[toolCall.Index] = contentIndex
+					events = append(events, NormalizedEvent{Type: "toolcall_start", ContentIdx: contentIndex})
 				}
 				if toolCall.ID != "" {
 					entry.ID = toolCall.ID
@@ -1040,6 +1188,13 @@ func openAIStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, 
 					entry.Name = toolCall.Function.Name
 				}
 				entry.Arguments.WriteString(toolCall.Function.Arguments)
+				if toolCall.Function.Arguments != "" {
+					events = append(events, NormalizedEvent{
+						Type:       "toolcall_delta",
+						ContentIdx: contentIndex,
+						Delta:      toolCall.Function.Arguments,
+					})
+				}
 			}
 		}
 	}
@@ -1050,6 +1205,7 @@ func openAIStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, 
 	blocks := []ContentBlock{}
 	if strings.TrimSpace(builder.String()) != "" {
 		blocks = append(blocks, ContentBlock{Type: "text", Text: builder.String()})
+		events = append(events, NormalizedEvent{Type: "text_end", ContentIdx: 0, Content: builder.String()})
 	}
 
 	indices := make([]int, 0, len(toolCalls))
@@ -1072,6 +1228,15 @@ func openAIStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, 
 			Name:      call.Name,
 			Arguments: arguments,
 		})
+		events = append(events, NormalizedEvent{
+			Type:       "toolcall_end",
+			ContentIdx: len(blocks) - 1,
+			ToolCall: &NormalizedTool{
+				Name:      call.Name,
+				Arguments: arguments,
+				HasID:     call.ID != "",
+			},
+		})
 	}
 
 	if len(toolCalls) > 0 {
@@ -1087,7 +1252,7 @@ func openAIStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, 
 		Text:       ContentText(blocks),
 		Content:    NormalizedContent(blocks),
 	}
-	return result, AssistantEvents(blocks, result.StopReason), nil
+	return result, appendTerminalEvent(events, result.StopReason), nil
 }
 
 func toOpenAIMessages(messages []Message) []openAIMessage {

@@ -37,6 +37,7 @@ type Session struct {
 	SessionEntryTypes []string
 	AvailableModels   []ModelInfo
 	IsStreaming       bool
+	OAuthCredentials  map[string]ai.OAuthCredentials
 	mu                sync.Mutex
 	promptCancel      context.CancelFunc
 	bashCancel        context.CancelFunc
@@ -147,6 +148,13 @@ func (s *Session) Prompt(ctx context.Context, prompt string) error {
 		if s.Provider == "" || s.ModelID == "" {
 			return fmt.Errorf("no scripted turns and no model configured")
 		}
+		chatOptions := ai.ChatOptions{}
+		if effort := strings.TrimSpace(s.ThinkingLevel); effort != "" && effort != "off" {
+			chatOptions.ReasoningEffort = effort
+			if model, ok := ai.GetModel(s.Provider, s.ModelID); ok && !ai.SupportsXhigh(model) {
+				chatOptions.ReasoningEffort = ai.ClampReasoning(effort)
+			}
+		}
 		loop, err = agentcore.RunProviderLoop(opCtx, agentcore.ProviderLoopInput{
 			Prompts:   []string{prompt},
 			Tools:     BuiltinTools(s.Root),
@@ -154,7 +162,10 @@ func (s *Session) Prompt(ctx context.Context, prompt string) error {
 			Provider:  s.Provider,
 			Model:     s.ModelID,
 			ToolSpecs: BuiltinToolSpecs(),
-			Options:   ai.ChatOptions{},
+			Options:   chatOptions,
+			GetAPIKey: func(provider string) string {
+				return s.resolveProviderAPIKey(opCtx, provider)
+			},
 		})
 	}
 	cancel()
@@ -215,6 +226,7 @@ func (s *Session) NewSession() {
 	s.Events = nil
 	s.Messages = nil
 	s.AvailableModels = nil
+	s.OAuthCredentials = map[string]ai.OAuthCredentials{}
 	s.seedDefaultModels()
 	s.entries = nil
 	s.entriesByID = map[string]SessionEntry{}
@@ -312,6 +324,57 @@ func (s *Session) SetModel(provider, modelID string) (ModelInfo, error) {
 
 func (s *Session) GetAvailableModels() []ModelInfo {
 	return append([]ModelInfo(nil), s.AvailableModels...)
+}
+
+func (s *Session) SetOAuthCredentials(provider string, credentials ai.OAuthCredentials) error {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return fmt.Errorf("missing provider")
+	}
+	if strings.TrimSpace(credentials.Access) == "" && strings.TrimSpace(credentials.Refresh) == "" {
+		return fmt.Errorf("missing oauth credentials")
+	}
+	if s.OAuthCredentials == nil {
+		s.OAuthCredentials = map[string]ai.OAuthCredentials{}
+	}
+	s.OAuthCredentials[provider] = credentials
+	return s.appendEntry(SessionEntry{
+		Type:             "oauth_login",
+		OAuthProvider:    provider,
+		OAuthCredentials: &credentials,
+	})
+}
+
+func (s *Session) LoadOAuthStore(path string) error {
+	store, err := ai.LoadOAuthStore(path)
+	if err != nil {
+		return err
+	}
+	if s.OAuthCredentials == nil {
+		s.OAuthCredentials = map[string]ai.OAuthCredentials{}
+	}
+	for provider, credentials := range store.Providers {
+		s.OAuthCredentials[provider] = credentials
+	}
+	return nil
+}
+
+func (s *Session) GetProviderAuthStatus() []map[string]any {
+	infos := ai.ProviderAuthInfos()
+	result := make([]map[string]any, 0, len(infos))
+	for _, info := range infos {
+		_, hasStored := s.OAuthCredentials[info.Provider]
+		result = append(result, map[string]any{
+			"provider":          info.Provider,
+			"methods":           info.Methods,
+			"envKeys":           info.EnvKeys,
+			"baseURL":           info.BaseURL,
+			"configured":        info.Configured,
+			"hasStoredOAuth":    hasStored,
+			"usesOAuthRegistry": ai.GetOAuthProvider(info.Provider) != nil,
+		})
+	}
+	return result
 }
 
 func (s *Session) CycleModel() (ModelInfo, bool) {
@@ -659,6 +722,13 @@ func (s *Session) applyEntry(entry SessionEntry) {
 		s.ThinkingLevel = entry.Level
 	case "session_name":
 		s.Name = entry.Name
+	case "oauth_login":
+		if entry.OAuthProvider != "" && entry.OAuthCredentials != nil {
+			if s.OAuthCredentials == nil {
+				s.OAuthCredentials = map[string]ai.OAuthCredentials{}
+			}
+			s.OAuthCredentials[entry.OAuthProvider] = *entry.OAuthCredentials
+		}
 	}
 }
 
@@ -667,6 +737,7 @@ func (s *Session) loadSession(entries []SessionEntry) {
 	s.Events = nil
 	s.Messages = nil
 	s.AvailableModels = nil
+	s.OAuthCredentials = map[string]ai.OAuthCredentials{}
 	s.entries = nil
 	s.entriesByID = map[string]SessionEntry{}
 	s.leafID = ""
@@ -816,6 +887,58 @@ func appendModelIfMissing(models []ModelInfo, model ModelInfo) []ModelInfo {
 		return models
 	}
 	return append(models, model)
+}
+
+func (s *Session) resolveProviderAPIKey(ctx context.Context, provider string) string {
+	s.mu.Lock()
+	credentials := cloneOAuthCredentialsMap(s.OAuthCredentials)
+	s.mu.Unlock()
+
+	refreshed, apiKey, ok, err := ai.GetOAuthAPIKey(ctx, provider, credentials)
+	if err != nil || !ok || strings.TrimSpace(apiKey) == "" {
+		return ""
+	}
+
+	s.mu.Lock()
+	if s.OAuthCredentials == nil {
+		s.OAuthCredentials = map[string]ai.OAuthCredentials{}
+	}
+	current, exists := s.OAuthCredentials[provider]
+	changed := !exists || !oauthCredentialsEqual(current, refreshed)
+	s.OAuthCredentials[provider] = refreshed
+	s.mu.Unlock()
+
+	if changed {
+		_ = s.appendEntry(SessionEntry{
+			Type:             "oauth_login",
+			OAuthProvider:    provider,
+			OAuthCredentials: &refreshed,
+		})
+	}
+	return apiKey
+}
+
+func cloneOAuthCredentialsMap(in map[string]ai.OAuthCredentials) map[string]ai.OAuthCredentials {
+	out := make(map[string]ai.OAuthCredentials, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func oauthCredentialsEqual(a, b ai.OAuthCredentials) bool {
+	if a.Refresh != b.Refresh || a.Access != b.Access || a.Expires != b.Expires || a.ProjectID != b.ProjectID {
+		return false
+	}
+	if len(a.Metadata) != len(b.Metadata) {
+		return false
+	}
+	for key, value := range a.Metadata {
+		if b.Metadata[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 func extractUserMessageText(message agentcore.Message) string {

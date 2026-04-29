@@ -17,7 +17,9 @@ import (
 	bedrockruntime "github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	bedrockdocument "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/document"
 	bedrocktypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
+	smithy "github.com/aws/smithy-go"
 	smithybearer "github.com/aws/smithy-go/auth/bearer"
+	"github.com/aws/smithy-go/middleware"
 )
 
 type bedrockConverseClient interface {
@@ -78,36 +80,90 @@ func (provider *bedrockProvider) Complete(ctx context.Context, req CompletionReq
 	if err != nil {
 		return NormalizedResult{}, nil, err
 	}
+	inputValue, err := applyPayloadHook(req, input)
+	if err != nil {
+		return NormalizedResult{}, nil, err
+	}
+	if typed, ok := inputValue.(*bedrockruntime.ConverseInput); ok && typed != nil {
+		input = typed
+	}
+	maxRetries := retryLimit(req.Options, defaultProviderMaxRetries)
 	if req.Options.Stream {
 		streamingClient, ok := client.(bedrockConverseStreamingClient)
 		if !ok {
 			return NormalizedResult{}, nil, errors.New("amazon-bedrock stream transport is unavailable")
 		}
 		streamInput := toBedrockStreamInput(input)
-		streamOutput, err := streamingClient.ConverseStream(ctx, streamInput)
+		for attempt := 0; attempt <= maxRetries; attempt++ {
+			streamOutput, err := streamingClient.ConverseStream(ctx, streamInput)
+			if err != nil {
+				if errors.Is(err, context.Canceled) {
+					return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: err.Error()}, nil, err
+				}
+				if attempt < maxRetries && shouldRetryBedrockError(err) {
+					serverDelay := bedrockRetryDelay(err)
+					if retryErr := validateRetryDelay(req.Options, serverDelay); retryErr != nil {
+						return NormalizedResult{}, nil, retryErr
+					}
+					if sleepErr := sleepWithContext(ctx, retryDelayForAttempt(attempt, serverDelay, defaultProviderBaseDelay)); sleepErr != nil {
+						return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: sleepErr.Error()}, nil, sleepErr
+					}
+					continue
+				}
+				return NormalizedResult{}, nil, fmt.Errorf("call amazon bedrock stream API: %w", err)
+			}
+			defer streamOutput.GetStream().Close()
+			if hookErr := notifyBedrockResponseHook(req, streamOutput.ResultMetadata); hookErr != nil {
+				return NormalizedResult{}, nil, hookErr
+			}
+			result, events, streamErr := bedrockStreamToResult(streamOutput)
+			if streamErr == nil {
+				return result, events, nil
+			}
+			if attempt < maxRetries && (shouldRetryBedrockError(streamErr) || isRetriableStreamError(streamErr)) {
+				serverDelay := bedrockRetryDelay(streamErr)
+				if retryErr := validateRetryDelay(req.Options, serverDelay); retryErr != nil {
+					return NormalizedResult{}, nil, retryErr
+				}
+				if sleepErr := sleepWithContext(ctx, retryDelayForAttempt(attempt, serverDelay, defaultProviderBaseDelay)); sleepErr != nil {
+					return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: sleepErr.Error()}, nil, sleepErr
+				}
+				continue
+			}
+			return NormalizedResult{}, nil, streamErr
+		}
+		return NormalizedResult{}, nil, errors.New("amazon-bedrock retry budget exhausted")
+	}
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		output, err := client.Converse(ctx, input)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: err.Error()}, nil, err
 			}
-			return NormalizedResult{}, nil, fmt.Errorf("call amazon bedrock stream API: %w", err)
+			if attempt < maxRetries && shouldRetryBedrockError(err) {
+				serverDelay := bedrockRetryDelay(err)
+				if retryErr := validateRetryDelay(req.Options, serverDelay); retryErr != nil {
+					return NormalizedResult{}, nil, retryErr
+				}
+				if sleepErr := sleepWithContext(ctx, retryDelayForAttempt(attempt, serverDelay, defaultProviderBaseDelay)); sleepErr != nil {
+					return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: sleepErr.Error()}, nil, sleepErr
+				}
+				continue
+			}
+			return NormalizedResult{}, nil, fmt.Errorf("call amazon bedrock API: %w", err)
 		}
-		defer streamOutput.GetStream().Close()
-		return bedrockStreamToResult(streamOutput)
-	}
-
-	output, err := client.Converse(ctx, input)
-	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: err.Error()}, nil, err
+		if hookErr := notifyBedrockResponseHook(req, output.ResultMetadata); hookErr != nil {
+			return NormalizedResult{}, nil, hookErr
 		}
-		return NormalizedResult{}, nil, fmt.Errorf("call amazon bedrock API: %w", err)
-	}
 
-	result, err := bedrockOutputToResult(output)
-	if err != nil {
-		return NormalizedResult{}, nil, err
+		result, err := bedrockOutputToResult(output)
+		if err != nil {
+			return NormalizedResult{}, nil, err
+		}
+		return result, AssistantEvents(result.contentBlocks(), result.StopReason), nil
 	}
-	return result, AssistantEvents(result.contentBlocks(), result.StopReason), nil
+	return NormalizedResult{}, nil, errors.New("amazon-bedrock retry budget exhausted")
 }
 
 func toBedrockStreamInput(input *bedrockruntime.ConverseInput) *bedrockruntime.ConverseStreamInput {
@@ -220,7 +276,8 @@ func bedrockRegionFromBaseURL(baseURL string) string {
 }
 
 func toBedrockInput(req CompletionRequest) (*bedrockruntime.ConverseInput, error) {
-	messages, err := toBedrockMessages(req.Messages)
+	cachePoint := bedrockCachePoint(req.Options)
+	messages, err := toBedrockMessages(req.Messages, cachePoint)
 	if err != nil {
 		return nil, err
 	}
@@ -232,6 +289,9 @@ func toBedrockInput(req CompletionRequest) (*bedrockruntime.ConverseInput, error
 	if prompt := strings.TrimSpace(extractSystemPrompt(req.Messages)); prompt != "" {
 		input.System = []bedrocktypes.SystemContentBlock{
 			&bedrocktypes.SystemContentBlockMemberText{Value: prompt},
+		}
+		if cachePoint != nil {
+			input.System = append(input.System, &bedrocktypes.SystemContentBlockMemberCachePoint{Value: *cachePoint})
 		}
 	}
 	if req.Options.Temperature != nil || req.Options.MaxTokens > 0 {
@@ -249,10 +309,16 @@ func toBedrockInput(req CompletionRequest) (*bedrockruntime.ConverseInput, error
 	if toolConfig := toBedrockToolConfiguration(req.Tools, req.Options.ToolChoice); toolConfig != nil {
 		input.ToolConfig = toolConfig
 	}
+	if cachePoint != nil && input.ToolConfig != nil {
+		input.ToolConfig.Tools = append(input.ToolConfig.Tools, &bedrocktypes.ToolMemberCachePoint{Value: *cachePoint})
+	}
+	if metadata := bedrockRequestMetadata(req.Options.Metadata); len(metadata) > 0 {
+		input.RequestMetadata = metadata
+	}
 	return input, nil
 }
 
-func toBedrockMessages(messages []Message) ([]bedrocktypes.Message, error) {
+func toBedrockMessages(messages []Message, cachePoint *bedrocktypes.CachePointBlock) ([]bedrocktypes.Message, error) {
 	out := make([]bedrocktypes.Message, 0, len(messages))
 	for _, message := range messages {
 		switch {
@@ -287,7 +353,88 @@ func toBedrockMessages(messages []Message) ([]bedrocktypes.Message, error) {
 			}
 		}
 	}
+	if cachePoint != nil && len(out) > 0 {
+		last := &out[len(out)-1]
+		if last.Role == bedrocktypes.ConversationRoleUser {
+			last.Content = append(last.Content, &bedrocktypes.ContentBlockMemberCachePoint{Value: *cachePoint})
+		}
+	}
 	return out, nil
+}
+
+func bedrockCachePoint(options ChatOptions) *bedrocktypes.CachePointBlock {
+	retention := resolveCacheRetention(options)
+	if retention == CacheRetentionNone {
+		return nil
+	}
+	point := &bedrocktypes.CachePointBlock{Type: bedrocktypes.CachePointTypeDefault}
+	if retention == CacheRetentionLong {
+		point.Ttl = bedrocktypes.CacheTTLOneHour
+	}
+	return point
+}
+
+func bedrockRequestMetadata(metadata map[string]any) map[string]string {
+	if len(metadata) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(metadata))
+	for key, value := range metadata {
+		key = strings.TrimSpace(key)
+		if key == "" || value == nil {
+			continue
+		}
+		switch typed := value.(type) {
+		case string:
+			if strings.TrimSpace(typed) != "" {
+				out[key] = typed
+			}
+		case fmt.Stringer:
+			value := strings.TrimSpace(typed.String())
+			if value != "" {
+				out[key] = value
+			}
+		default:
+			out[key] = fmt.Sprint(value)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func notifyBedrockResponseHook(req CompletionRequest, _ middleware.Metadata) error {
+	if req.Options.OnResponse == nil {
+		return nil
+	}
+	return req.Options.OnResponse(ProviderResponse{Status: 200, Headers: map[string]string{}}, req)
+}
+
+func shouldRetryBedrockError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch strings.TrimSpace(apiErr.ErrorCode()) {
+		case "ThrottlingException", "ServiceUnavailableException", "ModelNotReadyException", "InternalServerException":
+			return true
+		}
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "throttl") ||
+		strings.Contains(text, "service unavailable") ||
+		strings.Contains(text, "temporarily unavailable") ||
+		strings.Contains(text, "model not ready") ||
+		strings.Contains(text, "internal server")
+}
+
+func bedrockRetryDelay(err error) time.Duration {
+	if err == nil {
+		return 0
+	}
+	return retryDelayFromText(err.Error())
 }
 
 func bedrockUserContent(message Message) ([]bedrocktypes.ContentBlock, error) {
@@ -531,6 +678,7 @@ func bedrockEventStreamToResult(stream *bedrockruntime.ConverseStreamEventStream
 	indexMap := map[int]int{}
 	toolJSON := map[int]string{}
 	result := NormalizedResult{Role: "assistant", StopReason: "stop"}
+	events := []NormalizedEvent{{Type: "start"}}
 
 	for event := range stream.Events() {
 		switch typed := event.(type) {
@@ -545,6 +693,7 @@ func bedrockEventStreamToResult(stream *bedrockruntime.ConverseStreamEventStream
 					Arguments: map[string]any{},
 				})
 				indexMap[index] = len(blocks) - 1
+				events = append(events, NormalizedEvent{Type: "toolcall_start", ContentIdx: len(blocks) - 1})
 			}
 		case *bedrocktypes.ConverseStreamOutputMemberContentBlockDelta:
 			index := int32Value(typed.Value.ContentBlockIndex)
@@ -563,23 +712,67 @@ func bedrockEventStreamToResult(stream *bedrockruntime.ConverseStreamEventStream
 			}
 			switch delta := typed.Value.Delta.(type) {
 			case *bedrocktypes.ContentBlockDeltaMemberText:
+				if blocks[blockIndex].Text == "" {
+					events = append(events, NormalizedEvent{Type: "text_start", ContentIdx: blockIndex})
+				}
 				blocks[blockIndex].Text += delta.Value
+				if delta.Value != "" {
+					events = append(events, NormalizedEvent{Type: "text_delta", ContentIdx: blockIndex, Delta: delta.Value})
+				}
 			case *bedrocktypes.ContentBlockDeltaMemberReasoningContent:
 				switch reasoning := delta.Value.(type) {
 				case *bedrocktypes.ReasoningContentBlockDeltaMemberText:
+					if blocks[blockIndex].Thinking == "" {
+						events = append(events, NormalizedEvent{Type: "thinking_start", ContentIdx: blockIndex})
+					}
 					blocks[blockIndex].Thinking += reasoning.Value
+					if reasoning.Value != "" {
+						events = append(events, NormalizedEvent{Type: "thinking_delta", ContentIdx: blockIndex, Delta: reasoning.Value})
+					}
 				case *bedrocktypes.ReasoningContentBlockDeltaMemberRedactedContent:
+					if blocks[blockIndex].Thinking == "" {
+						events = append(events, NormalizedEvent{Type: "thinking_start", ContentIdx: blockIndex})
+					}
 					blocks[blockIndex].Thinking += string(reasoning.Value)
 					blocks[blockIndex].Redacted = true
+					if value := string(reasoning.Value); value != "" {
+						events = append(events, NormalizedEvent{Type: "thinking_delta", ContentIdx: blockIndex, Delta: value})
+					}
 				}
 			case *bedrocktypes.ContentBlockDeltaMemberToolUse:
 				toolJSON[index] += aws.ToString(delta.Value.Input)
+				if value := aws.ToString(delta.Value.Input); value != "" {
+					events = append(events, NormalizedEvent{Type: "toolcall_delta", ContentIdx: blockIndex, Delta: value})
+				}
 				if raw := strings.TrimSpace(toolJSON[index]); raw != "" {
 					var input map[string]any
 					if json.Unmarshal([]byte(raw), &input) == nil {
 						blocks[blockIndex].Arguments = input
 					}
 				}
+			}
+		case *bedrocktypes.ConverseStreamOutputMemberContentBlockStop:
+			index := int32Value(typed.Value.ContentBlockIndex)
+			blockIndex, ok := indexMap[index]
+			if !ok || blockIndex < 0 || blockIndex >= len(blocks) {
+				continue
+			}
+			block := blocks[blockIndex]
+			switch block.Type {
+			case "text":
+				events = append(events, NormalizedEvent{Type: "text_end", ContentIdx: blockIndex, Content: block.Text})
+			case "thinking":
+				events = append(events, NormalizedEvent{Type: "thinking_end", ContentIdx: blockIndex, Content: block.Thinking})
+			case "toolCall":
+				events = append(events, NormalizedEvent{
+					Type:       "toolcall_end",
+					ContentIdx: blockIndex,
+					ToolCall: &NormalizedTool{
+						Name:      block.Name,
+						Arguments: block.Arguments,
+						HasID:     block.ID != "",
+					},
+				})
 			}
 		case *bedrocktypes.ConverseStreamOutputMemberMessageStop:
 			result.StopReason = mapBedrockStopReason(typed.Value.StopReason)
@@ -609,7 +802,7 @@ func bedrockEventStreamToResult(stream *bedrockruntime.ConverseStreamEventStream
 	}
 	result.Text = ContentText(blocks)
 	result.Content = NormalizedContent(blocks)
-	return result, AssistantEvents(blocks, result.StopReason), nil
+	return result, appendTerminalEvent(events, result.StopReason), nil
 }
 
 func normalizeBedrockBlock(block bedrocktypes.ContentBlock) (*ContentBlock, error) {

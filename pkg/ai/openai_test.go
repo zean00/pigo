@@ -137,12 +137,87 @@ func TestOpenAIProviderStreamingResponse(t *testing.T) {
 	if result.Text != "hello world" {
 		t.Fatalf("text = %q", result.Text)
 	}
+	if events[1].Type != "text_start" || events[2].Type != "text_delta" || events[2].Delta != "hello" {
+		t.Fatalf("unexpected leading events = %#v", events[:3])
+	}
+	foundToolDelta := false
+	for _, event := range events {
+		if event.Type == "toolcall_delta" && strings.Contains(event.Delta, `"value":"ok"`) {
+			foundToolDelta = true
+			break
+		}
+	}
+	if !foundToolDelta {
+		t.Fatalf("missing toolcall_delta in %#v", events)
+	}
+}
+
+func TestOpenAIProviderAddsCacheAffinityForChatCompletions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Header.Get("session_id") != "session-abc" {
+			t.Fatalf("session_id = %q", req.Header.Get("session_id"))
+		}
+		if req.Header.Get("x-client-request-id") != "session-abc" {
+			t.Fatalf("x-client-request-id = %q", req.Header.Get("x-client-request-id"))
+		}
+		if req.Header.Get("x-session-affinity") != "session-abc" {
+			t.Fatalf("x-session-affinity = %q", req.Header.Get("x-session-affinity"))
+		}
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["prompt_cache_key"] != "session-abc" {
+			t.Fatalf("prompt_cache_key = %#v", payload["prompt_cache_key"])
+		}
+		if payload["prompt_cache_retention"] != "24h" {
+			t.Fatalf("prompt_cache_retention = %#v", payload["prompt_cache_retention"])
+		}
+		_, _ = fmt.Fprint(w, `{
+			"choices": [{
+				"message": {"role": "assistant", "content": "cached"},
+				"finish_reason": "stop"
+			}]
+		}`)
+	}))
+	defer server.Close()
+
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	result, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openai",
+		Model:    "gpt-mini",
+		Options: ChatOptions{
+			APIKey:         "test-key",
+			SessionID:      "session-abc",
+			CacheRetention: CacheRetentionLong,
+		},
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != "cached" {
+		t.Fatalf("text = %q", result.Text)
+	}
 }
 
 func TestOpenAIProviderUsesResponsesEndpointForGpt5(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.URL.Path != "/v1/responses" {
 			t.Fatalf("path = %q", req.URL.Path)
+		}
+		if req.Header.Get("session_id") != "session-rsp" {
+			t.Fatalf("session_id = %q", req.Header.Get("session_id"))
+		}
+		if req.Header.Get("x-client-request-id") != "session-rsp" {
+			t.Fatalf("x-client-request-id = %q", req.Header.Get("x-client-request-id"))
+		}
+		if req.Header.Get("x-session-affinity") != "session-rsp" {
+			t.Fatalf("x-session-affinity = %q", req.Header.Get("x-session-affinity"))
 		}
 		body, err := io.ReadAll(req.Body)
 		if err != nil {
@@ -162,6 +237,12 @@ func TestOpenAIProviderUsesResponsesEndpointForGpt5(t *testing.T) {
 		}
 		if got := first["role"]; got != "user" {
 			t.Fatalf("input role = %v", got)
+		}
+		if payload["prompt_cache_key"] != "session-rsp" {
+			t.Fatalf("prompt_cache_key = %#v", payload["prompt_cache_key"])
+		}
+		if payload["prompt_cache_retention"] != "24h" {
+			t.Fatalf("prompt_cache_retention = %#v", payload["prompt_cache_retention"])
 		}
 
 		_, _ = fmt.Fprint(w, `{
@@ -187,7 +268,9 @@ func TestOpenAIProviderUsesResponsesEndpointForGpt5(t *testing.T) {
 		Provider: "openai",
 		Model:    "gpt-5.4",
 		Options: ChatOptions{
-			APIKey: "test-key",
+			APIKey:         "test-key",
+			SessionID:      "session-rsp",
+			CacheRetention: CacheRetentionLong,
 		},
 		Messages: []Message{
 			{Role: "user", Content: "hi"},
@@ -243,6 +326,118 @@ func TestOpenAIProviderStreamsResponsesModels(t *testing.T) {
 		t.Fatal(err)
 	}
 	if result.Text != "hi" {
+		t.Fatalf("text = %q", result.Text)
+	}
+}
+
+func TestOpenAIProviderRetriesRateLimits(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.Header().Set("Retry-After", "0")
+			http.Error(w, `{"error":"rate limit"}`, http.StatusTooManyRequests)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{
+			"choices": [{
+				"message": {"role": "assistant", "content": "ok"},
+				"finish_reason": "stop"
+			}]
+		}`)
+	}))
+	defer server.Close()
+
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	result, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openai",
+		Model:    "gpt-mini",
+		Options: ChatOptions{
+			APIKey:     "test-key",
+			MaxRetries: 1,
+		},
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d", attempts)
+	}
+	if result.Text != "ok" {
+		t.Fatalf("text = %q", result.Text)
+	}
+}
+
+func TestOpenAIProviderPayloadAndResponseHooks(t *testing.T) {
+	hookCalled := false
+	responseCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["model"] != "gpt-hooked" {
+			t.Fatalf("model = %#v", payload["model"])
+		}
+		w.Header().Set("X-Test-Hook", "ok")
+		_, _ = fmt.Fprint(w, `{
+			"choices": [{
+				"message": {"role": "assistant", "content": "hooked"},
+				"finish_reason": "stop"
+			}]
+		}`)
+	}))
+	defer server.Close()
+
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	result, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openai",
+		Model:    "gpt-mini",
+		Options: ChatOptions{
+			APIKey: "test-key",
+			OnPayload: func(payload any, req CompletionRequest) (any, error) {
+				hookCalled = true
+				payloadMap, ok := payload.(map[string]any)
+				if ok {
+					payloadMap["model"] = "gpt-hooked"
+					return payloadMap, nil
+				}
+				raw, err := json.Marshal(payload)
+				if err != nil {
+					return nil, err
+				}
+				var next map[string]any
+				if err := json.Unmarshal(raw, &next); err != nil {
+					return nil, err
+				}
+				next["model"] = "gpt-hooked"
+				return next, nil
+			},
+			OnResponse: func(response ProviderResponse, req CompletionRequest) error {
+				responseCalled = true
+				if response.Status != 200 {
+					t.Fatalf("status = %d", response.Status)
+				}
+				if response.Headers["X-Test-Hook"] != "ok" {
+					t.Fatalf("headers = %#v", response.Headers)
+				}
+				return nil
+			},
+		},
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hookCalled || !responseCalled {
+		t.Fatalf("hookCalled=%v responseCalled=%v", hookCalled, responseCalled)
+	}
+	if result.Text != "hooked" {
 		t.Fatalf("text = %q", result.Text)
 	}
 }

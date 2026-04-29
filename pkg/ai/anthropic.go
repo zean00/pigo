@@ -20,14 +20,16 @@ type anthropicRequest struct {
 	ToolChoice  any                `json:"tool_choice,omitempty"`
 	MaxTokens   int                `json:"max_tokens"`
 	Temperature *float64           `json:"temperature,omitempty"`
-	System      string             `json:"system,omitempty"`
+	System      []map[string]any   `json:"system,omitempty"`
 	Stream      bool               `json:"stream,omitempty"`
+	Metadata    map[string]any     `json:"metadata,omitempty"`
 }
 
 type anthropicTool struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description,omitempty"`
-	InputSchema map[string]any `json:"input_schema"`
+	Name         string         `json:"name"`
+	Description  string         `json:"description,omitempty"`
+	InputSchema  map[string]any `json:"input_schema"`
+	CacheControl map[string]any `json:"cache_control,omitempty"`
 }
 
 type anthropicMessage struct {
@@ -83,7 +85,14 @@ func (provider *anthropicProvider) Complete(ctx context.Context, req CompletionR
 
 	payload := toAnthropicRequest(req)
 	payload.Stream = req.Options.Stream
+	payloadValue, err := applyPayloadHook(req, payload)
+	if err != nil {
+		return NormalizedResult{}, nil, err
+	}
 	data, err := json.Marshal(payload)
+	if payloadValue != nil {
+		data, err = json.Marshal(payloadValue)
+	}
 	if err != nil {
 		return NormalizedResult{}, nil, fmt.Errorf("marshal anthropic payload: %w", err)
 	}
@@ -98,58 +107,108 @@ func (provider *anthropicProvider) Complete(ctx context.Context, req CompletionR
 		httpClient = &cloned
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL, bytes.NewReader(data))
-	if err != nil {
-		return NormalizedResult{}, nil, fmt.Errorf("create anthropic request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("anthropic-version", "2023-06-01")
-	if useAnthropicOAuthToken(req.Provider, apiKey) {
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	} else {
-		httpReq.Header.Set("x-api-key", apiKey)
-	}
-	if hasProviderSpec {
-		for key, value := range providerSpec.DefaultHeader {
+	buildRequest := func() (*http.Request, error) {
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL, bytes.NewReader(data))
+		if err != nil {
+			return nil, fmt.Errorf("create anthropic request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("anthropic-version", "2023-06-01")
+		if useAnthropicOAuthToken(req.Provider, apiKey) {
+			httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+		} else {
+			httpReq.Header.Set("x-api-key", apiKey)
+		}
+		if hasProviderSpec {
+			for key, value := range providerSpec.DefaultHeader {
+				httpReq.Header.Set(key, value)
+			}
+		}
+		for key, value := range req.Options.Headers {
 			httpReq.Header.Set(key, value)
 		}
-	}
-	for key, value := range req.Options.Headers {
-		httpReq.Header.Set(key, value)
+		return httpReq, nil
 	}
 
-	resp, err := httpClient.Do(httpReq)
-	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: err.Error()}, nil, err
+	maxRetries := retryLimit(req.Options, defaultProviderMaxRetries)
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		httpReq, err := buildRequest()
+		if err != nil {
+			return NormalizedResult{}, nil, err
 		}
-		return NormalizedResult{}, nil, fmt.Errorf("call anthropic API: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		if len(body) == 0 {
-			return NormalizedResult{}, nil, fmt.Errorf("anthropic API error: %s", resp.Status)
+		resp, err := httpClient.Do(httpReq)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: err.Error()}, nil, err
+			}
+			if attempt < maxRetries && shouldRetryHTTPError(err) {
+				if sleepErr := sleepWithContext(ctx, retryDelayForAttempt(attempt, 0, defaultProviderBaseDelay)); sleepErr != nil {
+					return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: sleepErr.Error()}, nil, sleepErr
+				}
+				continue
+			}
+			return NormalizedResult{}, nil, fmt.Errorf("call anthropic API: %w", err)
 		}
-		return NormalizedResult{}, nil, fmt.Errorf("anthropic API error: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			if hookErr := notifyResponseHook(req, resp); hookErr != nil {
+				_ = resp.Body.Close()
+				return NormalizedResult{}, nil, hookErr
+			}
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			errorText := strings.TrimSpace(string(body))
+			if attempt < maxRetries && shouldRetryHTTPStatus(resp.StatusCode, errorText) {
+				serverDelay := retryAfterDelay(resp, errorText)
+				if err := validateRetryDelay(req.Options, serverDelay); err != nil {
+					return NormalizedResult{}, nil, err
+				}
+				if sleepErr := sleepWithContext(ctx, retryDelayForAttempt(attempt, serverDelay, defaultProviderBaseDelay)); sleepErr != nil {
+					return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: sleepErr.Error()}, nil, sleepErr
+				}
+				continue
+			}
+			if errorText == "" {
+				return NormalizedResult{}, nil, fmt.Errorf("anthropic API error: %s", resp.Status)
+			}
+			return NormalizedResult{}, nil, fmt.Errorf("anthropic API error: %s: %s", resp.Status, errorText)
+		}
+		if hookErr := notifyResponseHook(req, resp); hookErr != nil {
+			_ = resp.Body.Close()
+			return NormalizedResult{}, nil, hookErr
+		}
+
+		if req.Options.Stream {
+			result, events, streamErr := anthropicStreamToResult(resp.Body)
+			_ = resp.Body.Close()
+			if streamErr == nil {
+				return result, events, nil
+			}
+			if attempt < maxRetries && isRetriableStreamError(streamErr) {
+				if sleepErr := sleepWithContext(ctx, retryDelayForAttempt(attempt, 0, defaultProviderBaseDelay)); sleepErr != nil {
+					return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: sleepErr.Error()}, nil, sleepErr
+				}
+				continue
+			}
+			return NormalizedResult{}, nil, streamErr
+		}
+
+		result, responseErr := anthropicResponseToResult(resp.Body)
+		_ = resp.Body.Close()
+		if responseErr != nil {
+			return NormalizedResult{}, nil, responseErr
+		}
+		return result, AssistantEvents(result.contentBlocks(), result.StopReason), nil
 	}
 
-	if req.Options.Stream {
-		return anthropicStreamToResult(resp.Body)
-	}
-
-	result, err := anthropicResponseToResult(resp.Body)
-	if err != nil {
-		return NormalizedResult{}, nil, err
-	}
-	return result, AssistantEvents(result.contentBlocks(), result.StopReason), nil
+	return NormalizedResult{}, nil, errors.New("anthropic retry budget exhausted")
 }
 
 func anthropicStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, error) {
 	blocksByIndex := map[int]map[string]any{}
 	stopReason := ""
 	usage := &Usage{}
+	events := []NormalizedEvent{{Type: "start"}}
 
 	err := scanSSE(body, func(event sseEvent) error {
 		payload := strings.TrimSpace(event.Data)
@@ -179,8 +238,16 @@ func anthropicStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEven
 			switch asString(block["type"]) {
 			case "text":
 				blocksByIndex[index] = map[string]any{"type": "text", "text": asString(block["text"])}
+				events = append(events, NormalizedEvent{Type: "text_start", ContentIdx: index})
+				if text := asString(block["text"]); text != "" {
+					events = append(events, NormalizedEvent{Type: "text_delta", ContentIdx: index, Delta: text})
+				}
 			case "thinking":
 				blocksByIndex[index] = map[string]any{"type": "thinking", "thinking": asString(block["thinking"])}
+				events = append(events, NormalizedEvent{Type: "thinking_start", ContentIdx: index})
+				if thinking := asString(block["thinking"]); thinking != "" {
+					events = append(events, NormalizedEvent{Type: "thinking_delta", ContentIdx: index, Delta: thinking})
+				}
 			case "tool_use":
 				inputMap, _ := block["input"].(map[string]any)
 				if inputMap == nil {
@@ -193,6 +260,7 @@ func anthropicStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEven
 					"input": inputMap,
 					"json":  "",
 				}
+				events = append(events, NormalizedEvent{Type: "toolcall_start", ContentIdx: index})
 			}
 		case "content_block_delta":
 			index := int(asFloat64(item["index"]))
@@ -203,16 +271,48 @@ func anthropicStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEven
 			delta, _ := item["delta"].(map[string]any)
 			switch asString(delta["type"]) {
 			case "text_delta":
-				block["text"] = asString(block["text"]) + asString(delta["text"])
+				value := asString(delta["text"])
+				block["text"] = asString(block["text"]) + value
+				if value != "" {
+					events = append(events, NormalizedEvent{Type: "text_delta", ContentIdx: index, Delta: value})
+				}
 			case "thinking_delta":
-				block["thinking"] = asString(block["thinking"]) + asString(delta["thinking"])
+				value := asString(delta["thinking"])
+				block["thinking"] = asString(block["thinking"]) + value
+				if value != "" {
+					events = append(events, NormalizedEvent{Type: "thinking_delta", ContentIdx: index, Delta: value})
+				}
 			case "input_json_delta":
-				raw := asString(block["json"]) + asString(delta["partial_json"])
+				value := asString(delta["partial_json"])
+				raw := asString(block["json"]) + value
 				block["json"] = raw
 				var input map[string]any
 				if strings.TrimSpace(raw) != "" && json.Unmarshal([]byte(raw), &input) == nil {
 					block["input"] = input
 				}
+				if value != "" {
+					events = append(events, NormalizedEvent{Type: "toolcall_delta", ContentIdx: index, Delta: value})
+				}
+			}
+		case "content_block_stop":
+			index := int(asFloat64(item["index"]))
+			block := blocksByIndex[index]
+			switch asString(block["type"]) {
+			case "text":
+				events = append(events, NormalizedEvent{Type: "text_end", ContentIdx: index, Content: asString(block["text"])})
+			case "thinking":
+				events = append(events, NormalizedEvent{Type: "thinking_end", ContentIdx: index, Content: asString(block["thinking"])})
+			case "tool_use":
+				arguments, _ := block["input"].(map[string]any)
+				events = append(events, NormalizedEvent{
+					Type:       "toolcall_end",
+					ContentIdx: index,
+					ToolCall: &NormalizedTool{
+						Name:      asString(block["name"]),
+						Arguments: arguments,
+						HasID:     asString(block["id"]) != "",
+					},
+				})
 			}
 		case "message_delta":
 			delta, _ := item["delta"].(map[string]any)
@@ -252,7 +352,7 @@ func anthropicStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEven
 	if result.Usage != nil && result.Usage.TotalTokens == 0 {
 		result.Usage.TotalTokens = result.Usage.Input + result.Usage.Output
 	}
-	return result, AssistantEvents(blocks, result.StopReason), nil
+	return result, appendTerminalEvent(events, result.StopReason), nil
 }
 
 func normalizeAnthropicURL(baseURL string) string {
@@ -268,9 +368,10 @@ func normalizeAnthropicURL(baseURL string) string {
 }
 
 func toAnthropicRequest(req CompletionRequest) anthropicRequest {
+	cacheControl := anthropicCacheControl(req.Options)
 	payload := anthropicRequest{
 		Model:     req.Model,
-		Messages:  toAnthropicMessages(req.Messages),
+		Messages:  toAnthropicMessages(req.Messages, cacheControl),
 		MaxTokens: req.Options.MaxTokens,
 	}
 	if payload.MaxTokens <= 0 {
@@ -279,9 +380,22 @@ func toAnthropicRequest(req CompletionRequest) anthropicRequest {
 	if req.Options.Temperature != nil {
 		payload.Temperature = req.Options.Temperature
 	}
+	if userID := strings.TrimSpace(asString(req.Options.Metadata["user_id"])); userID != "" {
+		payload.Metadata = map[string]any{"user_id": userID}
+	}
+	if prompt := strings.TrimSpace(extractSystemPrompt(req.Messages)); prompt != "" {
+		systemBlock := map[string]any{
+			"type": "text",
+			"text": prompt,
+		}
+		if cacheControl != nil {
+			systemBlock["cache_control"] = cacheControl
+		}
+		payload.System = []map[string]any{systemBlock}
+	}
 	if len(req.Tools) > 0 {
 		payload.Tools = make([]anthropicTool, 0, len(req.Tools))
-		for _, tool := range req.Tools {
+		for index, tool := range req.Tools {
 			parameters := tool.Parameters
 			if parameters == nil {
 				parameters = map[string]any{
@@ -294,6 +408,12 @@ func toAnthropicRequest(req CompletionRequest) anthropicRequest {
 				Name:        tool.Name,
 				Description: strings.TrimSpace(tool.Description),
 				InputSchema: parameters,
+				CacheControl: func() map[string]any {
+					if cacheControl != nil && index == len(req.Tools)-1 {
+						return cacheControl
+					}
+					return nil
+				}(),
 			})
 		}
 		toolChoice := strings.TrimSpace(req.Options.ToolChoice)
@@ -310,7 +430,7 @@ func toAnthropicRequest(req CompletionRequest) anthropicRequest {
 	return payload
 }
 
-func toAnthropicMessages(messages []Message) []anthropicMessage {
+func toAnthropicMessages(messages []Message, cacheControl map[string]any) []anthropicMessage {
 	out := make([]anthropicMessage, 0, len(messages))
 	for _, message := range messages {
 		switch {
@@ -336,7 +456,27 @@ func toAnthropicMessages(messages []Message) []anthropicMessage {
 			}})
 		}
 	}
+	if cacheControl != nil && len(out) > 0 {
+		last := &out[len(out)-1]
+		if strings.EqualFold(last.Role, "user") && len(last.Content) > 0 {
+			if block, ok := last.Content[len(last.Content)-1].(map[string]any); ok {
+				block["cache_control"] = cacheControl
+			}
+		}
+	}
 	return out
+}
+
+func anthropicCacheControl(options ChatOptions) map[string]any {
+	retention := resolveCacheRetention(options)
+	if retention == CacheRetentionNone {
+		return nil
+	}
+	cacheControl := map[string]any{"type": "ephemeral"}
+	if retention == CacheRetentionLong {
+		cacheControl["ttl"] = "1h"
+	}
+	return cacheControl
 }
 
 func anthropicUserContent(message Message) []any {

@@ -15,8 +15,8 @@ Initial targets:
 Out of scope for the first pass:
 
 - TUI implementation.
-- Full streaming parity across all providers.
-- Full CLI parity.
+- Full interactive coding-agent product parity.
+- MCP, ACP, TUI, and web UI packages.
 
 ## Conformance
 
@@ -46,9 +46,18 @@ Run the minimal headless RPC server:
 ```bash
 printf '{"id":"s1","type":"get_state"}\n' | go run ./cmd/pigo-rpc
 printf '{"id":"stats1","type":"get_session_stats"}\n' | go run ./cmd/pigo-rpc --session-file tmp/session.jsonl
+printf '{"id":"o1","type":"get_oauth_providers"}\n' | go run ./cmd/pigo-rpc --auth-file tmp/auth.json
 ```
 
-Current status: first conformance-backed tranche. The commands execute fixture-driven behavior for the current `pi-ai`, `agent-core`, and headless coding-agent fixtures, and their output passes the TypeScript verifiers.
+Run the interactive OAuth helper:
+
+```bash
+go run ./cmd/pigo-auth --list
+go run ./cmd/pigo-auth --provider anthropic
+go run ./cmd/pigo-auth --provider openai-codex --auth-file tmp/auth.json
+```
+
+Current status: conformance-backed Go port for `pi-ai`, `agent-core`, and the headless coding-agent target. The commands execute fixture-driven behavior for the current TypeScript contracts, and their output passes the `pi-mono` verifiers.
 
 `pkg/ai` also includes a complete provider catalog for all `pi-mono` `KnownProvider` values, with implemented OpenAI-compatible and
 Anthropic-compatible transports plus explicit runtime placeholders for the rest.
@@ -96,7 +105,7 @@ Bedrock transport is currently wired for:
 
 - `amazon-bedrock`
 
-Every `KnownProvider` from `pi-mono` now resolves to a concrete transport in `pigo`, but several of those transports are still pragmatic request/response implementations rather than full streaming-equivalent ports.
+Every `KnownProvider` from `pi-mono` now resolves to a concrete transport in `pigo`, and the provider layer supports streaming across the current catalog.
 
 Run the full cross-repo verifier:
 
@@ -104,4 +113,4 @@ Run the full cross-repo verifier:
 make verify-conformance
 ```
 
-This still is not a full production port. Provider coverage is now complete across the current `pi-mono` catalog, but broader CLI/runtime parity and deeper provider-specific streaming behavior remain follow-up implementation work.
+This still is not a full production port. The remaining gaps are higher-level parity gaps: deeper provider-specific event semantics, richer `pi-ai` utility surface, and the broader interactive coding-agent product surface beyond the headless target.

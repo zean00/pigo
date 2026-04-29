@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/badlogic/pigo/pkg/ai"
 )
@@ -86,4 +87,111 @@ func TestSessionProviderLoopWritesFileThroughTool(t *testing.T) {
 	if len(session.Messages) != 4 {
 		t.Fatalf("message count = %d", len(session.Messages))
 	}
+}
+
+func TestSessionProviderLoopUsesStoredOAuthCredentials(t *testing.T) {
+	const providerName = "custom-oauth-provider"
+	refreshCalls := 0
+	ai.RegisterProvider(providerName, providerFunc(func(_ context.Context, req ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error) {
+		if got := req.Options.APIKey; got != "fresh-token" {
+			t.Fatalf("api key = %q", got)
+		}
+		return ai.NormalizedResult{
+			Role:       "assistant",
+			StopReason: "stop",
+			Text:       "ok",
+			Content:    []any{map[string]any{"type": "text", "text": "ok"}},
+		}, []ai.NormalizedEvent{{Type: "start"}, {Type: "text_start", ContentIdx: 0}, {Type: "text_delta", ContentIdx: 0, Delta: "ok"}, {Type: "text_end", ContentIdx: 0, Content: "ok"}, {Type: "done", Reason: "stop"}}, nil
+	}))
+	ai.RegisterOAuthProvider(testOAuthProvider{
+		id:   providerName,
+		name: "Custom OAuth",
+		refresh: func(ctx context.Context, credentials ai.OAuthCredentials) (ai.OAuthCredentials, error) {
+			refreshCalls++
+			credentials.Access = "fresh-token"
+			credentials.Expires = time.Now().Add(time.Hour).UnixMilli()
+			return credentials, nil
+		},
+		getAPIKey: func(credentials ai.OAuthCredentials) string {
+			return credentials.Access
+		},
+	})
+	defer ai.UnregisterOAuthProvider(providerName)
+
+	root := t.TempDir()
+	session := NewSession(root, nil)
+	if _, err := session.SetModel(providerName, "test-model"); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.SetOAuthCredentials(providerName, ai.OAuthCredentials{
+		Refresh:   "refresh-token",
+		Access:    "expired-token",
+		Expires:   time.Now().Add(-time.Hour).UnixMilli(),
+		ProjectID: "project-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := session.Prompt(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+
+	if refreshCalls != 1 {
+		t.Fatalf("refreshCalls = %d", refreshCalls)
+	}
+	if got := session.OAuthCredentials[providerName].Access; got != "fresh-token" {
+		t.Fatalf("stored access token = %q", got)
+	}
+}
+
+func TestSessionProviderLoopForwardsThinkingLevel(t *testing.T) {
+	const providerName = "thinking-provider"
+	ai.RegisterProvider(providerName, providerFunc(func(_ context.Context, req ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error) {
+		if got := req.Options.ReasoningEffort; got != "high" {
+			t.Fatalf("reasoning effort = %q", got)
+		}
+		return ai.NormalizedResult{
+			Role:       "assistant",
+			StopReason: "stop",
+			Text:       "ok",
+			Content:    []any{map[string]any{"type": "text", "text": "ok"}},
+		}, []ai.NormalizedEvent{{Type: "start"}, {Type: "text_start", ContentIdx: 0}, {Type: "text_delta", ContentIdx: 0, Delta: "ok"}, {Type: "text_end", ContentIdx: 0, Content: "ok"}, {Type: "done", Reason: "stop"}}, nil
+	}))
+
+	root := t.TempDir()
+	session := NewSession(root, nil)
+	session.ThinkingLevel = "high"
+	if _, err := session.SetModel(providerName, "test-model"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := session.Prompt(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type providerFunc func(context.Context, ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error)
+
+func (fn providerFunc) Complete(ctx context.Context, req ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error) {
+	return fn(ctx, req)
+}
+
+type testOAuthProvider struct {
+	id        string
+	name      string
+	refresh   func(context.Context, ai.OAuthCredentials) (ai.OAuthCredentials, error)
+	getAPIKey func(ai.OAuthCredentials) string
+}
+
+func (p testOAuthProvider) ID() string               { return p.id }
+func (p testOAuthProvider) Name() string             { return p.name }
+func (p testOAuthProvider) UsesCallbackServer() bool { return false }
+func (p testOAuthProvider) Login(callbacks ai.OAuthLoginCallbacks) (ai.OAuthCredentials, error) {
+	return ai.OAuthCredentials{Access: "login-token"}, nil
+}
+func (p testOAuthProvider) RefreshToken(ctx context.Context, credentials ai.OAuthCredentials) (ai.OAuthCredentials, error) {
+	return p.refresh(ctx, credentials)
+}
+func (p testOAuthProvider) GetAPIKey(credentials ai.OAuthCredentials) string {
+	return p.getAPIKey(credentials)
 }

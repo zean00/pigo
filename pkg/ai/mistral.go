@@ -168,7 +168,14 @@ func (provider *mistralProvider) Complete(ctx context.Context, req CompletionReq
 		}
 	}
 
+	payloadValue, err := applyPayloadHook(req, payload)
+	if err != nil {
+		return NormalizedResult{}, nil, err
+	}
 	data, err := json.Marshal(payload)
+	if payloadValue != nil {
+		data, err = json.Marshal(payloadValue)
+	}
 	if err != nil {
 		return NormalizedResult{}, nil, fmt.Errorf("marshal mistral payload: %w", err)
 	}
@@ -183,59 +190,109 @@ func (provider *mistralProvider) Complete(ctx context.Context, req CompletionReq
 		httpClient = &cloned
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL, bytes.NewReader(data))
-	if err != nil {
-		return NormalizedResult{}, nil, fmt.Errorf("create mistral request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	if hasProviderSpec {
-		for key, value := range providerSpec.DefaultHeader {
+	buildRequest := func() (*http.Request, error) {
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL, bytes.NewReader(data))
+		if err != nil {
+			return nil, fmt.Errorf("create mistral request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+		if hasProviderSpec {
+			for key, value := range providerSpec.DefaultHeader {
+				httpReq.Header.Set(key, value)
+			}
+		}
+		for key, value := range req.Options.Headers {
 			httpReq.Header.Set(key, value)
 		}
-	}
-	for key, value := range req.Options.Headers {
-		httpReq.Header.Set(key, value)
+		return httpReq, nil
 	}
 
-	resp, err := httpClient.Do(httpReq)
-	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: err.Error()}, nil, err
+	maxRetries := retryLimit(req.Options, defaultProviderMaxRetries)
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		httpReq, err := buildRequest()
+		if err != nil {
+			return NormalizedResult{}, nil, err
 		}
-		return NormalizedResult{}, nil, fmt.Errorf("call mistral API: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		if len(body) == 0 {
-			return NormalizedResult{}, nil, fmt.Errorf("mistral API error: %s", resp.Status)
+		resp, err := httpClient.Do(httpReq)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: err.Error()}, nil, err
+			}
+			if attempt < maxRetries && shouldRetryHTTPError(err) {
+				if sleepErr := sleepWithContext(ctx, retryDelayForAttempt(attempt, 0, defaultProviderBaseDelay)); sleepErr != nil {
+					return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: sleepErr.Error()}, nil, sleepErr
+				}
+				continue
+			}
+			return NormalizedResult{}, nil, fmt.Errorf("call mistral API: %w", err)
 		}
-		return NormalizedResult{}, nil, fmt.Errorf("mistral API error: %s: %s", resp.Status, strings.TrimSpace(string(body)))
-	}
 
-	if req.Options.Stream {
-		return mistralStreamToResult(resp.Body)
-	}
-
-	var completion mistralResponse
-	if err := json.NewDecoder(resp.Body).Decode(&completion); err != nil {
-		return NormalizedResult{}, nil, fmt.Errorf("parse mistral response: %w", err)
-	}
-	if len(completion.Choices) == 0 {
-		return NormalizedResult{}, nil, errors.New("mistral response missing choices")
-	}
-
-	result := mistralChoiceToNormalized(completion.Choices[0])
-	if completion.Usage != nil {
-		result.Usage = &Usage{
-			Input:       completion.Usage.PromptTokens,
-			Output:      completion.Usage.CompletionTokens,
-			TotalTokens: completion.Usage.TotalTokens,
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			if hookErr := notifyResponseHook(req, resp); hookErr != nil {
+				_ = resp.Body.Close()
+				return NormalizedResult{}, nil, hookErr
+			}
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			errorText := strings.TrimSpace(string(body))
+			if attempt < maxRetries && shouldRetryHTTPStatus(resp.StatusCode, errorText) {
+				serverDelay := retryAfterDelay(resp, errorText)
+				if err := validateRetryDelay(req.Options, serverDelay); err != nil {
+					return NormalizedResult{}, nil, err
+				}
+				if sleepErr := sleepWithContext(ctx, retryDelayForAttempt(attempt, serverDelay, defaultProviderBaseDelay)); sleepErr != nil {
+					return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: sleepErr.Error()}, nil, sleepErr
+				}
+				continue
+			}
+			if errorText == "" {
+				return NormalizedResult{}, nil, fmt.Errorf("mistral API error: %s", resp.Status)
+			}
+			return NormalizedResult{}, nil, fmt.Errorf("mistral API error: %s: %s", resp.Status, errorText)
 		}
+		if hookErr := notifyResponseHook(req, resp); hookErr != nil {
+			_ = resp.Body.Close()
+			return NormalizedResult{}, nil, hookErr
+		}
+
+		if req.Options.Stream {
+			result, events, streamErr := mistralStreamToResult(resp.Body)
+			_ = resp.Body.Close()
+			if streamErr == nil {
+				return result, events, nil
+			}
+			if attempt < maxRetries && isRetriableStreamError(streamErr) {
+				if sleepErr := sleepWithContext(ctx, retryDelayForAttempt(attempt, 0, defaultProviderBaseDelay)); sleepErr != nil {
+					return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: sleepErr.Error()}, nil, sleepErr
+				}
+				continue
+			}
+			return NormalizedResult{}, nil, streamErr
+		}
+
+		var completion mistralResponse
+		decodeErr := json.NewDecoder(resp.Body).Decode(&completion)
+		_ = resp.Body.Close()
+		if decodeErr != nil {
+			return NormalizedResult{}, nil, fmt.Errorf("parse mistral response: %w", decodeErr)
+		}
+		if len(completion.Choices) == 0 {
+			return NormalizedResult{}, nil, errors.New("mistral response missing choices")
+		}
+
+		result := mistralChoiceToNormalized(completion.Choices[0])
+		if completion.Usage != nil {
+			result.Usage = &Usage{
+				Input:       completion.Usage.PromptTokens,
+				Output:      completion.Usage.CompletionTokens,
+				TotalTokens: completion.Usage.TotalTokens,
+			}
+		}
+		return result, AssistantEvents(result.contentBlocks(), result.StopReason), nil
 	}
-	return result, AssistantEvents(result.contentBlocks(), result.StopReason), nil
+
+	return NormalizedResult{}, nil, errors.New("mistral retry budget exhausted")
 }
 
 func mistralStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, error) {
@@ -243,6 +300,9 @@ func mistralStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent,
 	textBuilder := strings.Builder{}
 	toolCalls := map[int]*mistralToolCall{}
 	stopReason := "stop"
+	events := []NormalizedEvent{{Type: "start"}}
+	textStarted := false
+	toolBlockIndexes := map[int]int{}
 
 	err := scanSSE(body, func(event sseEvent) error {
 		payload := strings.TrimSpace(event.Data)
@@ -259,7 +319,14 @@ func mistralStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent,
 			}
 			switch content := choice.Delta.Content.(type) {
 			case string:
-				textBuilder.WriteString(content)
+				if content != "" {
+					if !textStarted {
+						textStarted = true
+						events = append(events, NormalizedEvent{Type: "text_start", ContentIdx: 0})
+					}
+					textBuilder.WriteString(content)
+					events = append(events, NormalizedEvent{Type: "text_delta", ContentIdx: 0, Delta: content})
+				}
 			case []any:
 				for _, item := range content {
 					itemMap, ok := item.(map[string]any)
@@ -267,7 +334,16 @@ func mistralStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent,
 						continue
 					}
 					if asString(itemMap["type"]) == "text" {
-						textBuilder.WriteString(asString(itemMap["text"]))
+						delta := asString(itemMap["text"])
+						if delta == "" {
+							continue
+						}
+						if !textStarted {
+							textStarted = true
+							events = append(events, NormalizedEvent{Type: "text_start", ContentIdx: 0})
+						}
+						textBuilder.WriteString(delta)
+						events = append(events, NormalizedEvent{Type: "text_delta", ContentIdx: 0, Delta: delta})
 					}
 				}
 			}
@@ -281,6 +357,15 @@ func mistralStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent,
 					entry = &mistralToolCall{}
 					toolCalls[index] = entry
 				}
+				contentIndex, ok := toolBlockIndexes[index]
+				if !ok {
+					contentIndex = len(toolBlockIndexes)
+					if textStarted {
+						contentIndex++
+					}
+					toolBlockIndexes[index] = contentIndex
+					events = append(events, NormalizedEvent{Type: "toolcall_start", ContentIdx: contentIndex})
+				}
 				if toolCall.ID != "" {
 					entry.ID = toolCall.ID
 				}
@@ -288,6 +373,13 @@ func mistralStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent,
 					entry.Function.Name = toolCall.Function.Name
 				}
 				entry.Function.Arguments += toolCall.Function.Arguments
+				if toolCall.Function.Arguments != "" {
+					events = append(events, NormalizedEvent{
+						Type:       "toolcall_delta",
+						ContentIdx: contentIndex,
+						Delta:      toolCall.Function.Arguments,
+					})
+				}
 			}
 		}
 		return nil
@@ -298,6 +390,7 @@ func mistralStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent,
 
 	if strings.TrimSpace(textBuilder.String()) != "" {
 		blocks = append(blocks, ContentBlock{Type: "text", Text: textBuilder.String()})
+		events = append(events, NormalizedEvent{Type: "text_end", ContentIdx: 0, Content: textBuilder.String()})
 	}
 	for index := 0; index < len(toolCalls); index++ {
 		call, ok := toolCalls[index]
@@ -316,6 +409,15 @@ func mistralStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent,
 			Name:      call.Function.Name,
 			Arguments: arguments,
 		})
+		events = append(events, NormalizedEvent{
+			Type:       "toolcall_end",
+			ContentIdx: len(blocks) - 1,
+			ToolCall: &NormalizedTool{
+				Name:      call.Function.Name,
+				Arguments: arguments,
+				HasID:     call.ID != "",
+			},
+		})
 	}
 
 	if len(toolCalls) > 0 && mapMistralStopReason(stopReason) == "stop" {
@@ -327,7 +429,7 @@ func mistralStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent,
 		Text:       ContentText(blocks),
 		Content:    NormalizedContent(blocks),
 	}
-	return result, AssistantEvents(blocks, result.StopReason), nil
+	return result, appendTerminalEvent(events, result.StopReason), nil
 }
 
 func normalizeMistralURL(baseURL string) string {

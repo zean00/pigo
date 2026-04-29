@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+
+	"github.com/badlogic/pigo/pkg/ai"
 )
 
 type RPCServer struct {
@@ -29,9 +31,11 @@ type rpcCommand struct {
 	CustomInstructions string `json:"customInstructions,omitempty"`
 	Path               string `json:"path,omitempty"`
 	// "name" is used by set_session_name.
-	SessionPath string `json:"sessionPath,omitempty"`
-	EntryID     string `json:"entryId,omitempty"`
-	OutputPath  string `json:"outputPath,omitempty"`
+	SessionPath      string               `json:"sessionPath,omitempty"`
+	EntryID          string               `json:"entryId,omitempty"`
+	OutputPath       string               `json:"outputPath,omitempty"`
+	OAuthCredentials *ai.OAuthCredentials `json:"oauthCredentials,omitempty"`
+	OAuthStorePath   string               `json:"oauthStorePath,omitempty"`
 }
 
 type rpcResponse struct {
@@ -166,6 +170,42 @@ func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse 
 			Success: true,
 			Data:    map[string]any{"models": s.Session.GetAvailableModels()},
 		}
+
+	case "set_oauth_credentials":
+		if command.OAuthCredentials == nil {
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: "missing oauthCredentials"}
+		}
+		if err := s.Session.SetOAuthCredentials(command.Provider, *command.OAuthCredentials); err != nil {
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+		}
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true}
+
+	case "get_provider_auth_status":
+		return rpcResponse{
+			ID:      command.ID,
+			Type:    "response",
+			Command: command.Type,
+			Success: true,
+			Data:    map[string]any{"providers": s.Session.GetProviderAuthStatus()},
+		}
+
+	case "get_oauth_providers":
+		return rpcResponse{
+			ID:      command.ID,
+			Type:    "response",
+			Command: command.Type,
+			Success: true,
+			Data:    map[string]any{"providers": ai.GetOAuthProviderInfoList()},
+		}
+
+	case "load_oauth_store":
+		if command.OAuthStorePath == "" {
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: "missing oauthStorePath"}
+		}
+		if err := s.Session.LoadOAuthStore(command.OAuthStorePath); err != nil {
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+		}
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true}
 
 	case "set_thinking_level":
 		if err := s.Session.SetThinkingLevel(command.Level); err != nil {

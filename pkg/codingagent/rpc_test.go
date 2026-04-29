@@ -166,6 +166,88 @@ func TestRPCModelAndModes(t *testing.T) {
 	}
 }
 
+func TestRPCOAuthCredentialsAndAuthStatus(t *testing.T) {
+	session := NewSession(t.TempDir(), nil)
+	var out bytes.Buffer
+	server := RPCServer{Session: session}
+	input := strings.NewReader(
+		`{"id":"a1","type":"set_oauth_credentials","provider":"anthropic","oauthCredentials":{"refresh":"r1","access":"a1","expires":123}}` + "\n" +
+			`{"id":"a2","type":"get_provider_auth_status"}` + "\n",
+	)
+
+	if err := server.Serve(context.Background(), input, &out); err != nil {
+		t.Fatal(err)
+	}
+	responses := decodeRPCResponses(t, out.String())
+	if responses[0]["success"] != true {
+		t.Fatalf("set_oauth_credentials failed = %#v", responses[0])
+	}
+	if got := session.OAuthCredentials["anthropic"].Access; got != "a1" {
+		t.Fatalf("stored oauth access = %q", got)
+	}
+	providers := responses[1]["data"].(map[string]any)["providers"].([]any)
+	found := false
+	for _, item := range providers {
+		provider := item.(map[string]any)
+		if provider["provider"] == "anthropic" {
+			found = true
+			if provider["hasStoredOAuth"] != true {
+				t.Fatalf("anthropic auth status = %#v", provider)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("missing anthropic auth status")
+	}
+}
+
+func TestRPCOAuthProviderCatalogAndStoreLoad(t *testing.T) {
+	root := t.TempDir()
+	authFile := filepath.Join(root, "auth.json")
+	if err := ai.UpsertOAuthStoreCredentials(authFile, "anthropic", ai.OAuthCredentials{
+		Access:  "stored-access",
+		Refresh: "stored-refresh",
+		Expires: 123,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	session := NewSession(root, nil)
+	var out bytes.Buffer
+	server := RPCServer{Session: session}
+	input := strings.NewReader(
+		`{"id":"o1","type":"get_oauth_providers"}` + "\n" +
+			`{"id":"o2","type":"load_oauth_store","oauthStorePath":"` + authFile + `"}` + "\n" +
+			`{"id":"o3","type":"get_provider_auth_status"}` + "\n",
+	)
+
+	if err := server.Serve(context.Background(), input, &out); err != nil {
+		t.Fatal(err)
+	}
+	responses := decodeRPCResponses(t, out.String())
+	providers := responses[0]["data"].(map[string]any)["providers"].([]any)
+	if len(providers) == 0 {
+		t.Fatal("expected oauth providers")
+	}
+	if got := session.OAuthCredentials["anthropic"].Access; got != "stored-access" {
+		t.Fatalf("stored oauth access = %q", got)
+	}
+	statuses := responses[2]["data"].(map[string]any)["providers"].([]any)
+	found := false
+	for _, item := range statuses {
+		status := item.(map[string]any)
+		if status["provider"] == "anthropic" {
+			found = true
+			if status["hasStoredOAuth"] != true {
+				t.Fatalf("anthropic auth status = %#v", status)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("missing anthropic provider status")
+	}
+}
+
 func TestRPCThinkingAndCommands(t *testing.T) {
 	session := NewSession(t.TempDir(), []AssistantTurn{{
 		StopReason: "stop",

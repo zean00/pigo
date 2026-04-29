@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 const (
@@ -17,6 +18,7 @@ const (
 	defaultAntigravityBaseURL    = "https://daily-cloudcode-pa.sandbox.googleapis.com"
 	defaultAntigravityVersion    = "1.21.9"
 	antigravitySystemInstruction = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding. You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question. **Absolute paths only** **Proactiveness**"
+	googleCLIDefaultMaxRetries   = 3
 )
 
 var geminiCLIHeaders = map[string]string{
@@ -94,7 +96,14 @@ func (provider *googleGeminiCLIProvider) Complete(ctx context.Context, req Compl
 	}
 	requestURL := strings.TrimRight(baseURL, "/") + "/v1internal:streamGenerateContent?alt=sse"
 	payload := buildGoogleCLIRequest(req, credentials.ProjectID, canonicalProviderName(req.Provider) == "google-antigravity")
+	payloadValue, err := applyPayloadHook(req, payload)
+	if err != nil {
+		return NormalizedResult{}, nil, err
+	}
 	data, err := json.Marshal(payload)
+	if payloadValue != nil {
+		data, err = json.Marshal(payloadValue)
+	}
 	if err != nil {
 		return NormalizedResult{}, nil, fmt.Errorf("marshal google-gemini-cli payload: %w", err)
 	}
@@ -109,47 +118,90 @@ func (provider *googleGeminiCLIProvider) Complete(ctx context.Context, req Compl
 		httpClient = &cloned
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(data))
-	if err != nil {
-		return NormalizedResult{}, nil, fmt.Errorf("create google-gemini-cli request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "text/event-stream")
-	httpReq.Header.Set("Authorization", "Bearer "+credentials.Token)
-	for key, value := range defaultGoogleCLIProviderHeaders(canonicalProviderName(req.Provider)) {
-		httpReq.Header.Set(key, value)
-	}
-	if hasProviderSpec {
-		for key, value := range providerSpec.DefaultHeader {
+	buildRequest := func() (*http.Request, error) {
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(data))
+		if err != nil {
+			return nil, fmt.Errorf("create google-gemini-cli request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Accept", "text/event-stream")
+		httpReq.Header.Set("Authorization", "Bearer "+credentials.Token)
+		for key, value := range defaultGoogleCLIProviderHeaders(canonicalProviderName(req.Provider)) {
 			httpReq.Header.Set(key, value)
 		}
-	}
-	for key, value := range req.Options.Headers {
-		httpReq.Header.Set(key, value)
-	}
-
-	resp, err := httpClient.Do(httpReq)
-	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: err.Error()}, nil, err
+		if hasProviderSpec {
+			for key, value := range providerSpec.DefaultHeader {
+				httpReq.Header.Set(key, value)
+			}
 		}
-		return NormalizedResult{}, nil, fmt.Errorf("call google-gemini-cli API: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		if len(body) == 0 {
-			return NormalizedResult{}, nil, fmt.Errorf("google-gemini-cli API error: %s", resp.Status)
+		for key, value := range req.Options.Headers {
+			httpReq.Header.Set(key, value)
 		}
-		return NormalizedResult{}, nil, fmt.Errorf("google-gemini-cli API error: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		return httpReq, nil
 	}
 
-	result, err := googleCLISSEToResult(resp.Body)
-	if err != nil {
+	maxRetries := retryLimit(req.Options, googleCLIDefaultMaxRetries)
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		httpReq, err := buildRequest()
+		if err != nil {
+			return NormalizedResult{}, nil, err
+		}
+		resp, err := httpClient.Do(httpReq)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: err.Error()}, nil, err
+			}
+			if attempt < maxRetries && shouldRetryGoogleCLI(0, err.Error()) {
+				if sleepErr := sleepWithContext(ctx, retryDelayForAttempt(attempt, 0, defaultProviderBaseDelay)); sleepErr != nil {
+					return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: sleepErr.Error()}, nil, sleepErr
+				}
+				continue
+			}
+			return NormalizedResult{}, nil, fmt.Errorf("call google-gemini-cli API: %w", err)
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			if hookErr := notifyResponseHook(req, resp); hookErr != nil {
+				_ = resp.Body.Close()
+				return NormalizedResult{}, nil, hookErr
+			}
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			errorText := strings.TrimSpace(string(body))
+			if attempt < maxRetries && shouldRetryGoogleCLI(resp.StatusCode, errorText) {
+				serverDelay := retryAfterDelay(resp, errorText)
+				if err := validateRetryDelay(req.Options, serverDelay); err != nil {
+					return NormalizedResult{}, nil, err
+				}
+				if sleepErr := sleepWithContext(ctx, retryDelayForAttempt(attempt, serverDelay, defaultProviderBaseDelay)); sleepErr != nil {
+					return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: sleepErr.Error()}, nil, sleepErr
+				}
+				continue
+			}
+			if errorText == "" {
+				return NormalizedResult{}, nil, fmt.Errorf("google-gemini-cli API error: %s", resp.Status)
+			}
+			return NormalizedResult{}, nil, fmt.Errorf("google-gemini-cli API error: %s: %s", resp.Status, errorText)
+		}
+		if hookErr := notifyResponseHook(req, resp); hookErr != nil {
+			_ = resp.Body.Close()
+			return NormalizedResult{}, nil, hookErr
+		}
+
+		result, events, err := googleCLISSEToResult(resp.Body)
+		_ = resp.Body.Close()
+		if err == nil {
+			return result, events, nil
+		}
+		if attempt < maxRetries && isRetriableStreamError(err) {
+			if sleepErr := sleepWithContext(ctx, retryDelayForAttempt(attempt, 0, defaultProviderBaseDelay)); sleepErr != nil {
+				return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: sleepErr.Error()}, nil, sleepErr
+			}
+			continue
+		}
 		return NormalizedResult{}, nil, err
 	}
-	return result, AssistantEvents(result.contentBlocks(), result.StopReason), nil
+	return NormalizedResult{}, nil, errors.New("google-gemini-cli retry budget exhausted")
 }
 
 func parseGoogleCLICredentials(apiKey string) (googleCLICredentials, error) {
@@ -266,21 +318,29 @@ func buildGoogleCLIRequest(req CompletionRequest, projectID string, isAntigravit
 		Project:   projectID,
 		Model:     req.Model,
 		Request:   request,
-		UserAgent: "pi-coding-agent",
 		RequestID: "pi-request",
+		UserAgent: "pi-coding-agent",
+	}
+	if sessionID := strings.TrimSpace(req.Options.SessionID); sessionID != "" {
+		result.Request.SessionID = sessionID
+		result.RequestID = sessionID
 	}
 	if isAntigravity {
 		result.RequestType = "agent"
 		result.UserAgent = "antigravity"
-		result.RequestID = "agent-request"
+		if strings.TrimSpace(req.Options.SessionID) == "" {
+			result.RequestID = "agent-request"
+		}
 	}
 	return result
 }
 
-func googleCLISSEToResult(body io.Reader) (NormalizedResult, error) {
+func googleCLISSEToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, error) {
 	scanner := bufio.NewScanner(body)
 	var final googleResponse
 	seen := false
+	events := []NormalizedEvent{{Type: "start"}}
+	contentIndex := 0
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -293,21 +353,58 @@ func googleCLISSEToResult(body io.Reader) (NormalizedResult, error) {
 		}
 		var chunk cloudCodeAssistChunk
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-			return NormalizedResult{}, fmt.Errorf("parse google-gemini-cli stream chunk: %w", err)
+			return NormalizedResult{}, nil, fmt.Errorf("parse google-gemini-cli stream chunk: %w", err)
 		}
 		if chunk.Response == nil {
 			continue
+		}
+		if len(chunk.Response.Candidates) > 0 && chunk.Response.Candidates[0].Content != nil {
+			for _, part := range chunk.Response.Candidates[0].Content.Parts {
+				switch {
+				case part.FunctionCall != nil:
+					arguments := part.FunctionCall.Args
+					if arguments == nil {
+						arguments = map[string]any{}
+					}
+					events = append(events,
+						NormalizedEvent{Type: "toolcall_start", ContentIdx: contentIndex},
+						NormalizedEvent{Type: "toolcall_delta", ContentIdx: contentIndex, Delta: mustJSON(arguments)},
+						NormalizedEvent{
+							Type:       "toolcall_end",
+							ContentIdx: contentIndex,
+							ToolCall: &NormalizedTool{
+								Name:      part.FunctionCall.Name,
+								Arguments: arguments,
+								HasID:     strings.TrimSpace(part.FunctionCall.ID) != "",
+							},
+						},
+					)
+					contentIndex++
+				case strings.TrimSpace(part.Text) != "":
+					eventType := "text"
+					if part.Thought {
+						eventType = "thinking"
+					}
+					events = append(events,
+						NormalizedEvent{Type: eventType + "_start", ContentIdx: contentIndex},
+						NormalizedEvent{Type: eventType + "_delta", ContentIdx: contentIndex, Delta: part.Text},
+						NormalizedEvent{Type: eventType + "_end", ContentIdx: contentIndex, Content: part.Text},
+					)
+					contentIndex++
+				}
+			}
 		}
 		final = mergeGoogleStreamResponse(final, *chunk.Response)
 		seen = true
 	}
 	if err := scanner.Err(); err != nil {
-		return NormalizedResult{}, fmt.Errorf("scan google-gemini-cli stream: %w", err)
+		return NormalizedResult{}, nil, fmt.Errorf("scan google-gemini-cli stream: %w", err)
 	}
 	if !seen {
-		return NormalizedResult{}, errors.New("google-gemini-cli returned an empty response")
+		return NormalizedResult{}, nil, errors.New("google-gemini-cli returned an empty response")
 	}
-	return googleResponseToNormalized(final), nil
+	result := googleResponseToNormalized(final)
+	return result, appendTerminalEvent(events, result.StopReason), nil
 }
 
 func mergeGoogleStreamResponse(base, next googleResponse) googleResponse {
@@ -341,4 +438,56 @@ func mergeGoogleStreamResponse(base, next googleResponse) googleResponse {
 		baseCandidate.Content.Parts = append(baseCandidate.Content.Parts, candidate.Content.Parts...)
 	}
 	return base
+}
+
+func shouldRetryGoogleCLI(status int, errorText string) bool {
+	if status == http.StatusTooManyRequests ||
+		status == http.StatusInternalServerError ||
+		status == http.StatusBadGateway ||
+		status == http.StatusServiceUnavailable ||
+		status == http.StatusGatewayTimeout {
+		return true
+	}
+	text := strings.ToLower(errorText)
+	return strings.Contains(text, "resource exhausted") ||
+		strings.Contains(text, "rate limit") ||
+		strings.Contains(text, "overloaded") ||
+		strings.Contains(text, "service unavailable") ||
+		strings.Contains(text, "other side closed")
+}
+
+func retryDelayFromText(errorText string) time.Duration {
+	lower := strings.ToLower(errorText)
+	if idx := strings.Index(lower, "please retry in "); idx >= 0 {
+		part := lower[idx+len("please retry in "):]
+		fields := strings.Fields(part)
+		if len(fields) > 0 {
+			value := fields[0]
+			if strings.HasSuffix(value, "ms") {
+				if duration, err := time.ParseDuration(value); err == nil {
+					return duration + time.Second
+				}
+			}
+			if strings.HasSuffix(value, "s") {
+				if duration, err := time.ParseDuration(value); err == nil {
+					return duration + time.Second
+				}
+			}
+		}
+	}
+	return 0
+}
+
+func sleepWithContext(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }

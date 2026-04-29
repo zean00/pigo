@@ -62,7 +62,14 @@ func (provider *googleVertexProvider) Complete(ctx context.Context, req Completi
 	}
 
 	payload := toGoogleRequest(req)
+	payloadValue, err := applyPayloadHook(req, payload)
+	if err != nil {
+		return NormalizedResult{}, nil, err
+	}
 	data, err := json.Marshal(payload)
+	if payloadValue != nil {
+		data, err = json.Marshal(payloadValue)
+	}
 	if err != nil {
 		return NormalizedResult{}, nil, fmt.Errorf("marshal google-vertex payload: %w", err)
 	}
@@ -77,51 +84,97 @@ func (provider *googleVertexProvider) Complete(ctx context.Context, req Completi
 		httpClient = &cloned
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(data))
-	if err != nil {
-		return NormalizedResult{}, nil, fmt.Errorf("create google-vertex request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if hasProviderSpec {
-		for key, value := range providerSpec.DefaultHeader {
+	buildRequest := func() (*http.Request, error) {
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(data))
+		if err != nil {
+			return nil, fmt.Errorf("create google-vertex request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		if hasProviderSpec {
+			for key, value := range providerSpec.DefaultHeader {
+				httpReq.Header.Set(key, value)
+			}
+		}
+		for key, value := range req.Options.Headers {
 			httpReq.Header.Set(key, value)
 		}
-	}
-	for key, value := range req.Options.Headers {
-		httpReq.Header.Set(key, value)
+		return httpReq, nil
 	}
 
-	resp, err := httpClient.Do(httpReq)
-	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: err.Error()}, nil, err
-		}
-		return NormalizedResult{}, nil, fmt.Errorf("call google-vertex API: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		if len(body) == 0 {
-			return NormalizedResult{}, nil, fmt.Errorf("google-vertex API error: %s", resp.Status)
-		}
-		return NormalizedResult{}, nil, fmt.Errorf("google-vertex API error: %s: %s", resp.Status, strings.TrimSpace(string(body)))
-	}
-
-	if req.Options.Stream {
-		result, err := googleSSEToResult(resp.Body)
+	maxRetries := retryLimit(req.Options, defaultProviderMaxRetries)
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		httpReq, err := buildRequest()
 		if err != nil {
 			return NormalizedResult{}, nil, err
 		}
+		resp, err := httpClient.Do(httpReq)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: err.Error()}, nil, err
+			}
+			if attempt < maxRetries && shouldRetryHTTPError(err) {
+				if sleepErr := sleepWithContext(ctx, retryDelayForAttempt(attempt, 0, defaultProviderBaseDelay)); sleepErr != nil {
+					return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: sleepErr.Error()}, nil, sleepErr
+				}
+				continue
+			}
+			return NormalizedResult{}, nil, fmt.Errorf("call google-vertex API: %w", err)
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			if hookErr := notifyResponseHook(req, resp); hookErr != nil {
+				_ = resp.Body.Close()
+				return NormalizedResult{}, nil, hookErr
+			}
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			errorText := strings.TrimSpace(string(body))
+			if attempt < maxRetries && shouldRetryHTTPStatus(resp.StatusCode, errorText) {
+				serverDelay := retryAfterDelay(resp, errorText)
+				if err := validateRetryDelay(req.Options, serverDelay); err != nil {
+					return NormalizedResult{}, nil, err
+				}
+				if sleepErr := sleepWithContext(ctx, retryDelayForAttempt(attempt, serverDelay, defaultProviderBaseDelay)); sleepErr != nil {
+					return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: sleepErr.Error()}, nil, sleepErr
+				}
+				continue
+			}
+			if errorText == "" {
+				return NormalizedResult{}, nil, fmt.Errorf("google-vertex API error: %s", resp.Status)
+			}
+			return NormalizedResult{}, nil, fmt.Errorf("google-vertex API error: %s: %s", resp.Status, errorText)
+		}
+		if hookErr := notifyResponseHook(req, resp); hookErr != nil {
+			_ = resp.Body.Close()
+			return NormalizedResult{}, nil, hookErr
+		}
+
+		if req.Options.Stream {
+			result, events, err := googleSSEToResult(resp.Body)
+			_ = resp.Body.Close()
+			if err == nil {
+				return result, events, nil
+			}
+			if attempt < maxRetries && isRetriableStreamError(err) {
+				if sleepErr := sleepWithContext(ctx, retryDelayForAttempt(attempt, 0, defaultProviderBaseDelay)); sleepErr != nil {
+					return NormalizedResult{Role: "assistant", StopReason: "aborted", ErrorMessage: sleepErr.Error()}, nil, sleepErr
+				}
+				continue
+			}
+			return NormalizedResult{}, nil, err
+		}
+
+		var completion googleResponse
+		decodeErr := json.NewDecoder(resp.Body).Decode(&completion)
+		_ = resp.Body.Close()
+		if decodeErr != nil {
+			return NormalizedResult{}, nil, fmt.Errorf("parse google-vertex response: %w", decodeErr)
+		}
+		result := googleResponseToNormalized(completion)
 		return result, AssistantEvents(result.contentBlocks(), result.StopReason), nil
 	}
 
-	var completion googleResponse
-	if err := json.NewDecoder(resp.Body).Decode(&completion); err != nil {
-		return NormalizedResult{}, nil, fmt.Errorf("parse google-vertex response: %w", err)
-	}
-	result := googleResponseToNormalized(completion)
-	return result, AssistantEvents(result.contentBlocks(), result.StopReason), nil
+	return NormalizedResult{}, nil, errors.New("google-vertex retry budget exhausted")
 }
 
 func buildGoogleVertexURL(baseURL, project, location, model, apiKey string, stream bool) (string, error) {

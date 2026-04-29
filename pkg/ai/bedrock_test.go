@@ -10,6 +10,7 @@ import (
 	bedrockruntime "github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	bedrockdocument "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/document"
 	bedrocktypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
+	"github.com/aws/smithy-go/middleware"
 )
 
 type fakeBedrockClient struct {
@@ -128,8 +129,9 @@ func TestBedrockProviderReturnsTextAndToolCalls(t *testing.T) {
 			},
 		}},
 		Options: ChatOptions{
-			APIKey:     "bedrock-token",
-			ToolChoice: "any",
+			APIKey:         "bedrock-token",
+			ToolChoice:     "any",
+			CacheRetention: CacheRetentionNone,
 		},
 		Messages: []Message{
 			{
@@ -264,7 +266,10 @@ func TestBedrockProviderMapsThinkingBlocksAndCanceledErrors(t *testing.T) {
 	_, _, err = canceledProvider.Complete(context.Background(), CompletionRequest{
 		Provider: "amazon-bedrock",
 		Model:    "us.anthropic.claude-opus-4-6-v1",
-		Options:  ChatOptions{APIKey: "bedrock-token"},
+		Options: ChatOptions{
+			APIKey:         "bedrock-token",
+			CacheRetention: CacheRetentionNone,
+		},
 		Messages: []Message{{Role: "user", Content: "ping"}},
 	})
 	if !errors.Is(err, context.Canceled) {
@@ -307,5 +312,154 @@ func TestBedrockProviderStreamingResponse(t *testing.T) {
 	}
 	if result.StopReason != "stop" {
 		t.Fatalf("stopReason = %q", result.StopReason)
+	}
+}
+
+func TestBedrockProviderAddsCachePointsAndHooks(t *testing.T) {
+	payloadHookCalled := false
+	responseHookCalled := false
+
+	provider := &bedrockProvider{
+		newClient: func(context.Context, bedrockClientOptions) (bedrockConverseClient, error) {
+			return fakeBedrockClient{
+				converse: func(_ context.Context, input *bedrockruntime.ConverseInput, _ ...func(*bedrockruntime.Options)) (*bedrockruntime.ConverseOutput, error) {
+					if input == nil {
+						t.Fatal("missing input")
+					}
+					if input.RequestMetadata["user"] != "alice" || input.RequestMetadata["hooked"] != "yes" {
+						t.Fatalf("request metadata = %#v", input.RequestMetadata)
+					}
+					if len(input.System) != 2 {
+						t.Fatalf("system len = %d", len(input.System))
+					}
+					if _, ok := input.System[1].(*bedrocktypes.SystemContentBlockMemberCachePoint); !ok {
+						t.Fatalf("system cache point = %#v", input.System[1])
+					}
+					if len(input.Messages) != 1 || len(input.Messages[0].Content) != 2 {
+						t.Fatalf("messages = %#v", input.Messages)
+					}
+					if _, ok := input.Messages[0].Content[1].(*bedrocktypes.ContentBlockMemberCachePoint); !ok {
+						t.Fatalf("message cache point = %#v", input.Messages[0].Content[1])
+					}
+					if input.ToolConfig == nil || len(input.ToolConfig.Tools) != 2 {
+						t.Fatalf("tool config = %#v", input.ToolConfig)
+					}
+					if _, ok := input.ToolConfig.Tools[1].(*bedrocktypes.ToolMemberCachePoint); !ok {
+						t.Fatalf("tool cache point = %#v", input.ToolConfig.Tools[1])
+					}
+
+					return &bedrockruntime.ConverseOutput{
+						Output: &bedrocktypes.ConverseOutputMemberMessage{
+							Value: bedrocktypes.Message{
+								Role: bedrocktypes.ConversationRoleAssistant,
+								Content: []bedrocktypes.ContentBlock{
+									&bedrocktypes.ContentBlockMemberText{Value: "ok"},
+								},
+							},
+						},
+						StopReason:     bedrocktypes.StopReasonEndTurn,
+						Usage:          &bedrocktypes.TokenUsage{InputTokens: aws.Int32(1), OutputTokens: aws.Int32(1), TotalTokens: aws.Int32(2)},
+						ResultMetadata: middleware.Metadata{},
+					}, nil
+				},
+			}, nil
+		},
+	}
+
+	result, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "amazon-bedrock",
+		Model:    "us.anthropic.claude-opus-4-6-v1",
+		Tools:    []Tool{{Name: "math", Parameters: map[string]any{"type": "object"}}},
+		Options: ChatOptions{
+			APIKey:         "bedrock-token",
+			CacheRetention: CacheRetentionLong,
+			Metadata:       map[string]any{"user": "alice"},
+			OnPayload: func(payload any, req CompletionRequest) (any, error) {
+				payloadHookCalled = true
+				input, ok := payload.(*bedrockruntime.ConverseInput)
+				if !ok {
+					t.Fatalf("payload type = %T", payload)
+				}
+				if input.RequestMetadata == nil {
+					input.RequestMetadata = map[string]string{}
+				}
+				input.RequestMetadata["hooked"] = "yes"
+				return input, nil
+			},
+			OnResponse: func(response ProviderResponse, req CompletionRequest) error {
+				responseHookCalled = true
+				if response.Status != 200 {
+					t.Fatalf("status = %d", response.Status)
+				}
+				return nil
+			},
+		},
+		Messages: []Message{
+			{Role: "system", Content: "system prompt"},
+			{Role: "user", Content: "hi"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !payloadHookCalled || !responseHookCalled {
+		t.Fatalf("payloadHookCalled=%v responseHookCalled=%v", payloadHookCalled, responseHookCalled)
+	}
+	if result.Text != "ok" {
+		t.Fatalf("text = %q", result.Text)
+	}
+}
+
+func TestBedrockProviderRetriesThrottlingErrors(t *testing.T) {
+	attempts := 0
+	provider := &bedrockProvider{
+		newClient: func(context.Context, bedrockClientOptions) (bedrockConverseClient, error) {
+			return fakeBedrockClient{
+				converse: func(_ context.Context, input *bedrockruntime.ConverseInput, _ ...func(*bedrockruntime.Options)) (*bedrockruntime.ConverseOutput, error) {
+					attempts++
+					if input == nil {
+						t.Fatal("missing input")
+					}
+					if attempts == 1 {
+						return nil, &bedrocktypes.ThrottlingException{Message: aws.String("Please retry in 1ms")}
+					}
+					return &bedrockruntime.ConverseOutput{
+						Output: &bedrocktypes.ConverseOutputMemberMessage{
+							Value: bedrocktypes.Message{
+								Role: bedrocktypes.ConversationRoleAssistant,
+								Content: []bedrocktypes.ContentBlock{
+									&bedrocktypes.ContentBlockMemberText{Value: "ok"},
+								},
+							},
+						},
+						StopReason: bedrocktypes.StopReasonEndTurn,
+						Usage: &bedrocktypes.TokenUsage{
+							InputTokens:  aws.Int32(1),
+							OutputTokens: aws.Int32(1),
+							TotalTokens:  aws.Int32(2),
+						},
+					}, nil
+				},
+			}, nil
+		},
+	}
+
+	result, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "amazon-bedrock",
+		Model:    "us.anthropic.claude-opus-4-6-v1",
+		Options: ChatOptions{
+			APIKey:     "bedrock-token",
+			MaxRetries: 1,
+		},
+		Messages: []Message{{Role: "user", Content: "ping"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d", attempts)
+	}
+	if result.Text != "ok" {
+		t.Fatalf("text = %q", result.Text)
 	}
 }

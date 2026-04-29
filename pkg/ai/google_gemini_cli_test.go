@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestGoogleGeminiCLIProviderParsesSSEToolCalls(t *testing.T) {
@@ -40,6 +42,13 @@ func TestGoogleGeminiCLIProviderParsesSSEToolCalls(t *testing.T) {
 		if payload["project"] != "test-project" {
 			t.Fatalf("project = %#v", payload["project"])
 		}
+		if payload["requestId"] != "session-123" {
+			t.Fatalf("requestId = %#v", payload["requestId"])
+		}
+		request, _ := payload["request"].(map[string]any)
+		if request["sessionId"] != "session-123" {
+			t.Fatalf("request.sessionId = %#v", request["sessionId"])
+		}
 
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = fmt.Fprint(w, "data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Working on it.\"},{\"functionCall\":{\"id\":\"call-1\",\"name\":\"math\",\"args\":{\"a\":15,\"b\":27}}}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":6,\"thoughtsTokenCount\":2,\"cachedContentTokenCount\":3,\"totalTokenCount\":18}}}\n\n")
@@ -51,8 +60,9 @@ func TestGoogleGeminiCLIProviderParsesSSEToolCalls(t *testing.T) {
 		Provider: "google-gemini-cli",
 		Model:    "gemini-test",
 		Options: ChatOptions{
-			APIKey:  `{"token":"test-token","projectId":"test-project"}`,
-			BaseURL: server.URL,
+			APIKey:    `{"token":"test-token","projectId":"test-project"}`,
+			BaseURL:   server.URL,
+			SessionID: "session-123",
 		},
 		Tools: []Tool{{
 			Name:        "math",
@@ -188,5 +198,67 @@ func TestGoogleGeminiCLIProviderSupportsStreamFlag(t *testing.T) {
 	}
 	if result.Text != "hello" {
 		t.Fatalf("text = %q", result.Text)
+	}
+}
+
+func TestGoogleGeminiCLIProviderRetriesRateLimits(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		attempt := atomic.AddInt32(&calls, 1)
+		if attempt == 1 {
+			w.Header().Set("Retry-After", "0")
+			http.Error(w, `{"error":{"message":"Please retry in 1ms"}}`, http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1,\"totalTokenCount\":2}}}\n\n")
+	}))
+	defer server.Close()
+
+	provider := GoogleGeminiCLIProvider()
+	result, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "google-gemini-cli",
+		Model:    "gemini-test",
+		Options: ChatOptions{
+			APIKey:  `{"token":"test-token","projectId":"test-project"}`,
+			BaseURL: server.URL,
+		},
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if atomic.LoadInt32(&calls) != 2 {
+		t.Fatalf("calls = %d", calls)
+	}
+	if result.Text != "ok" {
+		t.Fatalf("text = %q", result.Text)
+	}
+}
+
+func TestGoogleGeminiCLIProviderRejectsExcessiveRetryDelay(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Retry-After", "120")
+		http.Error(w, `{"error":{"message":"rate limit"}}`, http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	provider := GoogleGeminiCLIProvider()
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "google-gemini-cli",
+		Model:    "gemini-test",
+		Options: ChatOptions{
+			APIKey:        `{"token":"test-token","projectId":"test-project"}`,
+			BaseURL:       server.URL,
+			MaxRetries:    1,
+			MaxRetryDelay: time.Second,
+		},
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err == nil {
+		t.Fatal("expected retry delay cap error")
+	}
+	if !strings.Contains(err.Error(), "exceeds configured maximum") {
+		t.Fatalf("error = %v", err)
 	}
 }

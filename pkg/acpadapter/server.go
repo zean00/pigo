@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -304,6 +305,12 @@ func (s *Server) newSession(ctx context.Context, params newSessionParams) (strin
 		}
 		return "", err
 	}
+	if err := applyInitialSessionSelection(session, params); err != nil {
+		if registry != nil {
+			_ = registry.Close()
+		}
+		return "", err
+	}
 	now := time.Now().UTC()
 	s.mu.Lock()
 	s.sessions[id] = &acpSession{
@@ -317,6 +324,26 @@ func (s *Server) newSession(ctx context.Context, params newSessionParams) (strin
 	}
 	s.mu.Unlock()
 	return id, nil
+}
+
+func applyInitialSessionSelection(session *codingagent.Session, params newSessionParams) error {
+	for _, value := range []string{params.ModelID, params.Mode} {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if model, err := findACPModel(session, value); err == nil {
+			_, err = session.SetModel(model.Provider, model.ModelID)
+			return err
+		}
+		if err := session.SetSteeringMode(value); err == nil {
+			if followErr := session.SetFollowUpMode(value); followErr != nil {
+				return followErr
+			}
+			return nil
+		}
+	}
+	return nil
 }
 
 func (s *Server) buildSession(ctx context.Context, root string, mcpServers []mcpadapter.ACPServer, sessionFile string) (*codingagent.Session, *mcpadapter.Registry, error) {
@@ -452,7 +479,8 @@ func (s *Server) loadSession(ctx context.Context, params lifecycleSessionParams)
 		return nil, invalidParams(fmt.Errorf("missing sessionId"))
 	}
 	root := absolutePath(defaultString(strings.TrimSpace(params.Cwd), "."))
-	session, registry, err := s.buildSession(ctx, root, params.MCPServers, sessionID)
+	sessionFile := s.resolveSessionFile(root, sessionID)
+	session, registry, err := s.buildSession(ctx, root, params.MCPServers, sessionFile)
 	if err != nil {
 		return nil, internalError(err)
 	}
@@ -469,6 +497,22 @@ func (s *Server) loadSession(ctx context.Context, params lifecycleSessionParams)
 		return nil, internalError(err)
 	}
 	return s.sessionStateResult(session), nil
+}
+
+func (s *Server) resolveSessionFile(root, sessionID string) string {
+	if active, ok := s.getSession(sessionID); ok && active.Session != nil && active.Session.Store != nil && active.Session.Store.Path != "" {
+		return active.Session.Store.Path
+	}
+	if filepath.IsAbs(sessionID) {
+		return sessionID
+	}
+	if _, err := os.Stat(sessionID); err == nil {
+		return sessionID
+	}
+	if path, err := newSessionPath(root, sessionID); err == nil {
+		return path
+	}
+	return sessionID
 }
 
 func (s *Server) resumeSession(ctx context.Context, params lifecycleSessionParams) (any, *jsonrpcError) {
@@ -1064,10 +1108,11 @@ func (s *Server) getSession(id string) (*acpSession, bool) {
 func (s *Server) bridgeEvents(ctx context.Context, sessionID string, session *codingagent.Session, seen int, done <-chan struct{}) error {
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
+	state := bridgeEventState{}
 	for {
 		events := session.RuntimeEvents()
 		for seen < len(events) {
-			for _, update := range acpUpdates(events[seen]) {
+			for _, update := range state.updates(events[seen], seen) {
 				if err := s.notifySessionUpdate(sessionID, update); err != nil {
 					return err
 				}
@@ -1078,7 +1123,7 @@ func (s *Server) bridgeEvents(ctx context.Context, sessionID string, session *co
 		case <-done:
 			events := session.RuntimeEvents()
 			for seen < len(events) {
-				for _, update := range acpUpdates(events[seen]) {
+				for _, update := range state.updates(events[seen], seen) {
 					if err := s.notifySessionUpdate(sessionID, update); err != nil {
 						return err
 					}
@@ -1093,6 +1138,26 @@ func (s *Server) bridgeEvents(ctx context.Context, sessionID string, session *co
 	}
 }
 
+type bridgeEventState struct {
+	activeMessageID string
+}
+
+func (state *bridgeEventState) updates(event agentcore.Event, index int) []map[string]any {
+	switch strings.TrimSpace(fmt.Sprint(event["type"])) {
+	case "message_start":
+		state.activeMessageID = runtimeMessageID(eventMessage(event["message"]), index)
+		return nil
+	case "message_end":
+		state.activeMessageID = ""
+		return nil
+	}
+	updates := acpUpdates(event)
+	for _, update := range updates {
+		ensureUpdateMessageID(update, event, state.activeMessageID, index)
+	}
+	return updates
+}
+
 func (s *Server) notifySessionUpdate(sessionID string, update map[string]any) error {
 	return s.write(map[string]any{
 		"jsonrpc": "2.0",
@@ -1105,14 +1170,81 @@ func (s *Server) replaySessionHistory(sessionID string, session *codingagent.Ses
 	if s.encoder == nil {
 		return nil
 	}
-	for _, message := range session.Messages {
+	for index, message := range session.Messages {
 		for _, update := range acpHistoryUpdates(message) {
+			ensureHistoryUpdateMessageID(update, message, index)
 			if err := s.notifySessionUpdate(sessionID, update); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+func ensureUpdateMessageID(update map[string]any, event agentcore.Event, runtimeID string, index int) {
+	if update == nil || hasNonEmptyValue(update["messageId"]) {
+		return
+	}
+	switch strings.TrimSpace(fmt.Sprint(update["sessionUpdate"])) {
+	case "agent_message_chunk", "agent_thought_chunk", "user_message_chunk":
+	default:
+		return
+	}
+	if runtimeID = strings.TrimSpace(runtimeID); runtimeID != "" {
+		update["messageId"] = runtimeID
+		return
+	}
+	message := eventMessage(event["message"])
+	ensureHistoryUpdateMessageID(update, message, index)
+}
+
+func eventMessage(value any) agentcore.Message {
+	switch typed := value.(type) {
+	case agentcore.Message:
+		return typed
+	case map[string]any:
+		return agentcore.Message(typed)
+	default:
+		return nil
+	}
+}
+
+func ensureHistoryUpdateMessageID(update map[string]any, message agentcore.Message, index int) {
+	if update == nil || hasNonEmptyValue(update["messageId"]) {
+		return
+	}
+	if id := messageID(message, index); id != "" {
+		update["messageId"] = id
+	}
+}
+
+func hasNonEmptyValue(value any) bool {
+	text := strings.TrimSpace(fmt.Sprint(value))
+	return text != "" && text != "<nil>"
+}
+
+func messageID(message agentcore.Message, index int) string {
+	for _, key := range []string{"id", "messageId"} {
+		if id := strings.TrimSpace(fmt.Sprint(message[key])); id != "" && id != "<nil>" {
+			return id
+		}
+	}
+	role := strings.TrimSpace(fmt.Sprint(message["role"]))
+	text := messageText(message)
+	if role == "" && text == "" {
+		return fmt.Sprintf("message-%d", index)
+	}
+	sum := sha1.Sum([]byte(role + "\x00" + text))
+	return "message-" + hex.EncodeToString(sum[:8])
+}
+
+func runtimeMessageID(message agentcore.Message, index int) string {
+	for _, key := range []string{"id", "messageId"} {
+		if id := strings.TrimSpace(fmt.Sprint(message[key])); id != "" && id != "<nil>" {
+			return id
+		}
+	}
+	return fmt.Sprintf("message-%d", index)
 }
 
 func (s *Server) write(value any) error {
@@ -1214,6 +1346,8 @@ type newSessionParams struct {
 	Cwd                   string                 `json:"cwd"`
 	MCPServers            []mcpadapter.ACPServer `json:"mcpServers"`
 	AdditionalDirectories []string               `json:"additionalDirectories"`
+	Mode                  string                 `json:"mode"`
+	ModelID               string                 `json:"modelId"`
 }
 
 type lifecycleSessionParams struct {
@@ -1376,10 +1510,10 @@ func acpUpdates(event agentcore.Event) []map[string]any {
 		if content == "" {
 			return nil
 		}
-		if eventType == "thinking_delta" {
+		if eventType == "thinking_start" || eventType == "thinking_delta" {
 			return []map[string]any{{"sessionUpdate": "agent_thought_chunk", "content": map[string]any{"type": "text", "text": content}}}
 		}
-		if eventType == "text_delta" || eventType == "text" {
+		if eventType == "text_start" || eventType == "text_delta" || eventType == "text" {
 			return []map[string]any{{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": content}}}
 		}
 	case "tool_execution_start":

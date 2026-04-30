@@ -251,6 +251,73 @@ func containsSessionUpdate(lines []string, updateType, text string) bool {
 	return false
 }
 
+func TestACPUpdatesMapNonStreamingTextStartContent(t *testing.T) {
+	updates := acpUpdates(agentcore.Event{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":    "text_start",
+			"content": "final text",
+		},
+	})
+	if len(updates) != 1 || updates[0]["sessionUpdate"] != "agent_message_chunk" {
+		t.Fatalf("updates = %#v", updates)
+	}
+	ensureUpdateMessageID(updates[0], agentcore.Event{
+		"type":    "message_update",
+		"message": agentcore.AssistantMessage([]ai.ContentBlock{{Type: "text", Text: "final text"}}, "stop"),
+	}, "", 3)
+	if updates[0]["messageId"] == "" {
+		t.Fatalf("missing message id: %#v", updates)
+	}
+	content := updates[0]["content"].(map[string]any)
+	if content["text"] != "final text" {
+		t.Fatalf("content = %#v", content)
+	}
+}
+
+func TestBridgeEventStateUsesStableMessageIDForStreamingChunks(t *testing.T) {
+	state := bridgeEventState{}
+	start := agentcore.Event{
+		"type":    "message_start",
+		"message": agentcore.AssistantMessage(nil, "stop"),
+	}
+	if updates := state.updates(start, 7); len(updates) != 0 {
+		t.Fatalf("start updates = %#v", updates)
+	}
+	first := state.updates(agentcore.Event{
+		"type": "message_update",
+		"message": agentcore.AssistantMessage([]ai.ContentBlock{{
+			Type: "text",
+			Text: "h",
+		}}, "stop"),
+		"assistantMessageEvent": map[string]any{"type": "text_delta", "delta": "h"},
+	}, 8)
+	second := state.updates(agentcore.Event{
+		"type": "message_update",
+		"message": agentcore.AssistantMessage([]ai.ContentBlock{{
+			Type: "text",
+			Text: "he",
+		}}, "stop"),
+		"assistantMessageEvent": map[string]any{"type": "text_delta", "delta": "e"},
+	}, 9)
+	if len(first) != 1 || len(second) != 1 {
+		t.Fatalf("updates = %#v %#v", first, second)
+	}
+	if first[0]["messageId"] == "" || first[0]["messageId"] != second[0]["messageId"] {
+		t.Fatalf("message ids changed: %#v %#v", first, second)
+	}
+}
+
+func TestACPUpdatesIgnoreStreamingTextEndContent(t *testing.T) {
+	updates := acpUpdates(agentcore.Event{
+		"type":                  "message_update",
+		"assistantMessageEvent": map[string]any{"type": "text_end", "content": "ok"},
+	})
+	if len(updates) != 0 {
+		t.Fatalf("text_end updates = %#v", updates)
+	}
+}
+
 func TestServeProcessesCancelWhilePromptIsRunning(t *testing.T) {
 	root := t.TempDir()
 	session := codingagent.NewSession(root, []codingagent.AssistantTurn{
@@ -486,6 +553,22 @@ func TestSessionStateAndSetters(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("config options = %#v", options)
+	}
+}
+
+func TestNewSessionAppliesInitialModelSelection(t *testing.T) {
+	root := t.TempDir()
+	server := New(ServerOptions{DiscoverResources: false})
+	result, rpcErr := server.handleRequest(context.Background(), jsonrpcRequest{
+		Method: "session/new",
+		Params: json.RawMessage(`{"cwd":` + quote(root) + `,"mcpServers":[],"mode":"openrouter/moonshotai/kimi-k2.6"}`),
+	})
+	if rpcErr != nil {
+		t.Fatalf("new session error = %#v", rpcErr)
+	}
+	models := result.(map[string]any)["models"].(map[string]any)
+	if models["currentModelId"] != "openrouter/moonshotai/kimi-k2.6" {
+		t.Fatalf("models = %#v", models)
 	}
 }
 

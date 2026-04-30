@@ -2,12 +2,16 @@ package mcpadapter
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/badlogic/pigo/pkg/agentcore"
 	"github.com/badlogic/pigo/pkg/ai"
@@ -16,8 +20,10 @@ import (
 )
 
 type Registry struct {
-	session *codingagent.Session
-	servers []registeredServer
+	session    *codingagent.Session
+	servers    []registeredServer
+	progressMu sync.Mutex
+	progress   map[string]func(agentcore.ToolResult)
 }
 
 type registeredServer struct {
@@ -75,24 +81,8 @@ func buildTools(ctx context.Context, codingSession *codingagent.Session, cfg Con
 			}
 			seen[localName] = true
 			client := clientSession
-			tools = append(tools, agentcore.Tool{
-				Name: localName,
-				Execute: func(ctx context.Context, call ai.ContentBlock) agentcore.ToolResult {
-					result, err := client.CallTool(ctx, &mcp.CallToolParams{Name: remoteName, Arguments: call.Arguments})
-					if err != nil {
-						return agentcore.ToolResult{
-							Text:    fmt.Sprintf("MCP tool %s returned an error:\n%s", remoteName, err.Error()),
-							IsError: true,
-						}
-					}
-					return MapToolResult(result)
-				},
-			})
-			specs = append(specs, ai.Tool{
-				Name:        localName,
-				Description: remoteTool.Description,
-				Parameters:  schemaMap(remoteTool.InputSchema),
-			})
+			tools = append(tools, mcpAgentTool(localName, remoteName, client, registry))
+			specs = append(specs, mcpToolSpec(localName, serverName, remoteTool))
 		}
 	}
 	return registry, tools, specs, nil
@@ -110,6 +100,7 @@ func (r *Registry) connectServer(ctx context.Context, serverName string, cfg Ser
 				go r.Refresh(context.Background())
 			}
 		},
+		ProgressNotificationHandler: r.handleProgress,
 	})
 	transport, err := transportForConfig(cfg)
 	if err != nil {
@@ -150,21 +141,142 @@ func (r *Registry) Refresh(ctx context.Context) error {
 			}
 			seen[localName] = true
 			client := server.Session
-			tools = append(tools, agentcore.Tool{
-				Name: localName,
-				Execute: func(ctx context.Context, call ai.ContentBlock) agentcore.ToolResult {
-					result, err := client.CallTool(ctx, &mcp.CallToolParams{Name: remoteName, Arguments: call.Arguments})
-					if err != nil {
-						return agentcore.ToolResult{Text: fmt.Sprintf("MCP tool %s returned an error:\n%s", remoteName, err.Error()), IsError: true}
-					}
-					return MapToolResult(result)
-				},
-			})
-			specs = append(specs, ai.Tool{Name: localName, Description: remoteTool.Description, Parameters: schemaMap(remoteTool.InputSchema)})
+			tools = append(tools, mcpAgentTool(localName, remoteName, client, r))
+			specs = append(specs, mcpToolSpec(localName, server.Name, remoteTool))
 		}
 	}
 	r.session.SetExtensionTools(tools, specs)
 	return nil
+}
+
+func mcpAgentTool(localName, remoteName string, client *mcp.ClientSession, registry *Registry) agentcore.Tool {
+	return agentcore.Tool{
+		Name: localName,
+		Execute: func(ctx context.Context, call ai.ContentBlock) agentcore.ToolResult {
+			return callMCPTool(ctx, remoteName, client, nil, call, nil)
+		},
+		ExecuteWithUpdate: func(ctx context.Context, call ai.ContentBlock, onUpdate func(agentcore.ToolResult)) agentcore.ToolResult {
+			return callMCPTool(ctx, remoteName, client, registry, call, onUpdate)
+		},
+	}
+}
+
+func callMCPTool(ctx context.Context, remoteName string, client *mcp.ClientSession, registry *Registry, call ai.ContentBlock, onUpdate func(agentcore.ToolResult)) agentcore.ToolResult {
+	if client == nil {
+		return agentcore.ToolResult{
+			Text:    fmt.Sprintf("MCP tool %s returned an error:\nmissing MCP client session", remoteName),
+			IsError: true,
+		}
+	}
+	params := &mcp.CallToolParams{Name: remoteName, Arguments: call.Arguments}
+	if registry != nil && onUpdate != nil {
+		token := newProgressToken()
+		params.SetProgressToken(token)
+		cleanup := registry.registerProgress(token, onUpdate)
+		defer cleanup()
+	}
+	result, err := client.CallTool(ctx, params)
+	if err != nil {
+		return agentcore.ToolResult{
+			Text:    fmt.Sprintf("MCP tool %s returned an error:\n%s", remoteName, err.Error()),
+			IsError: true,
+		}
+	}
+	return MapToolResult(result)
+}
+
+func (r *Registry) registerProgress(token string, onUpdate func(agentcore.ToolResult)) func() {
+	if r == nil || token == "" || onUpdate == nil {
+		return func() {}
+	}
+	r.progressMu.Lock()
+	if r.progress == nil {
+		r.progress = map[string]func(agentcore.ToolResult){}
+	}
+	r.progress[token] = onUpdate
+	r.progressMu.Unlock()
+	return func() {
+		r.progressMu.Lock()
+		delete(r.progress, token)
+		r.progressMu.Unlock()
+	}
+}
+
+func (r *Registry) handleProgress(_ context.Context, req *mcp.ProgressNotificationClientRequest) {
+	if r == nil || req == nil || req.Params == nil {
+		return
+	}
+	token := fmt.Sprint(req.Params.ProgressToken)
+	if token == "" || token == "<nil>" {
+		return
+	}
+	r.progressMu.Lock()
+	onUpdate := r.progress[token]
+	r.progressMu.Unlock()
+	if onUpdate == nil {
+		return
+	}
+	text := req.Params.Message
+	if text == "" {
+		if req.Params.Total > 0 {
+			text = fmt.Sprintf("MCP progress %.0f of %.0f", req.Params.Progress, req.Params.Total)
+		} else {
+			text = fmt.Sprintf("MCP progress %.0f", req.Params.Progress)
+		}
+	}
+	onUpdate(agentcore.ToolResult{
+		Text: text,
+		Content: []ai.ContentBlock{{
+			Type: "text",
+			Text: text,
+		}},
+		Details: map[string]any{
+			"mcpProgress": map[string]any{
+				"progressToken": token,
+				"progress":      req.Params.Progress,
+				"total":         req.Params.Total,
+				"message":       req.Params.Message,
+			},
+		},
+	})
+}
+
+func newProgressToken() string {
+	var bytes [16]byte
+	if _, err := rand.Read(bytes[:]); err == nil {
+		return "mcp-" + hex.EncodeToString(bytes[:])
+	}
+	return fmt.Sprintf("mcp-%d", time.Now().UnixNano())
+}
+
+func mcpToolSpec(localName, serverName string, remoteTool *mcp.Tool) ai.Tool {
+	description := remoteTool.Description
+	title := remoteTool.Title
+	if title == "" && remoteTool.Annotations != nil {
+		title = remoteTool.Annotations.Title
+	}
+	if description == "" {
+		description = fmt.Sprintf("Call MCP tool %s from server %s", remoteTool.Name, serverName)
+	}
+	if title != "" {
+		description = title + "\n\n" + description
+	}
+	if remoteTool.Annotations != nil {
+		if annotationText := prettyJSON(remoteTool.Annotations); annotationText != "{}" {
+			description += "\n\nMCP tool annotations:\n" + annotationText
+		}
+	}
+	if remoteTool.OutputSchema != nil {
+		description += "\n\nMCP output schema:\n" + prettyJSON(remoteTool.OutputSchema)
+	}
+	if len(remoteTool.Icons) > 0 {
+		description += "\n\nMCP icons:\n" + prettyJSON(remoteTool.Icons)
+	}
+	return ai.Tool{
+		Name:        localName,
+		Description: description,
+		Parameters:  schemaMap(remoteTool.InputSchema),
+	}
 }
 
 func listAllTools(ctx context.Context, session *mcp.ClientSession) (*mcp.ListToolsResult, error) {
@@ -280,6 +392,8 @@ func MapToolResult(result *mcp.CallToolResult) agentcore.ToolResult {
 		Content: content,
 		IsError: result.IsError,
 		Details: map[string]any{
+			"content":           content,
+			"mcpMeta":           map[string]any(result.Meta),
 			"structuredContent": result.StructuredContent,
 		},
 	}

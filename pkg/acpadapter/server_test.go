@@ -129,6 +129,26 @@ func TestToolContentMapsGoContentBlocksAndLocations(t *testing.T) {
 	}
 }
 
+func TestToolContentMapsDiffsAndDetailLocations(t *testing.T) {
+	content := toolContent(map[string]any{
+		"text": "edited",
+		"details": map[string]any{
+			"modifiedFiles": []string{"main.go"},
+			"diff":          "--- main.go\n+++ main.go\n@@\n-old\n+new\n",
+		},
+	})
+	if len(content) != 2 {
+		t.Fatalf("content = %#v", content)
+	}
+	if content[0]["type"] != "diff" || content[0]["path"] != "main.go" {
+		t.Fatalf("content = %#v", content)
+	}
+	locations := toolLocations(map[string]any{"details": map[string]any{"readFiles": []any{"readme.md"}, "modifiedFiles": []string{"main.go"}}})
+	if len(locations) != 2 || locations[0]["path"] != "readme.md" || locations[1]["path"] != "main.go" {
+		t.Fatalf("locations = %#v", locations)
+	}
+}
+
 func TestBridgeEventsStartsAtPromptBoundary(t *testing.T) {
 	session := codingagent.NewSession(t.TempDir(), nil)
 	session.Events = append(session.Events, agentcore.Event{

@@ -1394,16 +1394,18 @@ func acpUpdates(event agentcore.Event) []map[string]any {
 			"locations":     toolLocations(event["args"]),
 		}}
 	case "tool_execution_update":
+		partial, _ := event["partialResult"].(map[string]any)
 		return []map[string]any{{
 			"sessionUpdate": "tool_call_update",
 			"toolCallId":    fmt.Sprint(event["toolCallId"]),
 			"status":        "in_progress",
 			"rawOutput":     event["partialResult"],
 			"content":       toolContent(event["partialResult"]),
-			"locations":     toolLocations(event["args"]),
+			"locations":     toolLocations(event["args"], partial),
 		}}
 	case "tool_execution_end":
 		status := "completed"
+		var result map[string]any
 		if result, ok := event["result"].(map[string]any); ok {
 			if isError, _ := result["isError"].(bool); isError {
 				status = "failed"
@@ -1415,7 +1417,7 @@ func acpUpdates(event agentcore.Event) []map[string]any {
 			"status":        status,
 			"rawOutput":     event["result"],
 			"content":       toolContent(event["result"]),
-			"locations":     toolLocations(event["args"]),
+			"locations":     toolLocations(event["args"], result),
 		}}
 	}
 	return nil
@@ -1524,11 +1526,12 @@ func toolContent(value any) []map[string]any {
 	if !ok {
 		return nil
 	}
+	out := toolDiffContent(result)
 	if content, ok := result["content"].([]ai.ContentBlock); ok {
-		return contentBlocksToACP(content)
+		out = append(out, contentBlocksToACP(content)...)
+		return out
 	}
 	if content, ok := result["content"].([]any); ok {
-		out := make([]map[string]any, 0, len(content))
 		for _, item := range content {
 			block := contentBlockToACP(item)
 			if block != nil {
@@ -1538,10 +1541,33 @@ func toolContent(value any) []map[string]any {
 		return out
 	}
 	text := strings.TrimSpace(fmt.Sprint(result["text"]))
-	if text == "" {
+	if text == "" && len(out) == 0 {
 		return nil
 	}
-	return []map[string]any{{"type": "content", "content": map[string]any{"type": "text", "text": text}}}
+	if text != "" {
+		out = append(out, map[string]any{"type": "content", "content": map[string]any{"type": "text", "text": text}})
+	}
+	return out
+}
+
+func toolDiffContent(result map[string]any) []map[string]any {
+	details, _ := result["details"].(map[string]any)
+	if len(details) == 0 {
+		return nil
+	}
+	diff := strings.TrimSpace(fmt.Sprint(details["diff"]))
+	if diff == "" || diff == "<nil>" {
+		return nil
+	}
+	path := strings.TrimSpace(firstDetailPath(details, "modifiedFiles", "path", "file", "filePath", "targetPath"))
+	if path == "" {
+		path = "changes.diff"
+	}
+	return []map[string]any{{
+		"type": "diff",
+		"path": path,
+		"diff": diff,
+	}}
 }
 
 func contentBlocksToACP(blocks []ai.ContentBlock) []map[string]any {
@@ -1578,8 +1604,23 @@ func contentBlockToACP(value any) map[string]any {
 	}
 }
 
-func toolLocations(args any) []map[string]any {
-	obj, ok := args.(map[string]any)
+func toolLocations(values ...any) []map[string]any {
+	seen := map[string]bool{}
+	var locations []map[string]any
+	for _, value := range values {
+		for _, path := range toolLocationPaths(value) {
+			if seen[path] {
+				continue
+			}
+			seen[path] = true
+			locations = append(locations, map[string]any{"path": path})
+		}
+	}
+	return locations
+}
+
+func toolLocationPaths(value any) []string {
+	obj, ok := value.(map[string]any)
 	if !ok {
 		return nil
 	}
@@ -1590,11 +1631,40 @@ func toolLocations(args any) []map[string]any {
 		}
 	}
 	if len(paths) == 0 {
+		details, _ := obj["details"].(map[string]any)
+		for _, key := range []string{"readFiles", "modifiedFiles"} {
+			paths = append(paths, stringList(details[key])...)
+		}
+	}
+	return paths
+}
+
+func firstDetailPath(details map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if items := stringList(details[key]); len(items) > 0 {
+			return items[0]
+		}
+		if value := strings.TrimSpace(fmt.Sprint(details[key])); value != "" && value != "<nil>" {
+			return value
+		}
+	}
+	return ""
+}
+
+func stringList(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return append([]string(nil), typed...)
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			text := strings.TrimSpace(fmt.Sprint(item))
+			if text != "" && text != "<nil>" {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
 		return nil
 	}
-	locations := make([]map[string]any, 0, len(paths))
-	for _, path := range paths {
-		locations = append(locations, map[string]any{"path": path})
-	}
-	return locations
 }

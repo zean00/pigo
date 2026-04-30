@@ -55,7 +55,7 @@ Run the ACP stdio adapter:
 printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}\n' | go run ./cmd/pigo-acp
 ```
 
-`pigo-acp` implements the V1 Agent Client Protocol session flow (`initialize`, `session/new`, `session/prompt`, `session/cancel`, and `session/close`) and can attach MCP tools to each ACP session. MCP server config is read from ACP `mcpServers` first, then from `PI_MCP_CONFIG_JSON`, `PI_MCP_CONFIG`, `.pi/mcp.json`, and `~/.pi/agent/mcp.json`. Supported MCP transports are `stdio`, `http`, and `sse`; tools are exposed as `mcp__<server>__<tool>`.
+`pigo-acp` implements the V1 Agent Client Protocol session flow (`initialize`, `authenticate`, `logout`, `session/new`, `session/list`, `session/load`, `session/resume`, `session/fork`, `session/prompt`, `session/cancel`, and `session/close`) and can attach MCP tools to each ACP session. MCP server config is read from ACP `mcpServers` first, then from `PI_MCP_CONFIG_JSON`, `PI_MCP_CONFIG`, `.pi/mcp.json`, and `~/.pi/agent/mcp.json`. Supported MCP transports are `stdio`, `http`, and `sse`; tools are exposed as `mcp__<server>__<tool>`, include MCP metadata in the model-facing tool spec, and forward MCP progress notifications as ACP tool updates.
 
 Run the interactive OAuth helper:
 

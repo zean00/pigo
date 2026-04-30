@@ -422,11 +422,12 @@ Upstream comparison surface in `pi-mono`:
   - supports initialize, prompt, cancel, close, active and persisted session listing, load, resume, fork, model/mode/config setters, no-op authenticate/logout, and ACP document notifications
   - prompt handling forwards text, resource, image, and live open-editor document context into the coding session
   - session lifecycle responses expose model state, mode state, and configurable options
+  - tool updates expose ACP content blocks, file locations, and diff payloads when tool results include structured file metadata
 
 - `DONE` MCP tool adapter
   - `pigo`: `pkg/mcpadapter`
   - supports stdio, Streamable HTTP, and SSE MCP servers from ACP-provided server definitions, `PI_MCP_CONFIG_JSON`, `PI_MCP_CONFIG`, project `.pi/mcp.json`, and global `~/.pi/agent/mcp.json`
-  - maps MCP tools into pigo extension tools, maps text/image/audio/resource/structured results, closes client sessions on shutdown, paginates tool lists, and refreshes registered tools on MCP `toolListChanged`
+  - maps MCP tools into pigo extension tools, preserves tool title/annotations/output schema/icon metadata in model-facing specs, maps text/image/audio/resource/structured/meta results, closes client sessions on shutdown, paginates tool lists, refreshes registered tools on MCP `toolListChanged`, and forwards MCP progress notifications as partial tool updates
 
 ### Headless-relevant gaps still open
 

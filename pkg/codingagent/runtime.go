@@ -76,6 +76,8 @@ type Session struct {
 	beforeTreeHooks       []SessionBeforeTreeHandler
 	beforeCompactHooks    []SessionBeforeCompactHandler
 	beforeAgentStartHooks []BeforeAgentStartHandler
+	modelSelectHooks      []ModelSelectHandler
+	userBashHooks         []UserBashHandler
 	inputHooks            []InputHandler
 	contextHooks          []ContextHandler
 	providerPayloadHooks  []ProviderPayloadHandler
@@ -210,6 +212,20 @@ type BeforeAgentStartEvent struct {
 	SystemPrompt string             `json:"systemPrompt"`
 }
 
+type ModelSelectEvent struct {
+	Type          string     `json:"type"`
+	Model         ModelInfo  `json:"model"`
+	PreviousModel *ModelInfo `json:"previousModel,omitempty"`
+	Source        string     `json:"source"`
+}
+
+type UserBashEvent struct {
+	Type               string `json:"type"`
+	Command            string `json:"command"`
+	ExcludeFromContext bool   `json:"excludeFromContext"`
+	CWD                string `json:"cwd"`
+}
+
 type SessionBeforeResult struct {
 	Cancel bool `json:"cancel,omitempty"`
 }
@@ -227,6 +243,10 @@ type ContextResult struct {
 type BeforeAgentStartResult struct {
 	Message      agentcore.Message `json:"message,omitempty"`
 	SystemPrompt *string           `json:"systemPrompt,omitempty"`
+}
+
+type UserBashResult struct {
+	Result *BashResult `json:"result,omitempty"`
 }
 
 type ToolCallEvent struct {
@@ -265,6 +285,8 @@ type ProviderResponseHandler func(ctx context.Context, response ai.ProviderRespo
 type ToolCallHandler func(ctx context.Context, event ToolCallEvent) (ToolCallResult, error)
 type ToolResultHandler func(ctx context.Context, event ToolResultEvent) (ToolResultPatch, error)
 type BeforeAgentStartHandler func(ctx context.Context, event BeforeAgentStartEvent) (BeforeAgentStartResult, error)
+type ModelSelectHandler func(ctx context.Context, event ModelSelectEvent) error
+type UserBashHandler func(ctx context.Context, event UserBashEvent) (UserBashResult, error)
 
 type SessionBeforeSwitchHandler func(ctx context.Context, event SessionBeforeSwitchEvent) (SessionBeforeResult, error)
 type SessionBeforeForkHandler func(ctx context.Context, event SessionBeforeForkEvent) (SessionBeforeResult, error)
@@ -554,6 +576,24 @@ func (s *Session) RegisterBeforeAgentStartHandler(handler BeforeAgentStartHandle
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.beforeAgentStartHooks = append(s.beforeAgentStartHooks, handler)
+}
+
+func (s *Session) RegisterModelSelectHandler(handler ModelSelectHandler) {
+	if handler == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.modelSelectHooks = append(s.modelSelectHooks, handler)
+}
+
+func (s *Session) RegisterUserBashHandler(handler UserBashHandler) {
+	if handler == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.userBashHooks = append(s.userBashHooks, handler)
 }
 
 func (s *Session) RegisterInputHandler(handler InputHandler) {
@@ -1586,6 +1626,42 @@ func (s *Session) applyBeforeAgentStartHooks(ctx context.Context, prompt string,
 	return currentSystemPrompt, nil
 }
 
+func (s *Session) emitModelSelect(ctx context.Context, model ModelInfo, previous *ModelInfo, source string) error {
+	s.emitSessionEvent("model_select", map[string]any{"model": model, "previousModel": previous, "source": source})
+	s.mu.Lock()
+	hooks := append([]ModelSelectHandler(nil), s.modelSelectHooks...)
+	s.mu.Unlock()
+	event := ModelSelectEvent{Type: "model_select", Model: model, PreviousModel: previous, Source: source}
+	for _, hook := range hooks {
+		if err := hook(ctx, event); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Session) applyUserBashHooks(ctx context.Context, command string, excludeFromContext bool) (*BashResult, error) {
+	s.mu.Lock()
+	hooks := append([]UserBashHandler(nil), s.userBashHooks...)
+	s.mu.Unlock()
+	event := UserBashEvent{
+		Type:               "user_bash",
+		Command:            command,
+		ExcludeFromContext: excludeFromContext,
+		CWD:                s.Root,
+	}
+	for _, hook := range hooks {
+		result, err := hook(ctx, event)
+		if err != nil {
+			return nil, err
+		}
+		if result.Result != nil {
+			return result.Result, nil
+		}
+	}
+	return nil, nil
+}
+
 func (s *Session) prompt(ctx context.Context, prompt string, attachments []PromptAttachment, retrying bool) error {
 	return s.promptWithSource(ctx, prompt, attachments, retrying, "extension")
 }
@@ -2192,6 +2268,11 @@ func (s *Session) SetModel(provider, modelID string) (ModelInfo, error) {
 	if modelID == "" {
 		return ModelInfo{}, fmt.Errorf("missing modelId")
 	}
+	var previous *ModelInfo
+	if s.Provider != "" || s.ModelID != "" {
+		existing := ModelInfo{Provider: s.Provider, ModelID: s.ModelID}
+		previous = &existing
+	}
 	s.Provider = provider
 	s.ModelID = modelID
 	s.AvailableModels = appendModelIfMissing(s.AvailableModels, ModelInfo{Provider: provider, ModelID: modelID})
@@ -2205,7 +2286,11 @@ func (s *Session) SetModel(provider, modelID string) (ModelInfo, error) {
 	if err := s.appendEntry(entry); err != nil {
 		return ModelInfo{}, err
 	}
-	return ModelInfo{Provider: provider, ModelID: modelID}, nil
+	model := ModelInfo{Provider: provider, ModelID: modelID}
+	if err := s.emitModelSelect(context.Background(), model, previous, "set_model"); err != nil {
+		return ModelInfo{}, err
+	}
+	return model, nil
 }
 
 func (s *Session) GetAvailableModels() []ModelInfo {
@@ -2448,6 +2533,25 @@ func (s *Session) triggerAutoCompaction(ctx context.Context) error {
 }
 
 func (s *Session) Bash(ctx context.Context, command string) (BashResult, error) {
+	if handled, err := s.applyUserBashHooks(ctx, command, false); err != nil {
+		return BashResult{}, err
+	} else if handled != nil {
+		result := *handled
+		if result.Command == "" {
+			result.Command = command
+		}
+		message := agentcore.Message{
+			"role":      "bashExecution",
+			"command":   result.Command,
+			"output":    result.Output,
+			"exitCode":  result.ExitCode,
+			"cancelled": result.Cancelled,
+		}
+		if err := s.appendEntry(SessionEntry{Type: "message", Message: message}); err != nil {
+			return result, err
+		}
+		return result, nil
+	}
 	s.mu.Lock()
 	cmdCtx, cancel := context.WithCancel(ctx)
 	s.bashCancel = cancel

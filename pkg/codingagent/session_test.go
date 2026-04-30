@@ -486,6 +486,38 @@ func TestSessionBeforeCompactHookCanCancel(t *testing.T) {
 	}
 }
 
+func TestSessionModelSelectAndUserBashHooks(t *testing.T) {
+	session := NewSession(t.TempDir(), nil)
+	var selected ModelSelectEvent
+	session.RegisterModelSelectHandler(func(ctx context.Context, event ModelSelectEvent) error {
+		selected = event
+		return nil
+	})
+	if _, err := session.SetModel("test-provider", "test-model"); err != nil {
+		t.Fatal(err)
+	}
+	if selected.Type != "model_select" || selected.Model.Provider != "test-provider" || selected.Source != "set_model" {
+		t.Fatalf("selected = %#v", selected)
+	}
+
+	session.RegisterUserBashHandler(func(ctx context.Context, event UserBashEvent) (UserBashResult, error) {
+		if event.Type != "user_bash" || event.Command != "ignored" || event.CWD != session.Root {
+			t.Fatalf("event = %#v", event)
+		}
+		return UserBashResult{Result: &BashResult{Command: event.Command, Output: "handled\n", ExitCode: 7}}, nil
+	})
+	result, err := session.Bash(context.Background(), "ignored")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Output != "handled\n" || result.ExitCode != 7 {
+		t.Fatalf("result = %#v", result)
+	}
+	if len(session.Messages) == 0 || session.Messages[len(session.Messages)-1]["role"] != "bashExecution" {
+		t.Fatalf("messages = %#v", session.Messages)
+	}
+}
+
 func TestBuiltinToolsUseConfiguredOutputLimitAndShellPrefix(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "large.txt"), []byte(strings.Repeat("x", 1000)), 0o644); err != nil {

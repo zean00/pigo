@@ -74,6 +74,7 @@ type Session struct {
 	beforeSwitchHooks   []SessionBeforeSwitchHandler
 	beforeForkHooks     []SessionBeforeForkHandler
 	beforeTreeHooks     []SessionBeforeTreeHandler
+	beforeCompactHooks  []SessionBeforeCompactHandler
 	promptTemplates     []SlashCommandInfo
 	skills              []SlashCommandInfo
 	resourceDiagnostics []ResourceDiagnostic
@@ -177,6 +178,12 @@ type SessionBeforeTreeEvent struct {
 	OldLeafID string `json:"oldLeafId,omitempty"`
 }
 
+type SessionBeforeCompactEvent struct {
+	Type               string `json:"type"`
+	TokensBefore       int    `json:"tokensBefore"`
+	CustomInstructions string `json:"customInstructions,omitempty"`
+}
+
 type SessionBeforeResult struct {
 	Cancel bool `json:"cancel,omitempty"`
 }
@@ -184,6 +191,7 @@ type SessionBeforeResult struct {
 type SessionBeforeSwitchHandler func(ctx context.Context, event SessionBeforeSwitchEvent) (SessionBeforeResult, error)
 type SessionBeforeForkHandler func(ctx context.Context, event SessionBeforeForkEvent) (SessionBeforeResult, error)
 type SessionBeforeTreeHandler func(ctx context.Context, event SessionBeforeTreeEvent) (SessionBeforeResult, error)
+type SessionBeforeCompactHandler func(ctx context.Context, event SessionBeforeCompactEvent) (SessionBeforeResult, error)
 
 const (
 	bashExecutionTextPrefix        = "Ran `%s`\n"
@@ -448,6 +456,15 @@ func (s *Session) RegisterSessionBeforeTreeHandler(handler SessionBeforeTreeHand
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.beforeTreeHooks = append(s.beforeTreeHooks, handler)
+}
+
+func (s *Session) RegisterSessionBeforeCompactHandler(handler SessionBeforeCompactHandler) {
+	if handler == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.beforeCompactHooks = append(s.beforeCompactHooks, handler)
 }
 
 func (s *Session) RegisterExtensionCommand(command SlashCommandInfo, handler ExtensionCommandHandler) {
@@ -1197,6 +1214,33 @@ func (s *Session) emitBeforeTree(ctx context.Context, targetID string) (bool, er
 	return false, nil
 }
 
+func (s *Session) emitBeforeCompact(ctx context.Context, tokensBefore int, instructions string) (bool, error) {
+	event := SessionBeforeCompactEvent{
+		Type:               "session_before_compact",
+		TokensBefore:       tokensBefore,
+		CustomInstructions: strings.TrimSpace(instructions),
+	}
+	data := map[string]any{
+		"tokensBefore":       tokensBefore,
+		"customInstructions": event.CustomInstructions,
+	}
+	s.emitSessionEvent("session_before_compact", data)
+
+	s.mu.Lock()
+	hooks := append([]SessionBeforeCompactHandler(nil), s.beforeCompactHooks...)
+	s.mu.Unlock()
+	for _, hook := range hooks {
+		result, err := hook(ctx, event)
+		if err != nil {
+			return false, err
+		}
+		if result.Cancel {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *Session) prompt(ctx context.Context, prompt string, attachments []PromptAttachment, retrying bool) error {
 	streamState := promptStreamState{activeMessageIdx: -1}
 	if s.IsStreaming {
@@ -1893,10 +1937,10 @@ func (s *Session) compact(ctx context.Context, customInstructions string, useMod
 	if tokensBefore == 0 {
 		tokensBefore = s.ContextUsage().EstimatedTokens
 	}
-	s.emitSessionEvent("session_before_compact", map[string]any{
-		"tokensBefore":       tokensBefore,
-		"customInstructions": instructions,
-	})
+	cancelled, err := s.emitBeforeCompact(ctx, tokensBefore, instructions)
+	if cancelled || err != nil {
+		return CompactionResult{TokensBefore: tokensBefore, Cancelled: true}
+	}
 	summary := s.buildCompactionSummary(instructions)
 	if useModel && s.Compactor != nil {
 		if generated, err := s.Compactor(ctx, sessionMessagesToAI(s.Messages), instructions); err == nil && strings.TrimSpace(generated) != "" {

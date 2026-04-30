@@ -458,6 +458,34 @@ func TestSessionAbortCancelsCompaction(t *testing.T) {
 	}
 }
 
+func TestSessionBeforeCompactHookCanCancel(t *testing.T) {
+	session := NewSession(t.TempDir(), nil)
+	if err := session.appendEntry(SessionEntry{Type: "message", Message: map[string]any{
+		"role": "user",
+		"text": "hello",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	session.RegisterSessionBeforeCompactHandler(func(ctx context.Context, event SessionBeforeCompactEvent) (SessionBeforeResult, error) {
+		called = true
+		if event.Type != "session_before_compact" || event.TokensBefore == 0 || event.CustomInstructions != "skip" {
+			t.Fatalf("event = %#v", event)
+		}
+		return SessionBeforeResult{Cancel: true}, nil
+	})
+
+	result := session.Compact("skip")
+	if !called || !result.Cancelled {
+		t.Fatalf("called=%v result=%#v", called, result)
+	}
+	for _, entry := range session.entries {
+		if entry.Type == "compaction" {
+			t.Fatalf("compaction entry persisted despite cancellation: %#v", entry)
+		}
+	}
+}
+
 func TestBuiltinToolsUseConfiguredOutputLimitAndShellPrefix(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "large.txt"), []byte(strings.Repeat("x", 1000)), 0o644); err != nil {

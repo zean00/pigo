@@ -63,6 +63,7 @@ type rpcSlashCommand struct {
 	Description string         `json:"description,omitempty"`
 	Source      string         `json:"source"`
 	SourceInfo  map[string]any `json:"sourceInfo"`
+	Disabled    bool           `json:"disabled,omitempty"`
 }
 
 func (s *RPCServer) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
@@ -505,6 +506,7 @@ func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse 
 				Description: command.Description,
 				Source:      command.Source,
 				SourceInfo:  command.SourceInfo,
+				Disabled:    command.Disabled,
 			})
 		}
 		return rpcResponse{
@@ -512,7 +514,7 @@ func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse 
 			Type:    "response",
 			Command: command.Type,
 			Success: true,
-			Data:    map[string]any{"commands": commands},
+			Data:    map[string]any{"commands": commands, "diagnostics": s.Session.ResourceDiagnostics()},
 		}
 
 	case "register_commands":
@@ -530,7 +532,7 @@ func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse 
 			SkillPaths:      command.SkillPaths,
 			IncludeDefaults: includeDefaults,
 		})
-		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true}
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: map[string]any{"diagnostics": s.Session.ResourceDiagnostics()}}
 
 	default:
 		return rpcResponse{

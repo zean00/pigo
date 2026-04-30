@@ -59,9 +59,10 @@ type Session struct {
 	labelTimes    map[string]string
 	customEntries []SessionEntry
 
-	extensionCommands []SlashCommandInfo
-	promptTemplates   []SlashCommandInfo
-	skills            []SlashCommandInfo
+	extensionCommands   []SlashCommandInfo
+	promptTemplates     []SlashCommandInfo
+	skills              []SlashCommandInfo
+	resourceDiagnostics []ResourceDiagnostic
 }
 
 type CompactorFunc func(ctx context.Context, messages []ai.Message, instructions string) (string, error)
@@ -88,6 +89,20 @@ type SlashCommandInfo struct {
 	FilePath    string         `json:"-"`
 	BaseDir     string         `json:"-"`
 	Disabled    bool           `json:"-"`
+}
+
+type ResourceCollision struct {
+	ResourceType string `json:"resourceType"`
+	Name         string `json:"name"`
+	WinnerPath   string `json:"winnerPath"`
+	LoserPath    string `json:"loserPath"`
+}
+
+type ResourceDiagnostic struct {
+	Type      string             `json:"type"`
+	Message   string             `json:"message"`
+	Path      string             `json:"path,omitempty"`
+	Collision *ResourceCollision `json:"collision,omitempty"`
 }
 
 const (
@@ -223,6 +238,12 @@ func (s *Session) SetSkills(commands []SlashCommandInfo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.skills = copySlashCommands(commands)
+}
+
+func (s *Session) ResourceDiagnostics() []ResourceDiagnostic {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]ResourceDiagnostic(nil), s.resourceDiagnostics...)
 }
 
 func (s *Session) SendCustomMessage(customType string, content any, display bool, details any) error {

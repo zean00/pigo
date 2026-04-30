@@ -377,6 +377,12 @@ Upstream comparison surface in `pi-mono`:
   - `pigo` has session-facing slots for extension commands, prompt templates, and skills
   - it does not yet mirror the full TS extension runtime/loader/wrapper/SDK model
 
+- `DONE` prompt/skill resource diagnostics, collision handling, and reload visibility
+  - duplicate prompt and skill names are detected while preserving first-match precedence
+  - invalid or missing explicit resource paths now produce diagnostics
+  - invalid skill metadata is surfaced as diagnostics instead of silently registering unusable commands
+  - `get_commands` and `reload_resources` expose the current diagnostics to RPC clients
+
 ### RPC / remote control
 
 - `DONE` JSON-RPC-like line-oriented command server
@@ -408,8 +414,8 @@ Upstream comparison surface in `pi-mono`:
   - `pigo` does not yet provide an equivalent extension system
 
 - `PARTIAL` prompt/resource/skill behavior depth
-  - base support exists
-  - full precedence, collision, disabling, reload, and richer resource semantics from TS are not all present
+  - base support plus diagnostics/collision/reload visibility exist
+  - richer resource semantics from TS are still broader, especially where they interact with extension wrappers and SDK behavior
 
 - `PARTIAL` compaction/runtime workflow richness
   - session events and advanced branch-summary behaviors are still narrower
@@ -441,6 +447,15 @@ If the goal is to keep closing practical parity gaps in order of value:
 2. `codingagent`: extension/runtime/resource parity for the headless target
 3. `codingagent`: deeper session-manager and compaction semantics
 4. `agentcore`: only then revisit exact proxy/event/API shape parity if a consumer truly needs it
+
+## Implementation Todo
+
+- `DONE` `codingagent`: prompt/skill resource diagnostics, collision handling, validation, and RPC reload visibility
+- `TODO` `codingagent`: project context file loading parity for `AGENTS.md` / `CLAUDE.md` style context in headless prompts
+- `TODO` `codingagent`: extension runtime, loader, wrapper, and SDK-facing command/tool parity for headless-safe extension flows
+- `TODO` `codingagent`: richer session-manager and compaction workflow semantics, including branch-summary edge cases, abort/cancel events, context estimation, and extension hooks
+- `TODO` `ai`: non-OpenAI provider long-tail fidelity against upstream provider-specific tests and quirks
+- `TODO` `agentcore` / `ai`: exact normalized event payload and stream shape gaps where downstream clients depend on TS-compatible objects
 
 ## Bottom Line
 

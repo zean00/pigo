@@ -636,6 +636,78 @@ func TestSessionLoadsPromptAndSkillCommandsFromResources(t *testing.T) {
 	}
 }
 
+func TestSessionResourceDiagnosticsAndPrecedence(t *testing.T) {
+	root := t.TempDir()
+	agentDir := filepath.Join(t.TempDir(), "agent")
+	userPromptDir := filepath.Join(agentDir, "prompts")
+	projectPromptDir := filepath.Join(root, ".pi", "prompts")
+	userSkillDir := filepath.Join(agentDir, "skills", "dup-skill")
+	projectSkillDir := filepath.Join(root, ".pi", "skills", "dup-skill")
+	invalidSkillDir := filepath.Join(root, ".pi", "skills", "InvalidName")
+	for _, dir := range []string{userPromptDir, projectPromptDir, userSkillDir, projectSkillDir, invalidSkillDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(userPromptDir, "dup.md"), []byte("---\ndescription: User prompt\n---\nuser\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectPromptDir, "dup.md"), []byte("---\ndescription: Project prompt\n---\nproject\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userSkillDir, "SKILL.md"), []byte("---\nname: dup-skill\ndescription: User skill\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectSkillDir, "SKILL.md"), []byte("---\nname: dup-skill\ndescription: Project skill\ndisable-model-invocation: true\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(invalidSkillDir, "SKILL.md"), []byte("---\nname: Bad_Name\ndescription: Invalid name\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	session := NewSession(root, nil)
+	session.LoadSlashCommandResources(ResourceLoadOptions{
+		AgentDir:        agentDir,
+		PromptPaths:     []string{"missing-prompts"},
+		SkillPaths:      []string{"missing-skills"},
+		IncludeDefaults: true,
+	})
+
+	prompts := session.PromptTemplates()
+	if len(prompts) != 1 || prompts[0].Description != "User prompt" {
+		t.Fatalf("prompt precedence = %#v", prompts)
+	}
+	skills := session.Skills()
+	if len(skills) != 2 {
+		t.Fatalf("skills = %#v", skills)
+	}
+	if skills[0].Description != "User skill" {
+		t.Fatalf("skill precedence = %#v", skills)
+	}
+
+	diagnostics := session.ResourceDiagnostics()
+	seen := map[string]bool{}
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Type == "collision" && diagnostic.Collision != nil {
+			seen[diagnostic.Collision.ResourceType+"|"+diagnostic.Collision.Name] = true
+		}
+		if strings.Contains(diagnostic.Message, "does not exist") {
+			seen["missing"] = true
+		}
+		if strings.Contains(diagnostic.Message, "invalid characters") {
+			seen["invalid-skill-name"] = true
+		}
+		if strings.Contains(diagnostic.Message, "does not match parent directory") {
+			seen["skill-dir-mismatch"] = true
+		}
+	}
+	for _, key := range []string{"prompt|dup", "skill|skill:dup-skill", "missing", "invalid-skill-name", "skill-dir-mismatch"} {
+		if !seen[key] {
+			t.Fatalf("missing diagnostic %s in %#v", key, diagnostics)
+		}
+	}
+}
+
 func TestSessionExpandsPromptTemplateBeforePrompt(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, ".pi", "prompts"), 0o755); err != nil {

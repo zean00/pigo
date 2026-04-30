@@ -3,6 +3,7 @@ package codingagent
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -29,12 +30,18 @@ func (s *Session) LoadSlashCommandResources(options ResourceLoadOptions) {
 	if agentDir == "" {
 		agentDir = DefaultAgentDir()
 	}
-	s.SetPromptTemplates(loadPromptTemplateCommands(s.Root, agentDir, options))
-	s.SetSkills(loadSkillCommands(s.Root, agentDir, options))
+	prompts, promptDiagnostics := loadPromptTemplateCommands(s.Root, agentDir, options)
+	skills, skillDiagnostics := loadSkillCommands(s.Root, agentDir, options)
+	s.SetPromptTemplates(prompts)
+	s.SetSkills(skills)
+	s.mu.Lock()
+	s.resourceDiagnostics = append(promptDiagnostics, skillDiagnostics...)
+	s.mu.Unlock()
 }
 
-func loadPromptTemplateCommands(root, agentDir string, options ResourceLoadOptions) []SlashCommandInfo {
+func loadPromptTemplateCommands(root, agentDir string, options ResourceLoadOptions) ([]SlashCommandInfo, []ResourceDiagnostic) {
 	var commands []SlashCommandInfo
+	var diagnostics []ResourceDiagnostic
 	if options.IncludeDefaults {
 		commands = append(commands, loadPromptCommandsFromDir(filepath.Join(agentDir, "prompts"), "user")...)
 		commands = append(commands, loadPromptCommandsFromDir(filepath.Join(root, configDirName, "prompts"), "project")...)
@@ -43,6 +50,7 @@ func loadPromptTemplateCommands(root, agentDir string, options ResourceLoadOptio
 		path := resolveResourcePath(root, rawPath)
 		info, err := os.Stat(path)
 		if err != nil {
+			diagnostics = append(diagnostics, ResourceDiagnostic{Type: "warning", Message: "prompt template path does not exist", Path: path})
 			continue
 		}
 		if info.IsDir() {
@@ -53,9 +61,12 @@ func loadPromptTemplateCommands(root, agentDir string, options ResourceLoadOptio
 			if command, ok := loadPromptCommandFromFile(path, "temporary", filepath.Dir(path)); ok {
 				commands = append(commands, command)
 			}
+		} else {
+			diagnostics = append(diagnostics, ResourceDiagnostic{Type: "warning", Message: "prompt template path is not a markdown file", Path: path})
 		}
 	}
-	return dedupeSlashCommands(commands)
+	deduped, collisions := dedupeResourceCommands(commands, "prompt")
+	return deduped, append(diagnostics, collisions...)
 }
 
 func loadPromptCommandsFromDir(dir, scope string) []SlashCommandInfo {
@@ -104,80 +115,102 @@ func loadPromptCommandFromFile(path, scope, baseDir string) (SlashCommandInfo, b
 	}, true
 }
 
-func loadSkillCommands(root, agentDir string, options ResourceLoadOptions) []SlashCommandInfo {
+func loadSkillCommands(root, agentDir string, options ResourceLoadOptions) ([]SlashCommandInfo, []ResourceDiagnostic) {
 	var commands []SlashCommandInfo
+	var diagnostics []ResourceDiagnostic
 	if options.IncludeDefaults {
-		commands = append(commands, loadSkillCommandsFromDir(filepath.Join(agentDir, "skills"), "user", true)...)
-		commands = append(commands, loadSkillCommandsFromDir(filepath.Join(root, configDirName, "skills"), "project", true)...)
+		loaded, warnings := loadSkillCommandsFromDir(filepath.Join(agentDir, "skills"), "user", true)
+		commands = append(commands, loaded...)
+		diagnostics = append(diagnostics, warnings...)
+		loaded, warnings = loadSkillCommandsFromDir(filepath.Join(root, configDirName, "skills"), "project", true)
+		commands = append(commands, loaded...)
+		diagnostics = append(diagnostics, warnings...)
 	}
 	for _, rawPath := range options.SkillPaths {
 		path := resolveResourcePath(root, rawPath)
 		info, err := os.Stat(path)
 		if err != nil {
+			diagnostics = append(diagnostics, ResourceDiagnostic{Type: "warning", Message: "skill path does not exist", Path: path})
 			continue
 		}
 		if info.IsDir() {
-			commands = append(commands, loadSkillCommandsFromDir(path, "temporary", true)...)
+			loaded, warnings := loadSkillCommandsFromDir(path, "temporary", true)
+			commands = append(commands, loaded...)
+			diagnostics = append(diagnostics, warnings...)
 			continue
 		}
 		if strings.HasSuffix(info.Name(), ".md") {
-			if command, ok := loadSkillCommandFromFile(path, "temporary"); ok {
+			if command, warnings, ok := loadSkillCommandFromFile(path, "temporary"); ok {
 				commands = append(commands, command)
+				diagnostics = append(diagnostics, warnings...)
+			} else {
+				diagnostics = append(diagnostics, warnings...)
 			}
+		} else {
+			diagnostics = append(diagnostics, ResourceDiagnostic{Type: "warning", Message: "skill path is not a markdown file", Path: path})
 		}
 	}
-	return dedupeSlashCommands(commands)
+	deduped, collisions := dedupeResourceCommands(commands, "skill")
+	return deduped, append(diagnostics, collisions...)
 }
 
-func loadSkillCommandsFromDir(dir, scope string, includeRootFiles bool) []SlashCommandInfo {
+func loadSkillCommandsFromDir(dir, scope string, includeRootFiles bool) ([]SlashCommandInfo, []ResourceDiagnostic) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].Name() < entries[j].Name()
 	})
 	for _, entry := range entries {
 		if entry.Name() == "SKILL.md" && !entry.IsDir() {
-			if command, ok := loadSkillCommandFromFile(filepath.Join(dir, entry.Name()), scope); ok {
-				return []SlashCommandInfo{command}
+			if command, diagnostics, ok := loadSkillCommandFromFile(filepath.Join(dir, entry.Name()), scope); ok {
+				return []SlashCommandInfo{command}, diagnostics
+			} else {
+				return nil, diagnostics
 			}
-			return nil
 		}
 	}
 	var commands []SlashCommandInfo
+	var diagnostics []ResourceDiagnostic
 	for _, entry := range entries {
 		if strings.HasPrefix(entry.Name(), ".") || entry.Name() == "node_modules" {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
 		if entry.IsDir() {
-			commands = append(commands, loadSkillCommandsFromDir(path, scope, false)...)
+			loaded, warnings := loadSkillCommandsFromDir(path, scope, false)
+			commands = append(commands, loaded...)
+			diagnostics = append(diagnostics, warnings...)
 			continue
 		}
 		if includeRootFiles && strings.HasSuffix(entry.Name(), ".md") {
-			if command, ok := loadSkillCommandFromFile(path, scope); ok {
+			if command, warnings, ok := loadSkillCommandFromFile(path, scope); ok {
 				commands = append(commands, command)
+				diagnostics = append(diagnostics, warnings...)
+			} else {
+				diagnostics = append(diagnostics, warnings...)
 			}
 		}
 	}
-	return commands
+	return commands, diagnostics
 }
 
-func loadSkillCommandFromFile(path, scope string) (SlashCommandInfo, bool) {
+func loadSkillCommandFromFile(path, scope string) (SlashCommandInfo, []ResourceDiagnostic, bool) {
 	content, err := os.ReadFile(path)
 	if err != nil {
-		return SlashCommandInfo{}, false
+		return SlashCommandInfo{}, []ResourceDiagnostic{{Type: "warning", Message: "failed to read skill file", Path: path}}, false
 	}
 	frontmatter, _ := parseSimpleFrontmatter(string(content))
 	description := strings.TrimSpace(frontmatter["description"])
 	if description == "" {
-		return SlashCommandInfo{}, false
+		return SlashCommandInfo{}, []ResourceDiagnostic{{Type: "warning", Message: "description is required", Path: path}}, false
 	}
 	name := strings.TrimSpace(frontmatter["name"])
 	if name == "" {
 		name = filepath.Base(filepath.Dir(path))
 	}
+	diagnostics := validateSkillMetadata(path, name, filepath.Base(filepath.Dir(path)), description)
 	return SlashCommandInfo{
 		Name:        "skill:" + name,
 		Description: description,
@@ -187,7 +220,63 @@ func loadSkillCommandFromFile(path, scope string) (SlashCommandInfo, bool) {
 		FilePath:    path,
 		BaseDir:     filepath.Dir(path),
 		Disabled:    parseFrontmatterBool(frontmatter["disable-model-invocation"]),
-	}, true
+	}, diagnostics, true
+}
+
+var validSkillNamePattern = regexp.MustCompile(`^[a-z0-9-]+$`)
+
+func validateSkillMetadata(path, name, parentDir, description string) []ResourceDiagnostic {
+	var diagnostics []ResourceDiagnostic
+	if name != parentDir {
+		diagnostics = append(diagnostics, ResourceDiagnostic{Type: "warning", Message: `name "` + name + `" does not match parent directory "` + parentDir + `"`, Path: path})
+	}
+	if len(name) > 64 {
+		diagnostics = append(diagnostics, ResourceDiagnostic{Type: "warning", Message: "name exceeds 64 characters", Path: path})
+	}
+	if !validSkillNamePattern.MatchString(name) {
+		diagnostics = append(diagnostics, ResourceDiagnostic{Type: "warning", Message: "name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)", Path: path})
+	}
+	if strings.HasPrefix(name, "-") || strings.HasSuffix(name, "-") {
+		diagnostics = append(diagnostics, ResourceDiagnostic{Type: "warning", Message: "name must not start or end with a hyphen", Path: path})
+	}
+	if strings.Contains(name, "--") {
+		diagnostics = append(diagnostics, ResourceDiagnostic{Type: "warning", Message: "name must not contain consecutive hyphens", Path: path})
+	}
+	if len(description) > 1024 {
+		diagnostics = append(diagnostics, ResourceDiagnostic{Type: "warning", Message: "description exceeds 1024 characters", Path: path})
+	}
+	return diagnostics
+}
+
+func dedupeResourceCommands(commands []SlashCommandInfo, resourceType string) ([]SlashCommandInfo, []ResourceDiagnostic) {
+	seen := map[string]SlashCommandInfo{}
+	out := make([]SlashCommandInfo, 0, len(commands))
+	var diagnostics []ResourceDiagnostic
+	for _, command := range commands {
+		name := strings.TrimSpace(command.Name)
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if existing, ok := seen[key]; ok {
+			diagnostics = append(diagnostics, ResourceDiagnostic{
+				Type:    "collision",
+				Message: `name "` + name + `" collision`,
+				Path:    command.FilePath,
+				Collision: &ResourceCollision{
+					ResourceType: resourceType,
+					Name:         name,
+					WinnerPath:   existing.FilePath,
+					LoserPath:    command.FilePath,
+				},
+			})
+			continue
+		}
+		command.Name = name
+		seen[key] = command
+		out = append(out, command)
+	}
+	return out, diagnostics
 }
 
 func resolveResourcePath(root, rawPath string) string {

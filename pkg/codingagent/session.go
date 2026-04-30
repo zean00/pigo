@@ -131,7 +131,7 @@ func BuiltinToolsWithOptions(root string, options BuiltinToolOptions) []agentcor
 						IsError: true,
 					}
 				}
-				return agentcore.ToolResult{Text: output, Details: details}
+				return agentcore.ToolResult{Text: strings.TrimRight(output, "\n"), Details: details}
 			},
 		},
 		{
@@ -165,7 +165,7 @@ func BuiltinToolsWithOptions(root string, options BuiltinToolOptions) []agentcor
 					return agentcore.ToolResult{Text: fmt.Sprintf("%s appears to be a binary file and was not read.", path), IsError: true}
 				}
 				return agentcore.ToolResult{
-					Text:    string(data),
+					Text:    strings.TrimRight(string(data), "\n"),
 					Details: map[string]any{"readFiles": []string{path}, "bytes": totalBytes, "truncated": truncated},
 				}
 			},
@@ -950,6 +950,10 @@ func GrepWorkspace(root, path, pattern string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
 	matches := []string{}
 	err = filepath.WalkDir(absolutePath, func(current string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -971,12 +975,14 @@ func GrepWorkspace(root, path, pattern string) (string, error) {
 		if isLikelyBinary(data) {
 			return nil
 		}
-		if strings.Contains(string(data), pattern) {
-			relative, err := filepath.Rel(root, current)
-			if err != nil {
-				return err
+		relative, err := filepath.Rel(rootAbs, current)
+		if err != nil {
+			return err
+		}
+		for lineIndex, line := range strings.Split(string(data), "\n") {
+			if strings.Contains(line, pattern) {
+				matches = append(matches, fmt.Sprintf("%s:%d: %s", filepath.ToSlash(relative), lineIndex+1, line))
 			}
-			matches = append(matches, relative)
 		}
 		return nil
 	})

@@ -113,10 +113,22 @@ Run the full cross-repo verifier:
 make verify-conformance
 ```
 
+Run the behavior parity comparator against the local `pi-mono` checkout:
+
+```bash
+make parity
+```
+
+This executes every fixture through both implementations, canonicalizes volatile or implementation-specific fields, and fails if the comparable behavior diverges. For a live provider smoke check, pass an OpenRouter key through the environment:
+
+```bash
+OPENROUTER_API_KEY=... make live-openrouter-smoke
+```
+
 Refresh the model catalog from the TypeScript source:
 
 ```bash
 make generate-models
 ```
 
-This still is not a full production port. The remaining gaps are higher-level parity gaps: deeper provider-specific event semantics, richer `pi-ai` utility surface, and the broader interactive coding-agent product surface beyond the headless target.
+The tracked Go headless target is intended to match the comparable `pi-mono` behavior. Interactive TUI/product surfaces and TypeScript SDK ergonomics remain outside the Go target unless scope changes.

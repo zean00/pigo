@@ -125,6 +125,41 @@ func TestWorkspaceSearchSkipsIgnoredDirectoriesAndBinaryFiles(t *testing.T) {
 	}
 }
 
+func TestGrepWorkspaceSupportsRelativeRootWithoutMatches(t *testing.T) {
+	root := t.TempDir()
+	if err := WriteWorkspaceFile(root, "notes.txt", "hello\n"); err != nil {
+		t.Fatal(err)
+	}
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(previous); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	grep, err := GrepWorkspace(".", ".", "missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grep != "" {
+		t.Fatalf("grep output = %q", grep)
+	}
+
+	grep, err = GrepWorkspace(".", ".", "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grep != "notes.txt:1: hello" {
+		t.Fatalf("grep output = %q", grep)
+	}
+}
+
 func TestResolveWorkspacePathRejectsEscape(t *testing.T) {
 	if _, err := ResolveWorkspacePath(t.TempDir(), "../outside.txt"); err == nil {
 		t.Fatal("expected escape error")
@@ -1436,7 +1471,7 @@ func TestRunHeadlessSessionBashTool(t *testing.T) {
 		t.Fatal(err)
 	}
 	last := result.Messages[len(result.Messages)-1]
-	if last["role"] != "toolResult" || last["text"] != "hello\n" {
+	if last["role"] != "toolResult" || last["text"] != "hello" {
 		t.Fatalf("unexpected bash result: %#v", last)
 	}
 }
@@ -1480,7 +1515,7 @@ func TestWorkspaceLsGrepFind(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if grep != "README.md" {
+	if grep != "README.md:1: hello docs" {
 		t.Fatalf("grep output = %q", grep)
 	}
 

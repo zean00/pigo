@@ -444,6 +444,41 @@ func TestRPCRegisterCommandsAndReloadResources(t *testing.T) {
 	}
 }
 
+func TestRPCExtensionFlagsAndStatuses(t *testing.T) {
+	session := NewSession(t.TempDir(), nil)
+	var out bytes.Buffer
+	server := RPCServer{Session: session}
+	input := strings.NewReader(
+		`{"id":"f1","type":"register_flags","flags":[{"name":"verbose","description":"Verbose mode","type":"boolean","default":false}]}` + "\n" +
+			`{"id":"f2","type":"set_flag","name":"verbose","value":true}` + "\n" +
+			`{"id":"s1","type":"set_status","name":"ext","status":"ready"}` + "\n" +
+			`{"id":"g1","type":"get_flags"}` + "\n" +
+			`{"id":"g2","type":"get_statuses"}` + "\n",
+	)
+	if err := server.Serve(context.Background(), input, &out); err != nil {
+		t.Fatal(err)
+	}
+	responses := decodeRPCResponses(t, out.String())
+	if len(responses) != 5 {
+		t.Fatalf("responses len = %d", len(responses))
+	}
+	for _, response := range responses {
+		if response["success"] != true {
+			t.Fatalf("response = %#v", response)
+		}
+	}
+	flagData := responses[3]["data"].(map[string]any)
+	flags := flagData["flags"].([]any)
+	values := flagData["values"].(map[string]any)
+	if len(flags) != 1 || flags[0].(map[string]any)["name"] != "verbose" || values["verbose"] != true {
+		t.Fatalf("flag data = %#v", flagData)
+	}
+	statuses := responses[4]["data"].(map[string]any)["statuses"].(map[string]any)
+	if statuses["ext"] != "ready" {
+		t.Fatalf("statuses = %#v", statuses)
+	}
+}
+
 func TestRPCPromptExpandsReloadedPromptTemplate(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "prompts"), 0o755); err != nil {

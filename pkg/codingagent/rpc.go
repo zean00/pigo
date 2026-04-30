@@ -45,6 +45,9 @@ type rpcCommand struct {
 	SkillPaths       []string             `json:"skillPaths,omitempty"`
 	IncludeDefaults  *bool                `json:"includeDefaults,omitempty"`
 	Commands         []SlashCommandInfo   `json:"commands,omitempty"`
+	Flags            []ExtensionFlag      `json:"flags,omitempty"`
+	Value            any                  `json:"value,omitempty"`
+	Status           string               `json:"status,omitempty"`
 	OAuthCredentials *ai.OAuthCredentials `json:"oauthCredentials,omitempty"`
 	OAuthStorePath   string               `json:"oauthStorePath,omitempty"`
 }
@@ -527,6 +530,28 @@ func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse 
 		s.Session.SetExtensionCommands(command.Commands)
 		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true}
 
+	case "register_flags":
+		for _, flag := range command.Flags {
+			s.Session.RegisterExtensionFlag(flag)
+		}
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true}
+
+	case "set_flag":
+		if err := s.Session.SetExtensionFlagValue(command.Name, command.Value); err != nil {
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+		}
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true}
+
+	case "get_flags":
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: map[string]any{"flags": s.Session.ExtensionFlags(), "values": s.Session.ExtensionFlagValues()}}
+
+	case "set_status":
+		s.Session.SetExtensionStatus(command.Name, command.Status)
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true}
+
+	case "get_statuses":
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: map[string]any{"statuses": s.Session.ExtensionStatuses()}}
+
 	case "reload_resources":
 		includeDefaults := true
 		if command.IncludeDefaults != nil {
@@ -537,6 +562,7 @@ func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse 
 			PromptPaths:     command.PromptPaths,
 			SkillPaths:      command.SkillPaths,
 			IncludeDefaults: includeDefaults,
+			Reason:          "reload",
 		})
 		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: map[string]any{"diagnostics": s.Session.ResourceDiagnostics()}}
 

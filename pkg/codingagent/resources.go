@@ -1,6 +1,7 @@
 package codingagent
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -15,6 +16,7 @@ type ResourceLoadOptions struct {
 	PromptPaths     []string
 	SkillPaths      []string
 	IncludeDefaults bool
+	Reason          string
 }
 
 func DefaultAgentDir() string {
@@ -30,13 +32,52 @@ func (s *Session) LoadSlashCommandResources(options ResourceLoadOptions) {
 	if agentDir == "" {
 		agentDir = DefaultAgentDir()
 	}
+	options, extensionDiagnostics := s.discoverExtensionResources(context.Background(), options)
 	prompts, promptDiagnostics := loadPromptTemplateCommands(s.Root, agentDir, options)
 	skills, skillDiagnostics := loadSkillCommands(s.Root, agentDir, options)
 	s.SetPromptTemplates(prompts)
 	s.SetSkills(skills)
 	s.mu.Lock()
-	s.resourceDiagnostics = append(promptDiagnostics, skillDiagnostics...)
+	s.resourceDiagnostics = append(extensionDiagnostics, promptDiagnostics...)
+	s.resourceDiagnostics = append(s.resourceDiagnostics, skillDiagnostics...)
 	s.mu.Unlock()
+}
+
+func (s *Session) discoverExtensionResources(ctx context.Context, options ResourceLoadOptions) (ResourceLoadOptions, []ResourceDiagnostic) {
+	s.mu.Lock()
+	providers := append([]ExtensionResourceProvider(nil), s.resourceProviders...)
+	s.mu.Unlock()
+	if len(providers) == 0 {
+		return options, nil
+	}
+	reason := strings.TrimSpace(options.Reason)
+	if reason == "" {
+		reason = "startup"
+	}
+	event := ExtensionResourceEvent{
+		Type:   "resources_discover",
+		CWD:    s.Root,
+		Reason: reason,
+	}
+	next := options
+	next.PromptPaths = append([]string(nil), options.PromptPaths...)
+	next.SkillPaths = append([]string(nil), options.SkillPaths...)
+	diagnostics := []ResourceDiagnostic{}
+	for _, provider := range providers {
+		result, err := provider(ctx, event)
+		if err != nil {
+			diagnostics = append(diagnostics, ResourceDiagnostic{Type: "warning", Message: "extension resource discovery failed: " + err.Error()})
+			continue
+		}
+		next.PromptPaths = append(next.PromptPaths, result.PromptPaths...)
+		next.SkillPaths = append(next.SkillPaths, result.SkillPaths...)
+		for _, themePath := range result.ThemePaths {
+			if strings.TrimSpace(themePath) != "" {
+				diagnostics = append(diagnostics, ResourceDiagnostic{Type: "warning", Message: "extension theme paths are not supported in headless mode", Path: resolveResourcePath(s.Root, themePath)})
+			}
+		}
+	}
+	return next, diagnostics
 }
 
 func loadPromptTemplateCommands(root, agentDir string, options ResourceLoadOptions) ([]SlashCommandInfo, []ResourceDiagnostic) {

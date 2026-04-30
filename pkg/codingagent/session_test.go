@@ -795,6 +795,81 @@ func TestSessionLoadsPromptAndSkillCommandsFromResources(t *testing.T) {
 	}
 }
 
+func TestSessionLoadsExtensionDiscoveredResources(t *testing.T) {
+	root := t.TempDir()
+	promptDir := filepath.Join(root, "ext-prompts")
+	skillDir := filepath.Join(root, "ext-skills", "ext-skill")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(promptDir, "ext.md"), []byte("---\ndescription: Extension prompt\n---\nRun extension prompt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: ext-skill\ndescription: Extension skill\n---\nUse it.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	session := NewSession(root, nil)
+	session.RegisterExtensionResourceProvider(func(ctx context.Context, event ExtensionResourceEvent) (ExtensionResourceResult, error) {
+		if event.Type != "resources_discover" || event.CWD != root || event.Reason != "reload" {
+			t.Fatalf("event = %#v", event)
+		}
+		return ExtensionResourceResult{
+			PromptPaths: []string{"ext-prompts"},
+			SkillPaths:  []string{filepath.Join("ext-skills", "ext-skill")},
+			ThemePaths:  []string{"theme.json"},
+		}, nil
+	})
+	session.LoadSlashCommandResources(ResourceLoadOptions{IncludeDefaults: false, Reason: "reload"})
+
+	found := map[string]bool{}
+	for _, command := range session.GetSlashCommands() {
+		found[command.Name+"|"+command.Source] = true
+	}
+	if !found["ext|prompt"] || !found["skill:ext-skill|skill"] {
+		t.Fatalf("commands = %#v", session.GetSlashCommands())
+	}
+	diagnostics := session.ResourceDiagnostics()
+	if len(diagnostics) != 1 || !strings.Contains(diagnostics[0].Message, "theme paths") {
+		t.Fatalf("diagnostics = %#v", diagnostics)
+	}
+}
+
+func TestSessionLifecycleEventsForSwitchAndFork(t *testing.T) {
+	root := t.TempDir()
+	storePath := filepath.Join(root, "session.jsonl")
+	session := NewSession(root, nil)
+	session.Store = NewSessionStore(storePath)
+	session.NewSession()
+	if err := session.appendEntry(SessionEntry{Type: "message", Message: map[string]any{"role": "user", "text": "hello"}}); err != nil {
+		t.Fatal(err)
+	}
+	userID := session.leafID
+
+	if _, _, err := session.Fork(userID); err != nil {
+		t.Fatal(err)
+	}
+	seenBeforeFork := false
+	seenShutdown := false
+	seenStart := false
+	for _, event := range session.Events {
+		switch event["type"] {
+		case "session_before_fork":
+			seenBeforeFork = event["entryID"] == userID
+		case "session_shutdown":
+			seenShutdown = event["reason"] == "fork"
+		case "session_start":
+			seenStart = event["reason"] == "fork"
+		}
+	}
+	if !seenBeforeFork || !seenShutdown || !seenStart {
+		t.Fatalf("events = %#v", session.Events)
+	}
+}
+
 func TestSessionResourceDiagnosticsAndPrecedence(t *testing.T) {
 	root := t.TempDir()
 	agentDir := filepath.Join(t.TempDir(), "agent")

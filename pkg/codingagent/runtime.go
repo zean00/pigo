@@ -64,6 +64,10 @@ type Session struct {
 	extensionHandlers   map[string]ExtensionCommandHandler
 	extensionTools      []agentcore.Tool
 	extensionToolSpecs  []ai.Tool
+	extensionFlags      map[string]ExtensionFlag
+	extensionFlagValues map[string]any
+	extensionStatuses   map[string]string
+	resourceProviders   []ExtensionResourceProvider
 	promptTemplates     []SlashCommandInfo
 	skills              []SlashCommandInfo
 	resourceDiagnostics []ResourceDiagnostic
@@ -126,6 +130,28 @@ type ExtensionCommandResult struct {
 }
 
 type ExtensionCommandHandler func(ctx context.Context, command ExtensionCommandContext) (ExtensionCommandResult, error)
+
+type ExtensionFlag struct {
+	Name          string `json:"name"`
+	Description   string `json:"description,omitempty"`
+	Type          string `json:"type,omitempty"`
+	Default       any    `json:"default,omitempty"`
+	ExtensionPath string `json:"extensionPath,omitempty"`
+}
+
+type ExtensionResourceEvent struct {
+	Type   string `json:"type"`
+	CWD    string `json:"cwd"`
+	Reason string `json:"reason"`
+}
+
+type ExtensionResourceResult struct {
+	SkillPaths  []string `json:"skillPaths,omitempty"`
+	PromptPaths []string `json:"promptPaths,omitempty"`
+	ThemePaths  []string `json:"themePaths,omitempty"`
+}
+
+type ExtensionResourceProvider func(ctx context.Context, event ExtensionResourceEvent) (ExtensionResourceResult, error)
 
 const (
 	bashExecutionTextPrefix        = "Ran `%s`\n"
@@ -241,6 +267,128 @@ func (s *Session) SetExtensionCommands(commands []SlashCommandInfo) {
 	defer s.mu.Unlock()
 	s.extensionCommands = copySlashCommands(commands)
 	s.extensionHandlers = nil
+}
+
+func (s *Session) RegisterExtensionFlag(flag ExtensionFlag) {
+	flag.Name = strings.TrimSpace(flag.Name)
+	if flag.Name == "" {
+		return
+	}
+	if flag.Type == "" {
+		switch flag.Default.(type) {
+		case bool:
+			flag.Type = "boolean"
+		default:
+			flag.Type = "string"
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.extensionFlags == nil {
+		s.extensionFlags = map[string]ExtensionFlag{}
+	}
+	s.extensionFlags[flag.Name] = flag
+	if flag.Default != nil {
+		if s.extensionFlagValues == nil {
+			s.extensionFlagValues = map[string]any{}
+		}
+		if _, exists := s.extensionFlagValues[flag.Name]; !exists {
+			s.extensionFlagValues[flag.Name] = flag.Default
+		}
+	}
+}
+
+func (s *Session) SetExtensionFlagValue(name string, value any) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("missing flag name")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	flag, registered := s.extensionFlags[name]
+	if registered {
+		switch flag.Type {
+		case "boolean":
+			if _, ok := value.(bool); !ok {
+				return fmt.Errorf("extension flag %s expects a boolean value", name)
+			}
+		case "string", "":
+			if _, ok := value.(string); !ok {
+				return fmt.Errorf("extension flag %s expects a string value", name)
+			}
+		}
+	}
+	if s.extensionFlagValues == nil {
+		s.extensionFlagValues = map[string]any{}
+	}
+	s.extensionFlagValues[name] = value
+	return nil
+}
+
+func (s *Session) ExtensionFlagValue(name string) (any, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.extensionFlagValues[strings.TrimSpace(name)]
+	return value, ok
+}
+
+func (s *Session) ExtensionFlags() []ExtensionFlag {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	flags := make([]ExtensionFlag, 0, len(s.extensionFlags))
+	for _, flag := range s.extensionFlags {
+		flags = append(flags, flag)
+	}
+	sort.Slice(flags, func(i, j int) bool {
+		return flags[i].Name < flags[j].Name
+	})
+	return flags
+}
+
+func (s *Session) ExtensionFlagValues() map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	values := make(map[string]any, len(s.extensionFlagValues))
+	for key, value := range s.extensionFlagValues {
+		values[key] = value
+	}
+	return values
+}
+
+func (s *Session) SetExtensionStatus(key, status string) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.extensionStatuses == nil {
+		s.extensionStatuses = map[string]string{}
+	}
+	if strings.TrimSpace(status) == "" {
+		delete(s.extensionStatuses, key)
+		return
+	}
+	s.extensionStatuses[key] = status
+}
+
+func (s *Session) ExtensionStatuses() map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	statuses := make(map[string]string, len(s.extensionStatuses))
+	for key, value := range s.extensionStatuses {
+		statuses[key] = value
+	}
+	return statuses
+}
+
+func (s *Session) RegisterExtensionResourceProvider(provider ExtensionResourceProvider) {
+	if provider == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.resourceProviders = append(s.resourceProviders, provider)
 }
 
 func (s *Session) RegisterExtensionCommand(command SlashCommandInfo, handler ExtensionCommandHandler) {
@@ -898,6 +1046,28 @@ func (s *Session) emitSessionEvent(eventType string, data map[string]any) {
 	s.Events = append(s.Events, event)
 }
 
+func (s *Session) EmitSessionStart(reason, previousSessionFile string) {
+	data := map[string]any{"reason": strings.TrimSpace(reason)}
+	if data["reason"] == "" {
+		data["reason"] = "startup"
+	}
+	if previousSessionFile = strings.TrimSpace(previousSessionFile); previousSessionFile != "" {
+		data["previousSessionFile"] = previousSessionFile
+	}
+	s.emitSessionEvent("session_start", data)
+}
+
+func (s *Session) EmitSessionShutdown(reason, targetSessionFile string) {
+	data := map[string]any{"reason": strings.TrimSpace(reason)}
+	if data["reason"] == "" {
+		data["reason"] = "quit"
+	}
+	if targetSessionFile = strings.TrimSpace(targetSessionFile); targetSessionFile != "" {
+		data["targetSessionFile"] = targetSessionFile
+	}
+	s.emitSessionEvent("session_shutdown", data)
+}
+
 func (s *Session) prompt(ctx context.Context, prompt string, attachments []PromptAttachment, retrying bool) error {
 	streamState := promptStreamState{activeMessageIdx: -1}
 	if s.IsStreaming {
@@ -1322,6 +1492,10 @@ func (s *Session) NewSession() {
 }
 
 func (s *Session) NewSessionWithParent(parentSession string) {
+	previousSessionFile := ""
+	if s.Store != nil {
+		previousSessionFile = s.Store.Path
+	}
 	s.turnIndex = 0
 	s.Events = nil
 	s.Messages = nil
@@ -1363,6 +1537,7 @@ func (s *Session) NewSessionWithParent(parentSession string) {
 			}})
 		}
 	}
+	s.EmitSessionStart("new", previousSessionFile)
 }
 
 func (s *Session) nextSessionPathOrCurrent() string {
@@ -1808,17 +1983,29 @@ func (s *Session) Share(outputPath string) (string, error) {
 }
 
 func (s *Session) SwitchSession(sessionPath string) error {
+	return s.switchSession(sessionPath, "resume")
+}
+
+func (s *Session) switchSession(sessionPath, reason string) error {
 	sessionPath = strings.TrimSpace(sessionPath)
 	if sessionPath == "" {
 		return fmt.Errorf("missing sessionPath")
+	}
+	previousSessionFile := ""
+	if s.Store != nil {
+		previousSessionFile = s.Store.Path
 	}
 	store := NewSessionStore(sessionPath)
 	entries, err := store.ReadEntries()
 	if err != nil {
 		return err
 	}
+	s.EmitSessionShutdown(reason, sessionPath)
+	shutdownEvents := s.RuntimeEvents()
 	s.Store = store
 	s.loadSession(entries)
+	s.Events = append(shutdownEvents, s.Events...)
+	s.EmitSessionStart(reason, previousSessionFile)
 	return nil
 }
 
@@ -1860,11 +2047,12 @@ func (s *Session) Fork(entryID string) (string, bool, error) {
 	if s.Store != nil {
 		header.ParentSession = s.Store.Path
 	}
+	s.emitSessionEvent("session_before_fork", map[string]any{"entryID": entryID, "targetSessionFile": targetPath})
 	sessionEntries := append([]SessionEntry{header}, path...)
 	if err := writeSessionEntries(targetPath, sessionEntries); err != nil {
 		return "", false, err
 	}
-	if err := s.SwitchSession(targetPath); err != nil {
+	if err := s.switchSession(targetPath, "fork"); err != nil {
 		return "", false, err
 	}
 	return selectedText, false, nil
@@ -1891,7 +2079,7 @@ func (s *Session) Clone() (bool, error) {
 	if err := writeSessionEntries(targetPath, sessionEntries); err != nil {
 		return false, err
 	}
-	if err := s.SwitchSession(targetPath); err != nil {
+	if err := s.switchSession(targetPath, "new"); err != nil {
 		return false, err
 	}
 	return false, nil

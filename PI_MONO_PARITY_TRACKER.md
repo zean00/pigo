@@ -376,12 +376,13 @@ Upstream comparison surface in `pi-mono`:
   - `pigo` has session-facing slots for extension commands, prompt templates, and skills
   - extension commands can be registered with Go handlers that rewrite prompts or handle commands without invoking the model
   - extension tools can be registered with tool specs and execute in the same provider loop as built-in tools
+  - extension flags, status text, resource discovery, and session lifecycle events are available to headless sessions/RPC clients
 
 - `DONE` prompt/skill resource diagnostics, collision handling, and reload visibility
   - duplicate prompt and skill names are detected while preserving first-match precedence
   - invalid or missing explicit resource paths now produce diagnostics
   - invalid skill metadata is surfaced as diagnostics instead of silently registering unusable commands
-  - `get_commands` and `reload_resources` expose the current diagnostics to RPC clients
+  - `get_commands` and `reload_resources` expose the current diagnostics to RPC clients, including extension-discovered resource warnings
 
 ### RPC / remote control
 
@@ -411,7 +412,7 @@ Upstream comparison surface in `pi-mono`:
 
 - `DONE` extension runtime parity for headless-safe command flows
   - TypeScript still has interactive/UI-only extension APIs that remain out of scope
-  - `pigo` now provides executable extension command and tool registration for headless sessions
+  - `pigo` now provides executable extension command/tool registration, extension flags/statuses, resource discovery hooks, and lifecycle events for headless sessions
 
 - `DONE` prompt/resource/skill behavior depth for the headless target
   - base support plus diagnostics/collision/reload visibility exist
@@ -448,6 +449,7 @@ No remaining `PARTIAL` or `MISSING` parity items are tracked for the Go headless
 - `DONE` `codingagent`: prompt/skill resource diagnostics, collision handling, validation, and RPC reload visibility
 - `DONE` `codingagent`: project context file loading parity for `AGENTS.md` / `CLAUDE.md` style context in headless prompts
 - `DONE` `codingagent`: extension runtime, loader, wrapper, and SDK-facing command/tool parity for headless-safe extension flows
+- `DONE` `codingagent`: extension flag/status metadata, resource discovery hooks, and lifecycle events for headless-safe extension flows
 - `DONE` `codingagent`: richer session-manager and compaction workflow semantics, including branch-summary edge cases, abort/cancel events, context estimation, and extension hooks
 - `DONE` `ai`: non-OpenAI provider long-tail fidelity against upstream provider-specific tests and quirks
 - `DONE` `agentcore` / `ai`: exact normalized event payload and stream shape gaps where downstream clients depend on TS-compatible objects
@@ -468,6 +470,7 @@ No remaining `PARTIAL` or `MISSING` parity items are tracked for the Go headless
 - `DONE` `codingagent`: broader conformance coverage against upstream headless-relevant suites
 - `DONE` classify remaining interactive/UI-only and TS-SDK-only surfaces as `OOS` with rationale
 - `DONE` `codingagent`: extension-registered tools participate in headless provider/tool loops
+- `DONE` `codingagent`: extension flags/statuses, resource discovery, and session lifecycle events are exposed in the headless runtime/RPC surface
 
 ## Bottom Line
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,13 +20,22 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
+const maxToolOutputBytes = 20_000
+
 type AssistantTurn = agentcore.AssistantTurn
 
 type SessionInput struct {
-	WorkspaceFiles map[string]string
-	Prompts        []string
-	Turns          []AssistantTurn
-	ExpectedFiles  []string
+	WorkspaceFiles     map[string]string
+	Prompts            []string
+	Turns              []AssistantTurn
+	ExpectedFiles      []string
+	Provider           string
+	ModelID            string
+	ThinkingLevel      string
+	AutoRetry          bool
+	AutoCompaction     bool
+	ShellCommandPrefix string
+	ToolOutputLimit    int
 }
 
 type SessionResult struct {
@@ -43,6 +53,20 @@ func RunHeadlessSession(ctx context.Context, root string, input SessionInput) (S
 	}
 
 	session := NewSession(root, input.Turns)
+	if input.Provider != "" || input.ModelID != "" {
+		if _, err := session.SetModel(input.Provider, input.ModelID); err != nil {
+			return SessionResult{}, err
+		}
+	}
+	if input.ThinkingLevel != "" {
+		if err := session.SetThinkingLevel(input.ThinkingLevel); err != nil {
+			return SessionResult{}, err
+		}
+	}
+	session.AutoRetry = input.AutoRetry
+	session.AutoCompaction = input.AutoCompaction
+	session.ShellCommandPrefix = input.ShellCommandPrefix
+	session.ToolOutputLimit = input.ToolOutputLimit
 	for _, prompt := range input.Prompts {
 		if err := session.Prompt(ctx, prompt); err != nil {
 			return SessionResult{}, err
@@ -71,12 +95,26 @@ func RunHeadlessSession(ctx context.Context, root string, input SessionInput) (S
 }
 
 func BuiltinTools(root string) []agentcore.Tool {
+	return BuiltinToolsWithOptions(root, BuiltinToolOptions{})
+}
+
+type BuiltinToolOptions struct {
+	OutputLimit        int
+	ShellCommandPrefix string
+}
+
+func BuiltinToolsWithOptions(root string, options BuiltinToolOptions) []agentcore.Tool {
+	outputLimit := options.OutputLimit
+	if outputLimit <= 0 {
+		outputLimit = maxToolOutputBytes
+	}
 	return []agentcore.Tool{
 		{
 			Name: "bash",
 			Execute: func(ctx context.Context, call ai.ContentBlock) agentcore.ToolResult {
 				command, _ := call.Arguments["command"].(string)
 				timeoutSeconds, _ := call.Arguments["timeout"].(float64)
+				command = applyShellCommandPrefix(command, options.ShellCommandPrefix)
 				output, exitCode, err := RunBashCommand(ctx, root, command, timeoutSeconds)
 				if err != nil {
 					return agentcore.ToolResult{Text: err.Error(), IsError: true}
@@ -84,13 +122,16 @@ func BuiltinTools(root string) []agentcore.Tool {
 				if output == "" {
 					output = "(no output)"
 				}
+				output, truncated := truncateToolOutput(output, outputLimit)
+				details := map[string]any{"command": command, "exitCode": exitCode, "truncated": truncated}
 				if exitCode != 0 {
 					return agentcore.ToolResult{
 						Text:    fmt.Sprintf("%s\n\nCommand exited with code %d", strings.TrimRight(output, "\n"), exitCode),
+						Details: details,
 						IsError: true,
 					}
 				}
-				return agentcore.ToolResult{Text: output}
+				return agentcore.ToolResult{Text: output, Details: details}
 			},
 		},
 		{
@@ -101,7 +142,10 @@ func BuiltinTools(root string) []agentcore.Tool {
 				if err := WriteWorkspaceFile(root, path, content); err != nil {
 					return agentcore.ToolResult{Text: err.Error(), IsError: true}
 				}
-				return agentcore.ToolResult{Text: fmt.Sprintf("Successfully wrote %d bytes to %s", len(content), path)}
+				return agentcore.ToolResult{
+					Text:    fmt.Sprintf("Successfully wrote %d bytes to %s", len(content), path),
+					Details: map[string]any{"modifiedFiles": []string{path}, "bytes": len(content)},
+				}
 			},
 		},
 		{
@@ -112,11 +156,17 @@ func BuiltinTools(root string) []agentcore.Tool {
 				if err != nil {
 					return agentcore.ToolResult{Text: err.Error(), IsError: true}
 				}
-				data, err := os.ReadFile(absolutePath)
+				data, totalBytes, truncated, err := readWorkspaceFileBounded(absolutePath, outputLimit)
 				if err != nil {
 					return agentcore.ToolResult{Text: err.Error(), IsError: true}
 				}
-				return agentcore.ToolResult{Text: string(data)}
+				if isLikelyBinary(data) {
+					return agentcore.ToolResult{Text: fmt.Sprintf("%s appears to be a binary file and was not read.", path), IsError: true}
+				}
+				return agentcore.ToolResult{
+					Text:    string(data),
+					Details: map[string]any{"readFiles": []string{path}, "bytes": totalBytes, "truncated": truncated},
+				}
 			},
 		},
 		{
@@ -131,7 +181,8 @@ func BuiltinTools(root string) []agentcore.Tool {
 					return agentcore.ToolResult{Text: err.Error(), IsError: true}
 				}
 				return agentcore.ToolResult{
-					Text: fmt.Sprintf("Successfully replaced %d block(s) in %s.", len(edits), path),
+					Text:    fmt.Sprintf("Successfully replaced %d block(s) in %s.", len(edits), path),
+					Details: map[string]any{"modifiedFiles": []string{path}, "editCount": len(edits)},
 				}
 			},
 		},
@@ -158,7 +209,8 @@ func BuiltinTools(root string) []agentcore.Tool {
 					}
 					names = append(names, name)
 				}
-				return agentcore.ToolResult{Text: strings.Join(names, "\n")}
+				text, truncated := truncateToolOutput(strings.Join(names, "\n"), outputLimit)
+				return agentcore.ToolResult{Text: text, Details: map[string]any{"path": path, "entries": len(names), "truncated": truncated}}
 			},
 		},
 		{
@@ -173,7 +225,8 @@ func BuiltinTools(root string) []agentcore.Tool {
 				if err != nil {
 					return agentcore.ToolResult{Text: err.Error(), IsError: true}
 				}
-				return agentcore.ToolResult{Text: text}
+				text, truncated := truncateToolOutput(text, outputLimit)
+				return agentcore.ToolResult{Text: text, Details: map[string]any{"path": path, "pattern": pattern, "truncated": truncated}}
 			},
 		},
 		{
@@ -188,10 +241,86 @@ func BuiltinTools(root string) []agentcore.Tool {
 				if err != nil {
 					return agentcore.ToolResult{Text: err.Error(), IsError: true}
 				}
-				return agentcore.ToolResult{Text: text}
+				text, truncated := truncateToolOutput(text, outputLimit)
+				return agentcore.ToolResult{Text: text, Details: map[string]any{"path": path, "pattern": pattern, "truncated": truncated}}
 			},
 		},
 	}
+}
+
+func applyShellCommandPrefix(command, prefix string) string {
+	command = strings.TrimSpace(command)
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" || command == "" {
+		return command
+	}
+	return prefix + " " + command
+}
+
+func readWorkspaceFileBounded(path string, limit int) ([]byte, int64, bool, error) {
+	if limit <= 0 {
+		limit = maxToolOutputBytes
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, 0, false, err
+	}
+	totalBytes := info.Size()
+	if totalBytes <= int64(limit) {
+		data, err := io.ReadAll(file)
+		return data, totalBytes, false, err
+	}
+	if limit < 200 {
+		data := make([]byte, limit)
+		n, err := io.ReadFull(file, data)
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			return nil, 0, false, err
+		}
+		return data[:n], totalBytes, true, nil
+	}
+	head := limit / 2
+	tail := limit - head - 96
+	if tail < 0 {
+		tail = 0
+	}
+	headBytes := make([]byte, head)
+	headRead, err := io.ReadFull(file, headBytes)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return nil, 0, false, err
+	}
+	tailBytes := make([]byte, tail)
+	tailRead := 0
+	if tail > 0 {
+		n, err := file.ReadAt(tailBytes, totalBytes-int64(tail))
+		if err != nil && err != io.EOF {
+			return nil, 0, false, err
+		}
+		tailRead = n
+	}
+	omitted := totalBytes - int64(headRead) - int64(tailRead)
+	preview := fmt.Sprintf("%s\n\n[... truncated %d bytes ...]\n\n%s", string(headBytes[:headRead]), omitted, string(tailBytes[:tailRead]))
+	return []byte(preview), totalBytes, true, nil
+}
+
+func truncateToolOutput(text string, limit int) (string, bool) {
+	if limit <= 0 || len(text) <= limit {
+		return text, false
+	}
+	if limit < 200 {
+		return text[:limit], true
+	}
+	head := limit / 2
+	tail := limit - head - 96
+	if tail < 0 {
+		tail = 0
+	}
+	omitted := len(text) - head - tail
+	return fmt.Sprintf("%s\n\n[... truncated %d bytes ...]\n\n%s", text[:head], omitted, text[len(text)-tail:]), true
 }
 
 func BuiltinToolSpecs() []ai.Tool {
@@ -755,11 +884,20 @@ func GrepWorkspace(root, path, pattern string) (string, error) {
 		if walkErr != nil {
 			return walkErr
 		}
+		if shouldSkipWorkspaceEntry(entry) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if entry.IsDir() {
 			return nil
 		}
 		data, err := os.ReadFile(current)
 		if err != nil {
+			return nil
+		}
+		if isLikelyBinary(data) {
 			return nil
 		}
 		if strings.Contains(string(data), pattern) {
@@ -787,6 +925,12 @@ func FindWorkspace(root, path, pattern string) (string, error) {
 		if walkErr != nil {
 			return walkErr
 		}
+		if current != absolutePath && shouldSkipWorkspaceEntry(entry) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if current == absolutePath {
 			return nil
 		}
@@ -808,6 +952,32 @@ func FindWorkspace(root, path, pattern string) (string, error) {
 		return "", err
 	}
 	return strings.Join(matches, "\n"), nil
+}
+
+func shouldSkipWorkspaceEntry(entry os.DirEntry) bool {
+	name := entry.Name()
+	switch name {
+	case ".git", "node_modules", ".next", "dist", "build", "vendor":
+		return true
+	default:
+		return false
+	}
+}
+
+func isLikelyBinary(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	limit := len(data)
+	if limit > 8000 {
+		limit = 8000
+	}
+	for _, b := range data[:limit] {
+		if b == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func matchesFindPattern(relativePath, name, pattern string) bool {

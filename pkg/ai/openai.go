@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"sort"
 	"strings"
 )
 
@@ -45,17 +44,25 @@ type openAIChoice struct {
 }
 
 type openAIMessage struct {
-	Role       string           `json:"role"`
-	Content    any              `json:"content,omitempty"`
-	ToolCalls  []openAICallSpec `json:"tool_calls,omitempty"`
-	ToolCallID string           `json:"tool_call_id,omitempty"`
-	Name       string           `json:"name,omitempty"`
+	Role             string           `json:"role"`
+	Content          any              `json:"content,omitempty"`
+	ToolCalls        []openAICallSpec `json:"tool_calls,omitempty"`
+	ToolCallID       string           `json:"tool_call_id,omitempty"`
+	Name             string           `json:"name,omitempty"`
+	ReasoningContent string           `json:"reasoning_content,omitempty"`
+	Reasoning        string           `json:"reasoning,omitempty"`
+	ReasoningText    string           `json:"reasoning_text,omitempty"`
+	ReasoningDetails []map[string]any `json:"reasoning_details,omitempty"`
 }
 
 type openAIUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens        int `json:"prompt_tokens"`
+	CompletionTokens    int `json:"completion_tokens"`
+	TotalTokens         int `json:"total_tokens"`
+	PromptTokensDetails struct {
+		CachedTokens     int `json:"cached_tokens"`
+		CacheWriteTokens int `json:"cache_write_tokens"`
+	} `json:"prompt_tokens_details,omitempty"`
 }
 
 type openAIChatTool struct {
@@ -84,11 +91,13 @@ type openAIArguments struct {
 type openAIStreamChunk struct {
 	ID      string               `json:"id,omitempty"`
 	Choices []openAIStreamChoice `json:"choices"`
+	Usage   *openAIUsage         `json:"usage,omitempty"`
 }
 
 type openAIStreamChoice struct {
 	Delta        openAIMessage `json:"delta"`
 	FinishReason string        `json:"finish_reason"`
+	Usage        *openAIUsage  `json:"usage,omitempty"`
 }
 
 type openAIResponsesRequest struct {
@@ -234,6 +243,28 @@ type openAIStreamingCall struct {
 	ID        string
 	Name      string
 	Arguments bytes.Buffer
+	BlockIdx  int
+}
+
+type openAICompat struct {
+	SupportsStore                            bool
+	SupportsDeveloperRole                    bool
+	SupportsUsageInStreaming                 bool
+	SupportsReasoningEffort                  bool
+	ReasoningEffortMap                       map[string]string
+	MaxTokensField                           string
+	ThinkingFormat                           string
+	ZAIToolStream                            bool
+	SupportsStrictMode                       bool
+	CacheControlFormat                       string
+	SendSessionAffinityHeaders               bool
+	SupportsLongCacheRetention               bool
+	OpenRouterRouting                        map[string]any
+	VercelGatewayRouting                     map[string]any
+	RequiresToolResultName                   bool
+	RequiresAssistantAfterToolResult         bool
+	RequiresThinkingAsText                   bool
+	RequiresReasoningContentOnAssistantReply bool
 }
 
 func init() {
@@ -344,6 +375,7 @@ func WithOpenAIBaseURL(baseURL string) OpenAIProviderOption {
 func (provider *openAIProvider) Complete(ctx context.Context, req CompletionRequest) (NormalizedResult, []NormalizedEvent, error) {
 	providerSpec, hasProviderSpec := ProviderSpecForProvider(req.Provider)
 	useResponsesAPI := shouldUseOpenAIResponses(req.Provider, req.Model)
+	resolvedModel, _ := resolveCompletionModel(req)
 	apiKey := strings.TrimSpace(req.Options.APIKey)
 	if apiKey == "" && hasProviderSpec {
 		apiKey, _ = ProviderAPIKey(req.Provider)
@@ -400,50 +432,10 @@ func (provider *openAIProvider) Complete(ctx context.Context, req CompletionRequ
 	var data []byte
 	var err error
 	if useResponsesAPI {
-		payload := toOpenAIResponsesRequest(req)
+		payload := toOpenAIResponsesRequest(req, resolvedModel)
 		requestBody = payload
 	} else {
-		payload := openAIRequest{
-			Model:    req.Model,
-			Messages: toOpenAIMessages(req.Messages),
-			Stream:   req.Options.Stream,
-		}
-		if sessionID := cacheSessionID(req.Options); sessionID != "" {
-			payload.PromptCacheKey = sessionID
-			payload.PromptCacheRetention = cacheRetentionValue(req.Options)
-		}
-		if req.Options.MaxTokens > 0 {
-			payload.MaxTokens = req.Options.MaxTokens
-		}
-		if req.Options.Temperature != nil {
-			payload.Temperature = req.Options.Temperature
-		}
-		if len(req.Tools) > 0 {
-			payload.Tools = make([]openAIChatTool, 0, len(req.Tools))
-			payload.ToolChoice = strings.TrimSpace(req.Options.ToolChoice)
-			if payload.ToolChoice == "" {
-				payload.ToolChoice = "auto"
-			}
-			for _, tool := range req.Tools {
-				parameters := tool.Parameters
-				if parameters == nil {
-					parameters = map[string]any{
-						"type":                 "object",
-						"properties":           map[string]any{},
-						"additionalProperties": true,
-					}
-				}
-				payload.Tools = append(payload.Tools, openAIChatTool{
-					Type: "function",
-					Function: openAIFunctionDescriptor{
-						Name:        tool.Name,
-						Description: strings.TrimSpace(tool.Description),
-						Parameters:  parameters,
-					},
-				})
-			}
-		}
-		requestBody = payload
+		requestBody = buildOpenAIChatCompletionsRequest(req, resolvedModel)
 	}
 
 	requestBody, err = applyPayloadHook(req, requestBody)
@@ -476,9 +468,18 @@ func (provider *openAIProvider) Complete(ctx context.Context, req CompletionRequ
 			httpReq.Header.Set("Accept", "text/event-stream")
 		}
 		if sessionID := cacheSessionID(req.Options); sessionID != "" {
-			httpReq.Header.Set("session_id", sessionID)
-			httpReq.Header.Set("x-client-request-id", sessionID)
-			httpReq.Header.Set("x-session-affinity", sessionID)
+			if useResponsesAPI {
+				httpReq.Header.Set("session_id", sessionID)
+				httpReq.Header.Set("x-client-request-id", sessionID)
+				httpReq.Header.Set("x-session-affinity", sessionID)
+			} else if model, ok := resolveCompletionModel(req); ok {
+				compat := getOpenAICompat(model)
+				if compat.SendSessionAffinityHeaders {
+					httpReq.Header.Set("session_id", sessionID)
+					httpReq.Header.Set("x-client-request-id", sessionID)
+					httpReq.Header.Set("x-session-affinity", sessionID)
+				}
+			}
 		}
 		if hasProviderSpec {
 			for key, value := range providerSpec.DefaultHeader {
@@ -525,9 +526,9 @@ func (provider *openAIProvider) Complete(ctx context.Context, req CompletionRequ
 			}
 			body, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
-			errorText := strings.TrimSpace(string(body))
-			if attempt < maxRetries && shouldRetryHTTPStatus(resp.StatusCode, errorText) {
-				serverDelay := retryAfterDelay(resp, errorText)
+			rawErrorText := strings.TrimSpace(string(body))
+			if attempt < maxRetries && shouldRetryHTTPStatus(resp.StatusCode, rawErrorText) {
+				serverDelay := retryAfterDelay(resp, rawErrorText)
 				if err := validateRetryDelay(req.Options, serverDelay); err != nil {
 					return NormalizedResult{}, nil, err
 				}
@@ -536,6 +537,7 @@ func (provider *openAIProvider) Complete(ctx context.Context, req CompletionRequ
 				}
 				continue
 			}
+			errorText := formatOpenAIHTTPError(rawErrorText)
 			if errorText == "" {
 				return NormalizedResult{}, nil, fmt.Errorf("openai API error: %s", resp.Status)
 			}
@@ -547,7 +549,7 @@ func (provider *openAIProvider) Complete(ctx context.Context, req CompletionRequ
 		}
 
 		if req.Options.Stream && !useResponsesAPI {
-			result, events, streamErr := openAIStreamToResult(resp.Body)
+			result, events, streamErr := openAIStreamToResult(resp.Body, resolvedModel)
 			_ = resp.Body.Close()
 			if streamErr == nil {
 				return result, events, nil
@@ -563,7 +565,7 @@ func (provider *openAIProvider) Complete(ctx context.Context, req CompletionRequ
 
 		if useResponsesAPI {
 			if req.Options.Stream {
-				result, events, streamErr := openAIResponsesSSEToResult(resp.Body)
+				result, events, streamErr := openAIResponsesSSEToResult(resp.Body, resolvedModel)
 				_ = resp.Body.Close()
 				if streamErr == nil {
 					return result, events, nil
@@ -576,7 +578,7 @@ func (provider *openAIProvider) Complete(ctx context.Context, req CompletionRequ
 				}
 				return NormalizedResult{}, nil, streamErr
 			}
-			result, events, responseErr := openAIResponsesToResult(resp.Body)
+			result, events, responseErr := openAIResponsesToResult(resp.Body, resolvedModel)
 			_ = resp.Body.Close()
 			if responseErr != nil {
 				return NormalizedResult{}, nil, responseErr
@@ -598,13 +600,7 @@ func (provider *openAIProvider) Complete(ctx context.Context, req CompletionRequ
 		result := openAIChoiceToNormalized(completion.Choices[0])
 		result.ResponseID = completion.ID
 		if completion.Usage != nil {
-			result.Usage = &Usage{
-				Input:       completion.Usage.PromptTokens,
-				Output:      completion.Usage.CompletionTokens,
-				CacheRead:   0,
-				CacheWrite:  0,
-				TotalTokens: completion.Usage.TotalTokens,
-			}
+			result.Usage = normalizeOpenAIChatUsage(completion.Usage, resolvedModel)
 		}
 		return result, AssistantEvents(result.contentBlocks(), result.StopReason), nil
 	}
@@ -629,7 +625,7 @@ func shouldUseOpenAIResponses(provider, model string) bool {
 	return false
 }
 
-func toOpenAIResponsesRequest(req CompletionRequest) openAIResponsesRequest {
+func toOpenAIResponsesRequest(req CompletionRequest, model Model) openAIResponsesRequest {
 	payload := openAIResponsesRequest{
 		Model:  req.Model,
 		Input:  make([]any, 0, len(req.Messages)*2),
@@ -646,50 +642,83 @@ func toOpenAIResponsesRequest(req CompletionRequest) openAIResponsesRequest {
 		payload.Temperature = req.Options.Temperature
 	}
 
+	supportsImages := modelSupportsInput(model, "image")
 	for _, message := range req.Messages {
 		switch message.Role {
-		case "user":
-			parts := messageContentBlocks(message.Content)
-			content := make([]string, 0, len(parts))
-			for _, block := range parts {
-				if block.Type == "text" && strings.TrimSpace(block.Text) != "" {
-					content = append(content, block.Text)
-				}
-			}
-			if len(content) == 0 {
-				contentText := MessageText(message)
-				if strings.TrimSpace(contentText) != "" {
-					content = append(content, contentText)
-				}
-			}
-			joined := strings.Join(content, "")
-			if strings.TrimSpace(joined) == "" {
+		case "system":
+			text := strings.TrimSpace(MessageText(message))
+			if text == "" {
 				continue
 			}
 			payload.Input = append(payload.Input, map[string]any{
-				"role": "user",
+				"role": "system",
 				"content": []map[string]any{{
 					"type": "input_text",
-					"text": joined,
+					"text": text,
 				}},
 			})
-
-		case "assistant":
-			text := ""
+		case "user":
+			parts := make([]map[string]any, 0)
 			for _, block := range messageContentBlocks(message.Content) {
 				switch block.Type {
 				case "text":
 					if strings.TrimSpace(block.Text) != "" {
-						if text == "" {
-							text = block.Text
-						} else {
-							text += block.Text
-						}
+						parts = append(parts, map[string]any{
+							"type": "input_text",
+							"text": block.Text,
+						})
+					}
+				case "image":
+					if supportsImages && strings.TrimSpace(block.Data) != "" && strings.TrimSpace(block.MimeType) != "" {
+						parts = append(parts, map[string]any{
+							"type":      "input_image",
+							"detail":    "auto",
+							"image_url": "data:" + block.MimeType + ";base64," + block.Data,
+						})
+					}
+				}
+			}
+			if len(parts) == 0 {
+				contentText := strings.TrimSpace(MessageText(message))
+				if contentText != "" {
+					parts = append(parts, map[string]any{
+						"type": "input_text",
+						"text": contentText,
+					})
+				}
+			}
+			if len(parts) == 0 {
+				continue
+			}
+			payload.Input = append(payload.Input, map[string]any{
+				"role":    "user",
+				"content": parts,
+			})
+
+		case "assistant":
+			isDifferentModel := message.Model != "" && message.Model != model.ID && message.Provider == model.Provider && message.API == model.API
+			for _, block := range messageContentBlocks(message.Content) {
+				switch block.Type {
+				case "text":
+					if strings.TrimSpace(block.Text) != "" {
+						payload.Input = append(payload.Input, map[string]any{
+							"type":   "message",
+							"role":   "assistant",
+							"status": "completed",
+							"content": []map[string]any{{
+								"type":        "output_text",
+								"text":        block.Text,
+								"annotations": []any{},
+							}},
+						})
 					}
 				case "toolCall":
 					callID, itemID := splitToolCallID(block.ID)
 					if callID == "" {
 						continue
+					}
+					if isDifferentModel && strings.HasPrefix(itemID, "fc_") {
+						itemID = ""
 					}
 					arguments := "{}"
 					if marshaled, err := json.Marshal(block.Arguments); err == nil {
@@ -707,27 +736,27 @@ func toOpenAIResponsesRequest(req CompletionRequest) openAIResponsesRequest {
 					payload.Input = append(payload.Input, item)
 				}
 			}
-			if strings.TrimSpace(text) != "" {
-				payload.Input = append(payload.Input, map[string]any{
-					"type": "message",
-					"role": "assistant",
-					"content": []map[string]any{{
-						"type": "output_text",
-						"text": text,
-					}},
-				})
-			}
 
 		case "toolResult":
 			callID, _ := splitToolCallID(message.ToolCallID)
 			if callID == "" {
 				continue
 			}
-			payload.Input = append(payload.Input, map[string]any{
+			output := MessageText(message)
+			if strings.TrimSpace(output) == "" && supportsImages {
+				for _, block := range messageContentBlocks(message.Content) {
+					if block.Type == "image" {
+						output = "(see attached image)"
+						break
+					}
+				}
+			}
+			item := map[string]any{
 				"type":    "function_call_output",
 				"call_id": callID,
-				"output":  MessageText(message),
-			})
+				"output":  output,
+			}
+			payload.Input = append(payload.Input, item)
 		}
 	}
 
@@ -759,8 +788,8 @@ func toOpenAIResponsesRequest(req CompletionRequest) openAIResponsesRequest {
 	return payload
 }
 
-func openAIResponsesSSEToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, error) {
-	return openAIResponsesEventsToResult(func(handle func(map[string]any) error) error {
+func openAIResponsesSSEToResult(body io.Reader, model Model) (NormalizedResult, []NormalizedEvent, error) {
+	return openAIResponsesEventsToResult(model, func(handle func(map[string]any) error) error {
 		return scanSSE(body, func(event sseEvent) error {
 			payload := strings.TrimSpace(event.Data)
 			if payload == "" || payload == "[DONE]" {
@@ -775,7 +804,7 @@ func openAIResponsesSSEToResult(body io.Reader) (NormalizedResult, []NormalizedE
 	})
 }
 
-func openAIResponsesEventsToResult(iterate func(func(map[string]any) error) error) (NormalizedResult, []NormalizedEvent, error) {
+func openAIResponsesEventsToResult(model Model, iterate func(func(map[string]any) error) error) (NormalizedResult, []NormalizedEvent, error) {
 	blocks := []ContentBlock{}
 	rawToolArgs := map[int]string{}
 	currentTextIndex := -1
@@ -872,6 +901,7 @@ func openAIResponsesEventsToResult(iterate func(func(map[string]any) error) erro
 						Type:       "toolcall_end",
 						ContentIdx: currentToolIndex,
 						ToolCall: &NormalizedTool{
+							ID:        blocks[currentToolIndex].ID,
 							Name:      blocks[currentToolIndex].Name,
 							Arguments: blocks[currentToolIndex].Arguments,
 							HasID:     blocks[currentToolIndex].ID != "",
@@ -895,6 +925,8 @@ func openAIResponsesEventsToResult(iterate func(func(map[string]any) error) erro
 						CacheRead:   cachedTokens,
 						TotalTokens: int(asFloat64(usageMap["total_tokens"])),
 					}
+					calculated := CalculateCost(model, *result.Usage)
+					*result.Usage = calculated
 				}
 			}
 		case "response.failed":
@@ -926,7 +958,7 @@ func openAIResponsesEventsToResult(iterate func(func(map[string]any) error) erro
 	return result, appendTerminalEvent(events, result.StopReason), nil
 }
 
-func openAIResponsesToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, error) {
+func openAIResponsesToResult(body io.Reader, model Model) (NormalizedResult, []NormalizedEvent, error) {
 	var response openAIResponsesResponse
 	if err := json.NewDecoder(body).Decode(&response); err != nil {
 		return NormalizedResult{}, nil, fmt.Errorf("parse openai responses payload: %w", err)
@@ -974,9 +1006,40 @@ func openAIResponsesToResult(body io.Reader) (NormalizedResult, []NormalizedEven
 			CacheRead:   cacheRead,
 			TotalTokens: response.Usage.TotalTokens,
 		}
+		calculated := CalculateCost(model, *result.Usage)
+		*result.Usage = calculated
 	}
 
 	return result, AssistantEvents(blocks, result.StopReason), nil
+}
+
+func normalizeOpenAIChatUsage(usage *openAIUsage, model Model) *Usage {
+	if usage == nil {
+		return nil
+	}
+	reportedCachedTokens := usage.PromptTokensDetails.CachedTokens
+	cacheWriteTokens := usage.PromptTokensDetails.CacheWriteTokens
+	cacheReadTokens := reportedCachedTokens
+	if cacheWriteTokens > 0 {
+		cacheReadTokens = reportedCachedTokens - cacheWriteTokens
+		if cacheReadTokens < 0 {
+			cacheReadTokens = 0
+		}
+	}
+	input := usage.PromptTokens - cacheReadTokens - cacheWriteTokens
+	if input < 0 {
+		input = 0
+	}
+	result := &Usage{
+		Input:       input,
+		Output:      usage.CompletionTokens,
+		CacheRead:   cacheReadTokens,
+		CacheWrite:  cacheWriteTokens,
+		TotalTokens: input + usage.CompletionTokens + cacheReadTokens + cacheWriteTokens,
+	}
+	calculated := CalculateCost(model, *result)
+	*result = calculated
+	return result
 }
 
 func mapOpenAIResponsesStopReason(status string) string {
@@ -1083,17 +1146,22 @@ func openAIChoiceToNormalized(choice openAIChoice) NormalizedResult {
 			blocks = append(blocks, ContentBlock{Type: "text", Text: text})
 		}
 	}
+	if reasoning := firstOpenAIReasoning(choice.Message); strings.TrimSpace(reasoning) != "" {
+		blocks = append([]ContentBlock{{Type: "thinking", Thinking: reasoning}}, blocks...)
+	}
 	for _, toolCall := range choice.Message.ToolCalls {
 		arguments := map[string]any{}
 		if strings.TrimSpace(toolCall.Function.Arguments) != "" {
 			_ = json.Unmarshal([]byte(toolCall.Function.Arguments), &arguments)
 		}
-		blocks = append(blocks, ContentBlock{
+		block := ContentBlock{
 			Type:      "toolCall",
 			ID:        toolCall.ID,
 			Name:      toolCall.Function.Name,
 			Arguments: arguments,
-		})
+		}
+		attachOpenAIReasoningSignature(&block, choice.Message.ReasoningDetails)
+		blocks = append(blocks, block)
 	}
 
 	return NormalizedResult{
@@ -1135,15 +1203,45 @@ func ensureAzureOpenAIAPIVersion(raw string) string {
 	return parsed.String()
 }
 
-func openAIStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, error) {
+func openAIStreamToResult(body io.Reader, model Model) (NormalizedResult, []NormalizedEvent, error) {
 	scanner := bufio.NewScanner(body)
-	builder := strings.Builder{}
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	toolCalls := map[int]*openAIStreamingCall{}
 	stopReason := "stop"
 	responseID := ""
 	events := []NormalizedEvent{{Type: "start"}}
-	textStarted := false
-	toolBlockIndexes := map[int]int{}
+	var usage *Usage
+	toolReasoningDetails := map[string]string{}
+	blocks := []ContentBlock{}
+	currentKind := ""
+	currentIndex := -1
+
+	finishCurrentBlock := func() error {
+		if currentIndex < 0 || currentIndex >= len(blocks) {
+			currentKind = ""
+			currentIndex = -1
+			return nil
+		}
+		block := &blocks[currentIndex]
+		switch block.Type {
+		case "text":
+			events = append(events, NormalizedEvent{Type: "text_end", ContentIdx: currentIndex, Content: block.Text})
+		case "thinking":
+			events = append(events, NormalizedEvent{Type: "thinking_end", ContentIdx: currentIndex, Content: block.Thinking})
+		case "toolCall":
+			tool := &NormalizedTool{
+				ID:               block.ID,
+				Name:             block.Name,
+				Arguments:        block.Arguments,
+				HasID:            block.ID != "",
+				ThoughtSignature: block.ThoughtSignature,
+			}
+			events = append(events, NormalizedEvent{Type: "toolcall_end", ContentIdx: currentIndex, ToolCall: tool})
+		}
+		currentKind = ""
+		currentIndex = -1
+		return nil
+	}
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -1163,46 +1261,88 @@ func openAIStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, 
 		if chunk.ID != "" && responseID == "" {
 			responseID = chunk.ID
 		}
+		if chunk.Usage != nil {
+			usage = normalizeOpenAIChatUsage(chunk.Usage, model)
+		}
 		for _, choice := range chunk.Choices {
+			if usage == nil && choice.Usage != nil {
+				usage = normalizeOpenAIChatUsage(choice.Usage, model)
+			}
 			if choice.FinishReason != "" {
 				stopReason = choice.FinishReason
 			}
-			if text, ok := choice.Delta.Content.(string); ok && text != "" {
-				if !textStarted {
-					textStarted = true
-					events = append(events, NormalizedEvent{Type: "text_start", ContentIdx: 0})
+			if reasoning := firstOpenAIReasoning(choice.Delta); reasoning != "" {
+				if currentKind != "thinking" {
+					if err := finishCurrentBlock(); err != nil {
+						return NormalizedResult{}, nil, err
+					}
+					blocks = append(blocks, ContentBlock{Type: "thinking", Thinking: "", ThinkingSignature: firstOpenAIReasoningField(choice.Delta)})
+					currentIndex = len(blocks) - 1
+					currentKind = "thinking"
+					events = append(events, NormalizedEvent{Type: "thinking_start", ContentIdx: currentIndex})
 				}
-				builder.WriteString(text)
-				events = append(events, NormalizedEvent{Type: "text_delta", ContentIdx: 0, Delta: text})
+				blocks[currentIndex].Thinking += reasoning
+				events = append(events, NormalizedEvent{Type: "thinking_delta", ContentIdx: currentIndex, Delta: reasoning})
+			}
+			if text, ok := choice.Delta.Content.(string); ok && text != "" {
+				if currentKind != "text" {
+					if err := finishCurrentBlock(); err != nil {
+						return NormalizedResult{}, nil, err
+					}
+					blocks = append(blocks, ContentBlock{Type: "text", Text: ""})
+					currentIndex = len(blocks) - 1
+					currentKind = "text"
+					events = append(events, NormalizedEvent{Type: "text_start", ContentIdx: currentIndex})
+				}
+				blocks[currentIndex].Text += text
+				events = append(events, NormalizedEvent{Type: "text_delta", ContentIdx: currentIndex, Delta: text})
 			}
 			for _, toolCall := range choice.Delta.ToolCalls {
 				entry, ok := toolCalls[toolCall.Index]
 				if !ok {
-					entry = &openAIStreamingCall{}
-					toolCalls[toolCall.Index] = entry
-				}
-				contentIndex, ok := toolBlockIndexes[toolCall.Index]
-				if !ok {
-					contentIndex = len(toolBlockIndexes)
-					if textStarted {
-						contentIndex++
+					if err := finishCurrentBlock(); err != nil {
+						return NormalizedResult{}, nil, err
 					}
-					toolBlockIndexes[toolCall.Index] = contentIndex
-					events = append(events, NormalizedEvent{Type: "toolcall_start", ContentIdx: contentIndex})
+					blocks = append(blocks, ContentBlock{Type: "toolCall", Arguments: map[string]any{}})
+					currentIndex = len(blocks) - 1
+					currentKind = "toolCall"
+					events = append(events, NormalizedEvent{Type: "toolcall_start", ContentIdx: currentIndex})
+					entry = &openAIStreamingCall{BlockIdx: currentIndex}
+					toolCalls[toolCall.Index] = entry
+				} else {
+					if currentKind != "" && currentKind != "toolCall" {
+						if err := finishCurrentBlock(); err != nil {
+							return NormalizedResult{}, nil, err
+						}
+					}
+					currentIndex = entry.BlockIdx
+					currentKind = "toolCall"
 				}
 				if toolCall.ID != "" {
 					entry.ID = toolCall.ID
+					blocks[entry.BlockIdx].ID = toolCall.ID
 				}
 				if toolCall.Function.Name != "" {
 					entry.Name = toolCall.Function.Name
+					blocks[entry.BlockIdx].Name = toolCall.Function.Name
 				}
 				entry.Arguments.WriteString(toolCall.Function.Arguments)
 				if toolCall.Function.Arguments != "" {
-					events = append(events, NormalizedEvent{
-						Type:       "toolcall_delta",
-						ContentIdx: contentIndex,
-						Delta:      toolCall.Function.Arguments,
-					})
+					events = append(events, NormalizedEvent{Type: "toolcall_delta", ContentIdx: entry.BlockIdx, Delta: toolCall.Function.Arguments})
+				}
+			}
+			for _, detail := range choice.Delta.ReasoningDetails {
+				if asString(detail["type"]) == "reasoning.encrypted" {
+					callID := asString(detail["id"])
+					data := asString(detail["data"])
+					if callID != "" && data != "" {
+						toolReasoningDetails[callID] = mustJSON(detail)
+						for index := range blocks {
+							if blocks[index].Type == "toolCall" && blocks[index].ID == callID {
+								blocks[index].ThoughtSignature = toolReasoningDetails[callID]
+							}
+						}
+					}
 				}
 			}
 		}
@@ -1211,19 +1351,7 @@ func openAIStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, 
 		return NormalizedResult{}, nil, fmt.Errorf("scan openai stream: %w", err)
 	}
 
-	blocks := []ContentBlock{}
-	if strings.TrimSpace(builder.String()) != "" {
-		blocks = append(blocks, ContentBlock{Type: "text", Text: builder.String()})
-		events = append(events, NormalizedEvent{Type: "text_end", ContentIdx: 0, Content: builder.String()})
-	}
-
-	indices := make([]int, 0, len(toolCalls))
-	for index := range toolCalls {
-		indices = append(indices, index)
-	}
-	sort.Ints(indices)
-	for _, index := range indices {
-		call := toolCalls[index]
+	for _, call := range toolCalls {
 		arguments := map[string]any{}
 		argumentPayload := strings.TrimSpace(call.Arguments.String())
 		if argumentPayload != "" {
@@ -1231,22 +1359,15 @@ func openAIStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, 
 				return NormalizedResult{}, nil, fmt.Errorf("parse openai tool arguments: %w", err)
 			}
 		}
-		blocks = append(blocks, ContentBlock{
-			Type:      "toolCall",
-			ID:        call.ID,
-			Name:      call.Name,
-			Arguments: arguments,
-		})
-		events = append(events, NormalizedEvent{
-			Type:       "toolcall_end",
-			ContentIdx: len(blocks) - 1,
-			ToolCall: &NormalizedTool{
-				ID:        call.ID,
-				Name:      call.Name,
-				Arguments: arguments,
-				HasID:     call.ID != "",
-			},
-		})
+		if call.BlockIdx >= 0 && call.BlockIdx < len(blocks) {
+			blocks[call.BlockIdx].Arguments = arguments
+			if signature, ok := toolReasoningDetails[blocks[call.BlockIdx].ID]; ok {
+				blocks[call.BlockIdx].ThoughtSignature = signature
+			}
+		}
+	}
+	if err := finishCurrentBlock(); err != nil {
+		return NormalizedResult{}, nil, err
 	}
 
 	if len(toolCalls) > 0 {
@@ -1263,23 +1384,127 @@ func openAIStreamToResult(body io.Reader) (NormalizedResult, []NormalizedEvent, 
 		Text:       ContentText(blocks),
 		Content:    NormalizedContent(blocks),
 	}
+	result.Usage = usage
 	return result, appendTerminalEvent(events, result.StopReason), nil
 }
 
-func toOpenAIMessages(messages []Message) []openAIMessage {
+func firstOpenAIReasoning(message openAIMessage) string {
+	for _, value := range []string{message.ReasoningContent, message.Reasoning, message.ReasoningText} {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstOpenAIReasoningField(message openAIMessage) string {
+	for _, candidate := range []struct {
+		name  string
+		value string
+	}{
+		{name: "reasoning_content", value: message.ReasoningContent},
+		{name: "reasoning", value: message.Reasoning},
+		{name: "reasoning_text", value: message.ReasoningText},
+	} {
+		if strings.TrimSpace(candidate.value) != "" {
+			return candidate.name
+		}
+	}
+	return ""
+}
+
+func attachOpenAIReasoningSignature(block *ContentBlock, reasoningDetails []map[string]any) {
+	if block == nil || block.Type != "toolCall" || block.ID == "" {
+		return
+	}
+	for _, detail := range reasoningDetails {
+		if asString(detail["type"]) != "reasoning.encrypted" {
+			continue
+		}
+		if asString(detail["id"]) != block.ID || strings.TrimSpace(asString(detail["data"])) == "" {
+			continue
+		}
+		block.ThoughtSignature = mustJSON(detail)
+		return
+	}
+}
+
+func toOpenAIMessages(messages []Message, model Model) []openAIMessage {
+	compat := getOpenAICompat(model)
 	out := make([]openAIMessage, 0, len(messages))
-	for _, message := range messages {
+	lastRole := ""
+	for i := 0; i < len(messages); i++ {
+		message := messages[i]
+		if compat.RequiresAssistantAfterToolResult && lastRole == "toolResult" && message.Role == "user" {
+			out = append(out, openAIMessage{Role: "assistant", Content: "I have processed the tool results."})
+		}
 		switch message.Role {
+		case "system":
+			text := strings.TrimSpace(MessageText(message))
+			if text != "" {
+				role := "system"
+				if model.Reasoning && compat.SupportsDeveloperRole {
+					role = "developer"
+				}
+				out = append(out, openAIMessage{Role: role, Content: text})
+				lastRole = "system"
+			}
 		case "user":
-			out = append(out, openAIMessage{Role: "user", Content: MessageText(message)})
-		case "assistant":
 			blocks := messageContentBlocks(message.Content)
-			aiMsg := openAIMessage{Role: "assistant"}
-			textParts := make([]string, 0, len(blocks))
+			if len(blocks) == 0 {
+				text := strings.TrimSpace(MessageText(message))
+				if text == "" {
+					continue
+				}
+				out = append(out, openAIMessage{Role: "user", Content: text})
+				lastRole = "user"
+				continue
+			}
+			content := make([]map[string]any, 0, len(blocks))
 			for _, block := range blocks {
 				switch block.Type {
 				case "text":
-					textParts = append(textParts, block.Text)
+					if strings.TrimSpace(block.Text) != "" {
+						content = append(content, map[string]any{"type": "text", "text": block.Text})
+					}
+				case "image":
+					if modelSupportsInput(model, "image") {
+						content = append(content, map[string]any{
+							"type": "image_url",
+							"image_url": map[string]any{
+								"url": "data:" + block.MimeType + ";base64," + block.Data,
+							},
+						})
+					}
+				}
+			}
+			if len(content) == 0 {
+				continue
+			}
+			if len(content) == 1 && content[0]["type"] == "text" {
+				out = append(out, openAIMessage{Role: "user", Content: content[0]["text"]})
+			} else {
+				out = append(out, openAIMessage{Role: "user", Content: content})
+			}
+			lastRole = "user"
+		case "assistant":
+			blocks := messageContentBlocks(message.Content)
+			aiMsg := openAIMessage{Role: "assistant", Content: nil}
+			if compat.RequiresAssistantAfterToolResult {
+				aiMsg.Content = ""
+			}
+			textParts := make([]string, 0, len(blocks))
+			thinkingParts := make([]string, 0, len(blocks))
+			for _, block := range blocks {
+				switch block.Type {
+				case "text":
+					if strings.TrimSpace(block.Text) != "" {
+						textParts = append(textParts, block.Text)
+					}
+				case "thinking":
+					if strings.TrimSpace(block.Thinking) != "" {
+						thinkingParts = append(thinkingParts, block.Thinking)
+					}
 				case "toolCall":
 					args, _ := json.Marshal(block.Arguments)
 					aiMsg.ToolCalls = append(aiMsg.ToolCalls, openAICallSpec{
@@ -1292,22 +1517,504 @@ func toOpenAIMessages(messages []Message) []openAIMessage {
 					})
 				}
 			}
+			if len(thinkingParts) > 0 {
+				if compat.RequiresThinkingAsText {
+					combined := append([]string{}, thinkingParts...)
+					combined = append(combined, textParts...)
+					aiMsg.Content = strings.Join(combined, "\n\n")
+				} else if len(textParts) == 0 {
+					aiMsg.Content = strings.Join(thinkingParts, "\n\n")
+				}
+			}
 			if len(textParts) > 0 {
 				aiMsg.Content = strings.Join(textParts, "")
 			}
 			if len(aiMsg.ToolCalls) > 0 && aiMsg.Content == nil {
 				aiMsg.Content = ""
 			}
+			if compat.RequiresReasoningContentOnAssistantReply && aiMsg.Content == nil {
+				aiMsg.Content = ""
+			}
+			if aiMsg.Content == nil && len(aiMsg.ToolCalls) == 0 {
+				continue
+			}
 			out = append(out, aiMsg)
+			lastRole = "assistant"
 		case "toolResult":
-			out = append(out, openAIMessage{
+			text := MessageText(message)
+			hasImages := false
+			for _, block := range messageContentBlocks(message.Content) {
+				if block.Type == "image" {
+					hasImages = true
+					break
+				}
+			}
+			if strings.TrimSpace(text) == "" && hasImages {
+				text = "(see attached image)"
+			}
+			toolMsg := openAIMessage{
 				Role:       "tool",
 				ToolCallID: message.ToolCallID,
-				Content:    MessageText(message),
-			})
+				Content:    text,
+			}
+			if compat.RequiresToolResultName && message.ToolName != "" {
+				toolMsg.Name = message.ToolName
+			}
+			out = append(out, toolMsg)
+			lastRole = "toolResult"
+			if hasImages && modelSupportsInput(model, "image") {
+				if compat.RequiresAssistantAfterToolResult {
+					out = append(out, openAIMessage{Role: "assistant", Content: "I have processed the tool results."})
+				}
+				imageContent := []map[string]any{{"type": "text", "text": "Attached image(s) from tool result:"}}
+				for _, block := range messageContentBlocks(message.Content) {
+					if block.Type == "image" {
+						imageContent = append(imageContent, map[string]any{
+							"type": "image_url",
+							"image_url": map[string]any{
+								"url": "data:" + block.MimeType + ";base64," + block.Data,
+							},
+						})
+					}
+				}
+				out = append(out, openAIMessage{Role: "user", Content: imageContent})
+				lastRole = "user"
+			}
 		}
 	}
 	return out
+}
+
+func getOpenAICompat(model Model) openAICompat {
+	baseURL := strings.ToLower(strings.TrimSpace(model.BaseURL))
+	provider := canonicalProviderName(model.Provider)
+	isZAI := provider == "zai" || strings.Contains(baseURL, "api.z.ai")
+	isNonStandard := provider == "cerebras" ||
+		strings.Contains(baseURL, "cerebras.ai") ||
+		provider == "xai" ||
+		strings.Contains(baseURL, "api.x.ai") ||
+		strings.Contains(baseURL, "chutes.ai") ||
+		provider == "deepseek" ||
+		strings.Contains(baseURL, "deepseek.com") ||
+		isZAI ||
+		provider == "opencode" ||
+		strings.Contains(baseURL, "opencode.ai")
+	compat := openAICompat{
+		SupportsStore:                            !isNonStandard,
+		SupportsDeveloperRole:                    !isNonStandard,
+		SupportsUsageInStreaming:                 true,
+		SupportsReasoningEffort:                  provider != "xai" && !isZAI && !strings.Contains(baseURL, "api.x.ai"),
+		ReasoningEffortMap:                       map[string]string{},
+		MaxTokensField:                           "max_completion_tokens",
+		ThinkingFormat:                           "openai",
+		ZAIToolStream:                            false,
+		SupportsStrictMode:                       true,
+		CacheControlFormat:                       "",
+		SendSessionAffinityHeaders:               false,
+		SupportsLongCacheRetention:               true,
+		OpenRouterRouting:                        map[string]any{},
+		VercelGatewayRouting:                     map[string]any{},
+		RequiresToolResultName:                   false,
+		RequiresAssistantAfterToolResult:         false,
+		RequiresThinkingAsText:                   false,
+		RequiresReasoningContentOnAssistantReply: provider == "deepseek" || strings.Contains(baseURL, "deepseek.com"),
+	}
+	if isZAI {
+		compat.ThinkingFormat = "zai"
+	}
+	if provider == "deepseek" || strings.Contains(baseURL, "deepseek.com") {
+		compat.ThinkingFormat = "deepseek"
+		compat.SupportsReasoningEffort = true
+		compat.ReasoningEffortMap = map[string]string{
+			"minimal": "high",
+			"low":     "high",
+			"medium":  "high",
+			"high":    "high",
+			"xhigh":   "max",
+		}
+	}
+	if provider == "openrouter" || strings.Contains(baseURL, "openrouter.ai") {
+		compat.ThinkingFormat = "openrouter"
+		if strings.HasPrefix(strings.TrimSpace(model.ID), "anthropic/") {
+			compat.CacheControlFormat = "anthropic"
+		}
+	}
+	if provider == "groq" || strings.Contains(baseURL, "groq.com") {
+		if strings.TrimSpace(model.ID) == "qwen/qwen3-32b" {
+			compat.ReasoningEffortMap = map[string]string{
+				"minimal": "default",
+				"low":     "default",
+				"medium":  "default",
+				"high":    "default",
+				"xhigh":   "default",
+			}
+		}
+	}
+	if strings.Contains(baseURL, "chutes.ai") {
+		compat.MaxTokensField = "max_tokens"
+	}
+	if model.Compat == nil {
+		return compat
+	}
+	if value, ok := compatBool(model.Compat["supportsStore"]); ok {
+		compat.SupportsStore = value
+	}
+	if value, ok := compatBool(model.Compat["supportsDeveloperRole"]); ok {
+		compat.SupportsDeveloperRole = value
+	}
+	if value, ok := compatBool(model.Compat["supportsUsageInStreaming"]); ok {
+		compat.SupportsUsageInStreaming = value
+	}
+	if value, ok := compatBool(model.Compat["supportsReasoningEffort"]); ok {
+		compat.SupportsReasoningEffort = value
+	}
+	if value, ok := compatBool(model.Compat["zaiToolStream"]); ok {
+		compat.ZAIToolStream = value
+	}
+	if value, ok := compatBool(model.Compat["supportsStrictMode"]); ok {
+		compat.SupportsStrictMode = value
+	}
+	if value, ok := compatBool(model.Compat["sendSessionAffinityHeaders"]); ok {
+		compat.SendSessionAffinityHeaders = value
+	}
+	if value, ok := compatBool(model.Compat["supportsLongCacheRetention"]); ok {
+		compat.SupportsLongCacheRetention = value
+	}
+	if value, ok := model.Compat["maxTokensField"].(string); ok && strings.TrimSpace(value) != "" {
+		compat.MaxTokensField = value
+	}
+	if value, ok := model.Compat["thinkingFormat"].(string); ok && strings.TrimSpace(value) != "" {
+		compat.ThinkingFormat = value
+	}
+	if value, ok := model.Compat["cacheControlFormat"].(string); ok {
+		compat.CacheControlFormat = strings.TrimSpace(value)
+	}
+	if value, ok := model.Compat["openRouterRouting"].(map[string]any); ok {
+		compat.OpenRouterRouting = value
+	}
+	if value, ok := model.Compat["vercelGatewayRouting"].(map[string]any); ok {
+		compat.VercelGatewayRouting = value
+	}
+	if value, ok := compatBool(model.Compat["requiresToolResultName"]); ok {
+		compat.RequiresToolResultName = value
+	}
+	if value, ok := compatBool(model.Compat["requiresAssistantAfterToolResult"]); ok {
+		compat.RequiresAssistantAfterToolResult = value
+	}
+	if value, ok := compatBool(model.Compat["requiresThinkingAsText"]); ok {
+		compat.RequiresThinkingAsText = value
+	}
+	if value, ok := compatBool(model.Compat["requiresReasoningContentOnAssistantMessages"]); ok {
+		compat.RequiresReasoningContentOnAssistantReply = value
+	}
+	if value, ok := compatStringMap(model.Compat["reasoningEffortMap"]); ok {
+		compat.ReasoningEffortMap = value
+	}
+	return compat
+}
+
+func buildOpenAIChatCompletionsRequest(req CompletionRequest, model Model) map[string]any {
+	compat := getOpenAICompat(model)
+	payload := map[string]any{
+		"model":    req.Model,
+		"messages": toOpenAIMessages(req.Messages, model),
+		"stream":   req.Options.Stream,
+	}
+	if compat.SupportsStore {
+		payload["store"] = false
+	}
+	if sessionID := cacheSessionID(req.Options); sessionID != "" {
+		retention := cacheRetentionValue(req.Options)
+		if strings.Contains(strings.ToLower(model.BaseURL), "api.openai.com") || (retention == "24h" && compat.SupportsLongCacheRetention) {
+			payload["prompt_cache_key"] = sessionID
+		}
+		if retention == "24h" && compat.SupportsLongCacheRetention {
+			payload["prompt_cache_retention"] = retention
+		}
+	}
+	if req.Options.MaxTokens > 0 {
+		payload[compat.MaxTokensField] = req.Options.MaxTokens
+	}
+	if req.Options.Temperature != nil {
+		payload["temperature"] = req.Options.Temperature
+	}
+	if req.Options.Stream && compat.SupportsUsageInStreaming {
+		payload["stream_options"] = map[string]any{"include_usage": true}
+	}
+	if len(req.Tools) > 0 {
+		payload["tools"] = buildOpenAIChatTools(req.Tools, compat)
+		toolChoice := strings.TrimSpace(req.Options.ToolChoice)
+		if toolChoice == "" {
+			toolChoice = "auto"
+		}
+		payload["tool_choice"] = toolChoice
+		if compat.ZAIToolStream {
+			payload["tool_stream"] = true
+		}
+	} else if hasOpenAIToolHistory(req.Messages) {
+		payload["tools"] = []any{}
+	}
+	applyOpenAICacheControl(payload, compat, req.Options.CacheRetention)
+	applyOpenAIReasoningOptions(payload, req.Options, model, compat)
+	if len(compat.OpenRouterRouting) > 0 && (canonicalProviderName(model.Provider) == "openrouter" || strings.Contains(strings.ToLower(model.BaseURL), "openrouter.ai")) {
+		payload["provider"] = compat.OpenRouterRouting
+	}
+	if len(compat.VercelGatewayRouting) > 0 && (canonicalProviderName(model.Provider) == "vercel-ai-gateway" || strings.Contains(strings.ToLower(model.BaseURL), "ai-gateway.vercel.sh")) {
+		gateway := map[string]any{}
+		if value, ok := compat.VercelGatewayRouting["only"]; ok {
+			gateway["only"] = value
+		}
+		if value, ok := compat.VercelGatewayRouting["order"]; ok {
+			gateway["order"] = value
+		}
+		if len(gateway) > 0 {
+			payload["providerOptions"] = map[string]any{"gateway": gateway}
+		}
+	}
+	return payload
+}
+
+func buildOpenAIChatTools(tools []Tool, compat openAICompat) []map[string]any {
+	out := make([]map[string]any, 0, len(tools))
+	for _, tool := range tools {
+		parameters := tool.Parameters
+		if parameters == nil {
+			parameters = map[string]any{
+				"type":                 "object",
+				"properties":           map[string]any{},
+				"additionalProperties": true,
+			}
+		}
+		function := map[string]any{
+			"name":        tool.Name,
+			"description": strings.TrimSpace(tool.Description),
+			"parameters":  parameters,
+		}
+		if compat.SupportsStrictMode {
+			function["strict"] = false
+		}
+		out = append(out, map[string]any{
+			"type":     "function",
+			"function": function,
+		})
+	}
+	return out
+}
+
+func applyOpenAIReasoningOptions(payload map[string]any, options ChatOptions, model Model, compat openAICompat) {
+	effort := strings.TrimSpace(options.ReasoningEffort)
+	if effort == "" || effort == "off" || !model.Reasoning {
+		switch compat.ThinkingFormat {
+		case "deepseek":
+			payload["thinking"] = map[string]any{"type": "disabled"}
+		case "openrouter":
+			payload["reasoning"] = map[string]any{"effort": "none"}
+		}
+		return
+	}
+	mappedEffort := mapOpenAIReasoningEffort(effort, compat, model)
+	switch compat.ThinkingFormat {
+	case "zai", "qwen":
+		payload["enable_thinking"] = true
+	case "qwen-chat-template":
+		payload["chat_template_kwargs"] = map[string]any{
+			"enable_thinking":   true,
+			"preserve_thinking": true,
+		}
+	case "deepseek":
+		payload["thinking"] = map[string]any{"type": "enabled"}
+		if compat.SupportsReasoningEffort {
+			payload["reasoning_effort"] = mappedEffort
+		}
+	case "openrouter":
+		payload["reasoning"] = map[string]any{"effort": mappedEffort}
+	default:
+		if compat.SupportsReasoningEffort {
+			payload["reasoning_effort"] = mappedEffort
+		}
+	}
+}
+
+func hasOpenAIToolHistory(messages []Message) bool {
+	for _, message := range messages {
+		if message.Role == "toolResult" {
+			return true
+		}
+		if message.Role != "assistant" {
+			continue
+		}
+		for _, block := range messageContentBlocks(message.Content) {
+			if block.Type == "toolCall" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func mapOpenAIReasoningEffort(effort string, compat openAICompat, model Model) string {
+	effort = strings.TrimSpace(effort)
+	if effort == "" {
+		return ""
+	}
+	if mapped, ok := compat.ReasoningEffortMap[effort]; ok && strings.TrimSpace(mapped) != "" {
+		return mapped
+	}
+	if !compat.SupportsReasoningEffort && effort == "xhigh" {
+		return "high"
+	}
+	return effort
+}
+
+func compatStringMap(value any) (map[string]string, bool) {
+	raw, ok := value.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	out := make(map[string]string, len(raw))
+	for key, item := range raw {
+		str, ok := item.(string)
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		str = strings.TrimSpace(str)
+		if key == "" || str == "" {
+			continue
+		}
+		out[key] = str
+	}
+	return out, true
+}
+
+func formatOpenAIHTTPError(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return raw
+	}
+	if str := strings.TrimSpace(asString(payload["error"])); str != "" {
+		return str
+	}
+	errorMap, _ := payload["error"].(map[string]any)
+	if len(errorMap) == 0 {
+		return raw
+	}
+	message := strings.TrimSpace(asString(errorMap["message"]))
+	rawMetadata := ""
+	if metadata, ok := errorMap["metadata"].(map[string]any); ok {
+		rawMetadata = strings.TrimSpace(asString(metadata["raw"]))
+	}
+	switch {
+	case message != "" && rawMetadata != "":
+		return message + "\n" + rawMetadata
+	case message != "":
+		return message
+	case rawMetadata != "":
+		return rawMetadata
+	default:
+		return raw
+	}
+}
+
+func applyOpenAICacheControl(payload map[string]any, compat openAICompat, retention CacheRetention) {
+	if compat.CacheControlFormat != "anthropic" || retention == CacheRetentionNone {
+		return
+	}
+
+	cacheControl := map[string]any{"type": "ephemeral"}
+	if retention == CacheRetentionLong && compat.SupportsLongCacheRetention {
+		cacheControl["ttl"] = "1h"
+	}
+
+	if tools, ok := payload["tools"].([]map[string]any); ok && len(tools) > 0 {
+		tools[len(tools)-1]["cache_control"] = cacheControl
+		payload["tools"] = tools
+	}
+
+	messages, ok := payload["messages"].([]openAIMessage)
+	if !ok || len(messages) == 0 {
+		return
+	}
+
+	for i := range messages {
+		if messages[i].Role == "system" {
+			messages[i].Content = wrapOpenAIContentWithCacheControl(messages[i].Content, cacheControl)
+			break
+		}
+	}
+
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role != "user" && messages[i].Role != "assistant" {
+			continue
+		}
+		updated, changed := appendOpenAIContentCacheControl(messages[i].Content, cacheControl)
+		if changed {
+			messages[i].Content = updated
+			break
+		}
+	}
+
+	payload["messages"] = messages
+}
+
+func wrapOpenAIContentWithCacheControl(content any, cacheControl map[string]any) any {
+	if text, ok := content.(string); ok {
+		if text == "" {
+			return content
+		}
+		return []map[string]any{{
+			"type":          "text",
+			"text":          text,
+			"cache_control": cacheControl,
+		}}
+	}
+	updated, changed := appendOpenAIContentCacheControl(content, cacheControl)
+	if changed {
+		return updated
+	}
+	return content
+}
+
+func appendOpenAIContentCacheControl(content any, cacheControl map[string]any) (any, bool) {
+	switch typed := content.(type) {
+	case []map[string]any:
+		for i := len(typed) - 1; i >= 0; i-- {
+			if asString(typed[i]["type"]) != "text" {
+				continue
+			}
+			copyItem := map[string]any{}
+			for key, value := range typed[i] {
+				copyItem[key] = value
+			}
+			copyItem["cache_control"] = cacheControl
+			typed[i] = copyItem
+			return typed, true
+		}
+	case []any:
+		for i := len(typed) - 1; i >= 0; i-- {
+			item, ok := typed[i].(map[string]any)
+			if !ok || asString(item["type"]) != "text" {
+				continue
+			}
+			copyItem := map[string]any{}
+			for key, value := range item {
+				copyItem[key] = value
+			}
+			copyItem["cache_control"] = cacheControl
+			typed[i] = copyItem
+			return typed, true
+		}
+	}
+	return content, false
+}
+
+func compatBool(value any) (bool, bool) {
+	boolean, ok := value.(bool)
+	return boolean, ok
 }
 
 func messageContentBlocks(raw any) []ContentBlock {

@@ -45,6 +45,33 @@ func TestRPCPromptStateAndMessages(t *testing.T) {
 	}
 }
 
+func TestRPCPromptWithAttachmentsAndRetry(t *testing.T) {
+	session := NewSession(t.TempDir(), []AssistantTurn{
+		{StopReason: "stop", Content: []ai.ContentBlock{{Type: "text", Text: "first"}}},
+		{StopReason: "stop", Content: []ai.ContentBlock{{Type: "text", Text: "second"}}},
+	})
+	if err := os.WriteFile(filepath.Join(session.Root, "notes.txt"), []byte("attached"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	server := RPCServer{Session: session}
+	input := strings.NewReader(
+		`{"id":"p1","type":"prompt","message":"hi","attachments":[{"type":"file","path":"notes.txt"}],"images":[{"type":"image","data":"aW1n"}]}` + "\n" +
+			`{"id":"r1","type":"retry"}` + "\n",
+	)
+
+	if err := server.Serve(context.Background(), input, &out); err != nil {
+		t.Fatal(err)
+	}
+	responses := decodeRPCResponses(t, out.String())
+	if responses[0]["success"] != true || responses[1]["success"] != true {
+		t.Fatalf("responses = %#v", responses)
+	}
+	if len(session.Messages) != 4 || session.Messages[3]["text"] != "second" {
+		t.Fatalf("messages = %#v", session.Messages)
+	}
+}
+
 func TestRPCBash(t *testing.T) {
 	session := NewSession(t.TempDir(), nil)
 	var out bytes.Buffer

@@ -45,6 +45,9 @@ type ContentBlock struct {
 type Message struct {
 	Role        string         `json:"role"`
 	Content     any            `json:"content,omitempty"`
+	Provider    string         `json:"provider,omitempty"`
+	API         string         `json:"api,omitempty"`
+	Model       string         `json:"model,omitempty"`
 	ToolCallID  string         `json:"toolCallId,omitempty"`
 	ToolName    string         `json:"toolName,omitempty"`
 	IsError     bool           `json:"isError,omitempty"`

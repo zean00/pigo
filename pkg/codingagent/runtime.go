@@ -3,6 +3,7 @@ package codingagent
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -20,28 +21,34 @@ import (
 )
 
 type Session struct {
-	Root              string
-	Name              string
-	ThinkingLevel     string
-	Provider          string
-	ModelID           string
-	Store             *SessionStore
-	SteeringMode      string
-	FollowUpMode      string
-	AutoCompaction    bool
-	AutoRetry         bool
-	IsCompacting      bool
-	Turns             []AssistantTurn
-	turnIndex         int
-	Events            []agentcore.Event
-	Messages          []agentcore.Message
-	SessionEntryTypes []string
-	AvailableModels   []ModelInfo
-	IsStreaming       bool
-	OAuthCredentials  map[string]ai.OAuthCredentials
-	mu                sync.Mutex
-	promptCancel      context.CancelFunc
-	bashCancel        context.CancelFunc
+	Root               string
+	Name               string
+	ThinkingLevel      string
+	Provider           string
+	ModelID            string
+	Store              *SessionStore
+	SteeringMode       string
+	FollowUpMode       string
+	AutoCompaction     bool
+	AutoRetry          bool
+	IsCompacting       bool
+	LastPrompt         string
+	lastAttachments    []PromptAttachment
+	Compactor          CompactorFunc
+	ShellCommandPrefix string
+	ToolOutputLimit    int
+	Turns              []AssistantTurn
+	turnIndex          int
+	Events             []agentcore.Event
+	Messages           []agentcore.Message
+	SessionEntryTypes  []string
+	AvailableModels    []ModelInfo
+	IsStreaming        bool
+	OAuthCredentials   map[string]ai.OAuthCredentials
+	mu                 sync.Mutex
+	promptCancel       context.CancelFunc
+	retryCancel        context.CancelFunc
+	bashCancel         context.CancelFunc
 
 	entries       []SessionEntry
 	entriesByID   map[string]SessionEntry
@@ -55,6 +62,16 @@ type Session struct {
 	extensionCommands []SlashCommandInfo
 	promptTemplates   []SlashCommandInfo
 	skills            []SlashCommandInfo
+}
+
+type CompactorFunc func(ctx context.Context, messages []ai.Message, instructions string) (string, error)
+
+type PromptAttachment struct {
+	Type     string
+	Path     string
+	Data     string
+	MimeType string
+	Text     string
 }
 
 type ModelInfo struct {
@@ -74,12 +91,20 @@ type SlashCommandInfo struct {
 }
 
 const (
-	bashExecutionTextPrefix = "Ran `%s`\n"
-	branchSummaryPrefix     = "The following is a summary of a branch that this conversation came back from:\n\n<summary>\n"
-	branchSummarySuffix     = "\n</summary>\n"
-	compactionSummaryPrefix = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n"
-	compactionSummarySuffix = "\n</summary>\n"
+	bashExecutionTextPrefix        = "Ran `%s`\n"
+	branchSummaryPrefix            = "The following is a summary of a branch that this conversation came back from:\n\n<summary>\n"
+	branchSummarySuffix            = "\n</summary>\n"
+	compactionSummaryPrefix        = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n"
+	compactionSummarySuffix        = "\n</summary>\n"
+	autoCompactionMessageThreshold = 18
+	autoRetryDelay                 = 150 * time.Millisecond
 )
+
+type promptStreamState struct {
+	messages         []agentcore.Message
+	activeMessageIdx int
+	activeMessage    agentcore.Message
+}
 
 type ForkMessage struct {
 	EntryID string `json:"entryId"`
@@ -469,6 +494,63 @@ func defaultString(value string, fallback string) string {
 	return value
 }
 
+func currentGitBranch(root string) string {
+	output, err := exec.Command("git", "-C", root, "--no-optional-locks", "symbolic-ref", "--quiet", "--short", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
+
+func shortGitStatus(root string) string {
+	output, err := exec.Command("git", "-C", root, "--no-optional-locks", "status", "--short").Output()
+	if err != nil {
+		return ""
+	}
+	text, _ := truncateToolOutput(strings.TrimSpace(string(output)), 4000)
+	return text
+}
+
+func packageContext(root string) string {
+	candidates := []string{"package.json", "go.mod", "pyproject.toml", "Cargo.toml", "Gemfile", "pom.xml"}
+	lines := make([]string, 0, len(candidates))
+	for _, name := range candidates {
+		path := filepath.Join(root, name)
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		lines = append(lines, "- "+name)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func addStringList(target map[string]struct{}, value any) {
+	switch typed := value.(type) {
+	case []string:
+		for _, item := range typed {
+			if strings.TrimSpace(item) != "" {
+				target[item] = struct{}{}
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			text, _ := item.(string)
+			if strings.TrimSpace(text) != "" {
+				target[text] = struct{}{}
+			}
+		}
+	}
+}
+
+func sortedKeys(values map[string]struct{}) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func formatSkillInvocationPrompt(skill SlashCommandInfo, args string) string {
 	var builder strings.Builder
 	builder.WriteString("Use the following skill for this request.\n\n")
@@ -544,10 +626,111 @@ func escapeXML(value string) string {
 }
 
 func (s *Session) Prompt(ctx context.Context, prompt string) error {
+	return s.prompt(ctx, prompt, nil, false)
+}
+
+func (s *Session) PromptWithAttachments(ctx context.Context, prompt string, attachments []PromptAttachment) error {
+	return s.prompt(ctx, prompt, attachments, false)
+}
+
+func (s *Session) SteerWithAttachments(ctx context.Context, message string, attachments []PromptAttachment) error {
+	return s.prompt(ctx, message, attachments, false)
+}
+
+func (s *Session) FollowUpWithAttachments(ctx context.Context, message string, attachments []PromptAttachment) error {
+	return s.prompt(ctx, message, attachments, false)
+}
+
+func waitForRetryDelay(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func clonePromptAttachments(attachments []PromptAttachment) []PromptAttachment {
+	if len(attachments) == 0 {
+		return nil
+	}
+	out := make([]PromptAttachment, len(attachments))
+	copy(out, attachments)
+	return out
+}
+
+func cloneAgentcoreMessage(message agentcore.Message) agentcore.Message {
+	if message == nil {
+		return nil
+	}
+	out := make(agentcore.Message, len(message))
+	for key, value := range message {
+		out[key] = value
+	}
+	return out
+}
+
+func (s *Session) applyPromptStreamEvent(state *promptStreamState, event agentcore.Event) {
+	eventType := strings.TrimSpace(fmt.Sprintf("%v", event["type"]))
+	switch eventType {
+	case "message_start":
+		message, ok := event["message"].(agentcore.Message)
+		if !ok {
+			break
+		}
+		s.Events = append(s.Events, event)
+		state.activeMessage = cloneAgentcoreMessage(message)
+		state.activeMessageIdx = len(state.messages)
+		state.messages = append(state.messages, cloneAgentcoreMessage(message))
+		return
+	case "message_update":
+		if state.activeMessageIdx < 0 || state.activeMessageIdx >= len(state.messages) {
+			break
+		}
+		message, ok := event["message"].(agentcore.Message)
+		if !ok {
+			break
+		}
+		s.Events = append(s.Events, event)
+		state.activeMessage = cloneAgentcoreMessage(message)
+		state.messages[state.activeMessageIdx] = cloneAgentcoreMessage(message)
+		return
+	case "message_end":
+		if state.activeMessageIdx >= 0 && state.activeMessageIdx < len(state.messages) {
+			message, ok := event["message"].(agentcore.Message)
+			if ok {
+				state.messages[state.activeMessageIdx] = cloneAgentcoreMessage(message)
+			} else {
+				state.messages[state.activeMessageIdx] = state.activeMessage
+			}
+		}
+		state.activeMessage = nil
+		state.activeMessageIdx = -1
+		s.Events = append(s.Events, event)
+		return
+	}
+
+	if eventType == "agent_start" || eventType == "turn_start" || eventType == "turn_end" ||
+		eventType == "tool_execution_start" || eventType == "tool_execution_update" || eventType == "tool_execution_end" {
+		s.Events = append(s.Events, event)
+		return
+	}
+	s.Events = append(s.Events, event)
+}
+
+func (s *Session) prompt(ctx context.Context, prompt string, attachments []PromptAttachment, retrying bool) error {
+	streamState := promptStreamState{activeMessageIdx: -1}
 	if s.IsStreaming {
 		return fmt.Errorf("session is already streaming")
 	}
 	prompt = s.expandPromptTemplate(prompt)
+	if !retrying {
+		s.LastPrompt = prompt
+		s.lastAttachments = clonePromptAttachments(attachments)
+	}
 
 	s.mu.Lock()
 	opCtx, cancel := context.WithCancel(ctx)
@@ -558,20 +741,33 @@ func (s *Session) Prompt(ctx context.Context, prompt string) error {
 	defer func() {
 		s.mu.Lock()
 		s.promptCancel = nil
+		if s.retryCancel != nil {
+			s.retryCancel = nil
+		}
 		s.mu.Unlock()
 		s.IsStreaming = false
 	}()
 
 	var loop agentcore.LoopResult
 	var err error
-	if s.turnIndex < len(s.Turns) {
+	usedScriptedTurns := s.turnIndex < len(s.Turns)
+	if usedScriptedTurns {
+		prompt, err = s.promptTextWithAttachments(prompt, attachments)
+		if err != nil {
+			cancel()
+			return err
+		}
 		loop, err = agentcore.RunScriptedLoop(opCtx, agentcore.ScriptedLoopInput{
 			Prompts: []string{prompt},
-			Tools:   BuiltinTools(s.Root),
+			Tools:   s.builtinTools(),
 			Turns:   s.consumePromptTurns(),
 		})
 	} else {
 		if s.Provider == "" || s.ModelID == "" {
+			cancel()
+			s.mu.Lock()
+			s.promptCancel = nil
+			s.mu.Unlock()
 			return fmt.Errorf("no scripted turns and no model configured")
 		}
 		chatOptions := ai.ChatOptions{}
@@ -581,43 +777,266 @@ func (s *Session) Prompt(ctx context.Context, prompt string) error {
 				chatOptions.ReasoningEffort = ai.ClampReasoning(effort)
 			}
 		}
+		prompts, promptErr := s.promptMessages(prompt, attachments)
+		if promptErr != nil {
+			cancel()
+			return promptErr
+		}
 		loop, err = agentcore.RunProviderLoop(opCtx, agentcore.ProviderLoopInput{
-			Prompts:   []string{prompt},
-			Tools:     BuiltinTools(s.Root),
-			History:   sessionMessagesToAI(s.Messages),
-			Provider:  s.Provider,
-			Model:     s.ModelID,
-			ToolSpecs: BuiltinToolSpecs(),
-			Options:   chatOptions,
+			PromptMessages: prompts,
+			Tools:          s.builtinTools(),
+			History:        s.providerHistory(),
+			Provider:       s.Provider,
+			Model:          s.ModelID,
+			ToolSpecs:      BuiltinToolSpecs(),
+			Options:        chatOptions,
 			GetAPIKey: func(provider string) string {
 				return s.resolveProviderAPIKey(opCtx, provider)
 			},
 			TransformContext: s.transformContextWithSkills,
+			EventSink: func(event agentcore.Event) {
+				s.applyPromptStreamEvent(&streamState, event)
+			},
 		})
 	}
-	cancel()
 	if err != nil {
+		shouldRetry := s.AutoRetry && !retrying && opCtx.Err() == nil
+		cancel()
+		if shouldRetry {
+			s.mu.Lock()
+			if s.retryCancel != nil {
+				s.retryCancel()
+			}
+			retryCtx, retryCancel := context.WithCancel(ctx)
+			s.retryCancel = retryCancel
+			s.mu.Unlock()
+
+			err = waitForRetryDelay(retryCtx, autoRetryDelay)
+			s.mu.Lock()
+			s.IsStreaming = false
+			s.mu.Unlock()
+			s.mu.Lock()
+			if s.retryCancel != nil {
+				s.retryCancel = nil
+			}
+			s.mu.Unlock()
+			if err != nil {
+				return err
+			}
+			return s.prompt(ctx, prompt, s.lastAttachments, true)
+		}
 		return err
 	}
+	cancel()
 	if err := opCtx.Err(); err != nil && err != context.Canceled {
 		return err
 	}
 
-	s.Events = append(s.Events, loop.Events...)
+	if usedScriptedTurns {
+		s.Events = append(s.Events, loop.Events...)
+		for _, message := range loop.Messages {
+			if err := s.appendEntry(SessionEntry{Type: "message", Message: message}); err != nil {
+				return err
+			}
+		}
+		return s.triggerAutoCompaction(context.Background())
+	}
+
 	for _, message := range loop.Messages {
+		if message == nil || len(message) == 0 {
+			continue
+		}
+		if _, ok := message["role"]; !ok {
+			continue
+		}
 		if err := s.appendEntry(SessionEntry{Type: "message", Message: message}); err != nil {
 			return err
 		}
 	}
-	return nil
+
+	streamState.activeMessageIdx = -1
+	streamState.activeMessage = nil
+
+	return s.triggerAutoCompaction(context.Background())
+}
+
+func (s *Session) promptMessages(prompt string, attachments []PromptAttachment) ([]ai.Message, error) {
+	if len(attachments) == 0 {
+		return []ai.Message{{Role: "user", Content: prompt}}, nil
+	}
+	content := []any{map[string]any{"type": "text", "text": prompt}}
+	for _, attachment := range attachments {
+		block, err := s.attachmentContentBlock(attachment)
+		if err != nil {
+			return nil, err
+		}
+		content = append(content, block)
+	}
+	return []ai.Message{{Role: "user", Content: content}}, nil
+}
+
+func (s *Session) promptTextWithAttachments(prompt string, attachments []PromptAttachment) (string, error) {
+	if len(attachments) == 0 {
+		return prompt, nil
+	}
+	var builder strings.Builder
+	builder.WriteString(prompt)
+	builder.WriteString("\n")
+	builder.WriteString("The following attachments were provided:\n")
+	for _, attachment := range attachments {
+		kind := strings.TrimSpace(strings.ToLower(strings.TrimSpace(attachment.Type)))
+		switch kind {
+		case "", "text", "file":
+			text := attachment.Text
+			if text == "" && attachment.Path != "" {
+				path, err := ResolveWorkspacePath(s.Root, attachment.Path)
+				if err != nil {
+					return "", err
+				}
+				data, err := os.ReadFile(path)
+				if err != nil {
+					return "", err
+				}
+				if isLikelyBinary(data) {
+					return "", fmt.Errorf("%s appears to be a binary file and was not attached", attachment.Path)
+				}
+				text = string(data)
+			}
+			builder.WriteString("- ")
+			if attachment.Path != "" {
+				builder.WriteString("file ")
+				builder.WriteString(attachment.Path)
+			} else {
+				builder.WriteString("text block")
+			}
+			builder.WriteString(":\n")
+			if text != "" {
+				text, truncated := truncateToolOutput(text, s.ToolOutputLimit)
+				builder.WriteString(text)
+				if truncated {
+					builder.WriteString(" (truncated)")
+				}
+				builder.WriteString("\n")
+			}
+		case "image":
+			label := "image attachment"
+			if attachment.Path != "" {
+				label += " " + attachment.Path
+			}
+			if attachment.MimeType != "" {
+				label += fmt.Sprintf(" (%s)", attachment.MimeType)
+			}
+			if attachment.Data != "" {
+				label += fmt.Sprintf(" [base64 bytes: %d]", len(attachment.Data))
+			}
+			builder.WriteString("- ")
+			builder.WriteString(label)
+			builder.WriteString("\n")
+		default:
+			return "", fmt.Errorf("unsupported attachment type: %s", attachment.Type)
+		}
+	}
+	return builder.String(), nil
+}
+
+func (s *Session) builtinTools() []agentcore.Tool {
+	return BuiltinToolsWithOptions(s.Root, BuiltinToolOptions{
+		OutputLimit:        s.ToolOutputLimit,
+		ShellCommandPrefix: s.ShellCommandPrefix,
+	})
+}
+
+func (s *Session) attachmentContentBlock(attachment PromptAttachment) (any, error) {
+	kind := strings.TrimSpace(attachment.Type)
+	if kind == "" {
+		kind = "text"
+	}
+	switch kind {
+	case "text", "file":
+		text := attachment.Text
+		if text == "" && attachment.Path != "" {
+			path, err := ResolveWorkspacePath(s.Root, attachment.Path)
+			if err != nil {
+				return nil, err
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil, err
+			}
+			if isLikelyBinary(data) {
+				return nil, fmt.Errorf("%s appears to be a binary file and cannot be attached as text", attachment.Path)
+			}
+			text = string(data)
+		}
+		if attachment.Path != "" {
+			text = fmt.Sprintf("Attached file %s:\n%s", attachment.Path, text)
+		}
+		return map[string]any{"type": "text", "text": text}, nil
+	case "image":
+		data := attachment.Data
+		if data == "" && attachment.Path != "" {
+			path, err := ResolveWorkspacePath(s.Root, attachment.Path)
+			if err != nil {
+				return nil, err
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				return nil, err
+			}
+			data = base64.StdEncoding.EncodeToString(raw)
+		}
+		if strings.TrimSpace(data) == "" {
+			return nil, fmt.Errorf("image attachment requires data or path")
+		}
+		mimeType := attachment.MimeType
+		if mimeType == "" {
+			mimeType = "image/png"
+		}
+		return map[string]any{"type": "image", "data": data, "mimeType": mimeType}, nil
+	default:
+		return nil, fmt.Errorf("unsupported attachment type: %s", kind)
+	}
+}
+
+func (s *Session) providerHistory() []ai.Message {
+	history := sessionMessagesToAI(s.Messages)
+	if system := strings.TrimSpace(s.HeadlessSystemPrompt()); system != "" {
+		history = append([]ai.Message{{Role: "system", Content: system}}, history...)
+	}
+	return history
+}
+
+func (s *Session) HeadlessSystemPrompt() string {
+	lines := []string{
+		"You are a headless coding agent operating in a local workspace.",
+		"Use the available tools to inspect and modify files. Keep responses concise and technical.",
+		"Workspace: " + s.Root,
+	}
+	if branch := currentGitBranch(s.Root); branch != "" {
+		lines = append(lines, "Git branch: "+branch)
+	}
+	if status := shortGitStatus(s.Root); status != "" {
+		lines = append(lines, "Git status:\n"+status)
+	}
+	if packages := packageContext(s.Root); packages != "" {
+		lines = append(lines, "Project context:\n"+packages)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (s *Session) Steer(ctx context.Context, message string) error {
-	return s.Prompt(ctx, message)
+	return s.SteerWithAttachments(ctx, message, nil)
 }
 
 func (s *Session) FollowUp(ctx context.Context, message string) error {
-	return s.Prompt(ctx, message)
+	return s.FollowUpWithAttachments(ctx, message, nil)
+}
+
+func (s *Session) RetryLast(ctx context.Context) error {
+	if strings.TrimSpace(s.LastPrompt) == "" {
+		return fmt.Errorf("no prompt to retry")
+	}
+	return s.prompt(ctx, s.LastPrompt, clonePromptAttachments(s.lastAttachments), true)
 }
 
 func (s *Session) State() State {
@@ -638,6 +1057,7 @@ func (s *Session) State() State {
 }
 
 func (s *Session) Abort() {
+	s.AbortRetry()
 	s.mu.Lock()
 	if s.promptCancel != nil {
 		s.promptCancel()
@@ -672,6 +1092,8 @@ func (s *Session) NewSessionWithParent(parentSession string) {
 	s.ModelID = ""
 	s.SteeringMode = "one-at-a-time"
 	s.FollowUpMode = "one-at-a-time"
+	s.ShellCommandPrefix = ""
+	s.ToolOutputLimit = 0
 	s.IsStreaming = false
 	s.parentSession = strings.TrimSpace(parentSession)
 	s.seedDefaultModels()
@@ -706,12 +1128,26 @@ func (s *Session) nextSessionPathOrCurrent() string {
 }
 
 func (s *Session) seedDefaultModels() {
-	for _, model := range ai.DefaultModels() {
+	current := ModelInfo{Provider: s.Provider, ModelID: s.ModelID}
+	s.AvailableModels = nil
+
+	for _, model := range ai.GetAllModelsWithOAuth(s.OAuthCredentials) {
 		s.AvailableModels = appendModelIfMissing(s.AvailableModels, ModelInfo{
 			Provider: model.Provider,
-			ModelID:  model.ModelID,
+			ModelID:  model.ID,
 		})
 	}
+
+	if current.Provider != "" && current.ModelID != "" {
+		s.AvailableModels = appendModelIfMissing(s.AvailableModels, current)
+	}
+
+	sort.SliceStable(s.AvailableModels, func(i, j int) bool {
+		if s.AvailableModels[i].Provider == s.AvailableModels[j].Provider {
+			return s.AvailableModels[i].ModelID < s.AvailableModels[j].ModelID
+		}
+		return s.AvailableModels[i].Provider < s.AvailableModels[j].Provider
+	})
 }
 
 func (s *Session) SetSteeringMode(mode string) error {
@@ -801,6 +1237,7 @@ func (s *Session) SetOAuthCredentials(provider string, credentials ai.OAuthCrede
 		s.OAuthCredentials = map[string]ai.OAuthCredentials{}
 	}
 	s.OAuthCredentials[provider] = credentials
+	s.seedDefaultModels()
 	return s.appendEntry(SessionEntry{
 		Type:             "oauth_login",
 		OAuthProvider:    provider,
@@ -819,6 +1256,7 @@ func (s *Session) LoadOAuthStore(path string) error {
 	for provider, credentials := range store.Providers {
 		s.OAuthCredentials[provider] = credentials
 	}
+	s.seedDefaultModels()
 	return nil
 }
 
@@ -864,17 +1302,31 @@ func (s *Session) CycleModel() (ModelInfo, bool) {
 }
 
 func (s *Session) Compact(customInstructions string) CompactionResult {
+	return s.compact(context.Background(), customInstructions, false)
+}
+
+func (s *Session) CompactWithModel(ctx context.Context, customInstructions string) CompactionResult {
+	return s.compact(ctx, customInstructions, true)
+}
+
+func (s *Session) compact(ctx context.Context, customInstructions string, useModel bool) CompactionResult {
 	s.IsCompacting = true
 	instructions := strings.TrimSpace(customInstructions)
-	summary := "Session compacted"
-	if instructions != "" {
-		summary = fmt.Sprintf("%s (%s)", summary, instructions)
-	}
 	defer func() {
 		s.IsCompacting = false
 	}()
 
 	tokensBefore := s.Stats().Tokens.Total
+	summary := s.buildCompactionSummary(instructions)
+	if useModel && s.Compactor != nil {
+		if generated, err := s.Compactor(ctx, sessionMessagesToAI(s.Messages), instructions); err == nil && strings.TrimSpace(generated) != "" {
+			summary = strings.TrimSpace(generated)
+		}
+	} else if useModel {
+		if generated, err := s.compactWithConfiguredModel(ctx, instructions); err == nil && strings.TrimSpace(generated) != "" {
+			summary = strings.TrimSpace(generated)
+		}
+	}
 	kept := ""
 	branch := s.resolveBranchEntries(s.leafID)
 	if len(branch) > 0 {
@@ -903,6 +1355,62 @@ func (s *Session) Compact(customInstructions string) CompactionResult {
 	}
 }
 
+func (s *Session) compactWithConfiguredModel(ctx context.Context, instructions string) (string, error) {
+	if strings.TrimSpace(s.Provider) == "" || strings.TrimSpace(s.ModelID) == "" {
+		return "", fmt.Errorf("no model configured")
+	}
+	userText := "Summarize the conversation so a headless coding agent can continue from compacted history."
+	if instructions != "" {
+		userText += "\n\nAdditional instructions:\n" + instructions
+	}
+	result, _, err := ai.Complete(ctx, ai.CompletionRequest{
+		Provider: s.Provider,
+		Model:    s.ModelID,
+		Messages: append([]ai.Message{
+			{Role: "system", Content: s.HeadlessSystemPrompt()},
+			{Role: "user", Content: userText},
+		}, sessionMessagesToAI(s.Messages)...),
+		Options: ai.ChatOptions{APIKey: s.resolveProviderAPIKey(ctx, s.Provider)},
+	})
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(result.Text), nil
+}
+
+func (s *Session) buildCompactionSummary(instructions string) string {
+	stats := s.Stats()
+	readFiles := map[string]struct{}{}
+	modifiedFiles := map[string]struct{}{}
+	for _, message := range s.Messages {
+		role, _ := message["role"].(string)
+		if role != "toolResult" {
+			continue
+		}
+		details, _ := message["details"].(map[string]any)
+		addStringList(readFiles, details["readFiles"])
+		addStringList(modifiedFiles, details["modifiedFiles"])
+	}
+	lines := []string{
+		"Session compacted.",
+		fmt.Sprintf("Messages: %d user, %d assistant, %d tool result.", stats.UserMessages, stats.AssistantMessages, stats.ToolResults),
+	}
+	if instructions != "" {
+		lines = append(lines, "Instructions: "+instructions)
+	}
+	if len(readFiles) > 0 {
+		lines = append(lines, "Read files: "+strings.Join(sortedKeys(readFiles), ", "))
+	}
+	if len(modifiedFiles) > 0 {
+		lines = append(lines, "Modified files: "+strings.Join(sortedKeys(modifiedFiles), ", "))
+	}
+	if last := s.GetLastAssistantText(); last != nil && strings.TrimSpace(*last) != "" {
+		text, _ := truncateToolOutput(strings.TrimSpace(*last), 1000)
+		lines = append(lines, "Last assistant response: "+text)
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (s *Session) SetAutoCompactionEnabled(enabled bool) {
 	s.AutoCompaction = enabled
 }
@@ -912,7 +1420,19 @@ func (s *Session) SetAutoRetryEnabled(enabled bool) {
 }
 
 func (s *Session) AbortRetry() {
-	s.AutoRetry = false
+	s.mu.Lock()
+	if s.retryCancel != nil {
+		s.retryCancel()
+	}
+	s.mu.Unlock()
+}
+
+func (s *Session) triggerAutoCompaction(ctx context.Context) error {
+	if !s.AutoCompaction || s.IsCompacting || len(s.Messages) < autoCompactionMessageThreshold {
+		return nil
+	}
+	_ = s.compact(ctx, "", false)
+	return nil
 }
 
 func (s *Session) Bash(ctx context.Context, command string) (BashResult, error) {
@@ -1499,6 +2019,7 @@ func (s *Session) rebuildStateFromLeaf(leafID string) {
 			s.applyEntry(entry)
 		}
 	}
+	s.seedDefaultModels()
 }
 
 func (s *Session) prepareEntry(entry SessionEntry) SessionEntry {

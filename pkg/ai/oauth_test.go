@@ -166,3 +166,90 @@ func TestRegisterAndUnregisterOAuthProvider(t *testing.T) {
 		t.Fatal("expected custom oauth provider to be removed")
 	}
 }
+
+func TestGetModelsWithOAuthAppliesMutation(t *testing.T) {
+	ResetModels()
+	defer ResetModels()
+
+	RegisterModel(Model{
+		Provider: "mutation-test",
+		ID:       "before-mutation",
+		API:      "openai-completions",
+	})
+	RegisterOAuthProvider(testOAuthMutatorProvider{
+		id:      "mutation-test",
+		mutated: "after-mutation",
+	})
+	defer UnregisterOAuthProvider("mutation-test")
+
+	if got := GetModelsWithOAuth("mutation-test", map[string]OAuthCredentials{}); len(got) != 1 || got[0].ID != "before-mutation" {
+		t.Fatalf("unexpected models without credentials: %#v", got)
+	}
+
+	mutated := GetModelsWithOAuth("mutation-test", map[string]OAuthCredentials{
+		"mutation-test": {Access: "token"},
+	})
+	if len(mutated) != 1 || mutated[0].ID != "after-mutation" {
+		t.Fatalf("unexpected models with credentials: %#v", mutated)
+	}
+}
+
+func TestGetAllModelsWithOAuthAppliesMutations(t *testing.T) {
+	ResetModels()
+	defer ResetModels()
+
+	RegisterModel(Model{
+		Provider: "mutation-all",
+		ID:       "before",
+		API:      "openai-completions",
+	})
+	RegisterOAuthProvider(testOAuthMutatorProvider{
+		id:      "mutation-all",
+		mutated: "after",
+	})
+	defer UnregisterOAuthProvider("mutation-all")
+
+	all := GetAllModelsWithOAuth(map[string]OAuthCredentials{"mutation-all": {Access: "token"}})
+	found := false
+	for _, model := range all {
+		if model.Provider == "mutation-all" {
+			if model.ID == "after" {
+				found = true
+			}
+			if model.ID == "before" {
+				t.Fatal("unexpected pre-mutation model for mutation-all")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected mutation-all model in all-model list")
+	}
+}
+
+type testOAuthMutatorProvider struct {
+	id      string
+	mutated string
+}
+
+func (p testOAuthMutatorProvider) ID() OAuthProviderID      { return p.id }
+func (p testOAuthMutatorProvider) Name() string             { return "Mutation" }
+func (p testOAuthMutatorProvider) UsesCallbackServer() bool { return false }
+func (p testOAuthMutatorProvider) Login(callbacks OAuthLoginCallbacks) (OAuthCredentials, error) {
+	return OAuthCredentials{Access: ""}, nil
+}
+func (p testOAuthMutatorProvider) RefreshToken(ctx context.Context, credentials OAuthCredentials) (OAuthCredentials, error) {
+	return credentials, nil
+}
+func (p testOAuthMutatorProvider) GetAPIKey(credentials OAuthCredentials) string {
+	return credentials.Access
+}
+func (p testOAuthMutatorProvider) ModifyModels(models []Model, _ OAuthCredentials) []Model {
+	out := make([]Model, 0, len(models))
+	for _, model := range models {
+		if model.Provider == p.id {
+			model.ID = p.mutated
+		}
+		out = append(out, model)
+	}
+	return out
+}

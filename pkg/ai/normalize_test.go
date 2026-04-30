@@ -57,8 +57,8 @@ func TestNormalizedContentPreservesProviderSignatures(t *testing.T) {
 	if decoded[2]["id"] != "call-1" || decoded[2]["thoughtSignature"] != "thought-1" {
 		t.Fatalf("tool item = %#v", decoded[2])
 	}
-	if _, ok := decoded[2]["hasId"]; ok {
-		t.Fatalf("unexpected hasId in tool item = %#v", decoded[2])
+	if decoded[2]["hasId"] != true {
+		t.Fatalf("tool hasId = %#v", decoded[2])
 	}
 }
 
@@ -193,5 +193,95 @@ func TestFillResultMetadataAddsAssistantMessageFields(t *testing.T) {
 	}
 	if result.Usage == nil {
 		t.Fatal("expected usage")
+	}
+}
+
+func TestPrepareMessagesForModelDowngradesUnsupportedImages(t *testing.T) {
+	model := Model{ID: "text-only", Provider: "openai", API: "openai-completions", Input: []string{"text"}}
+	messages := PrepareMessagesForModel([]Message{{
+		Role: "user",
+		Content: []any{
+			map[string]any{"type": "image", "data": "abc", "mimeType": "image/png"},
+			map[string]any{"type": "image", "data": "def", "mimeType": "image/png"},
+			map[string]any{"type": "text", "text": "after"},
+		},
+	}}, model)
+
+	blocks := ParseContentBlocks(messages[0].Content)
+	if len(blocks) != 2 {
+		t.Fatalf("blocks = %#v", blocks)
+	}
+	if blocks[0].Type != "text" || blocks[0].Text != nonVisionUserImagePlaceholder {
+		t.Fatalf("first block = %#v", blocks[0])
+	}
+	if blocks[1].Text != "after" {
+		t.Fatalf("second block = %#v", blocks[1])
+	}
+}
+
+func TestPrepareMessagesForModelSynthesizesMissingToolResult(t *testing.T) {
+	model := Model{ID: "claude", Provider: "anthropic", API: "anthropic-messages", Input: []string{"text"}}
+	messages := PrepareMessagesForModel([]Message{
+		{
+			Role:       "assistant",
+			Provider:   "openai",
+			API:        "openai-responses",
+			Model:      "gpt-5.4",
+			StopReason: "toolUse",
+			Content: NormalizedContent([]ContentBlock{{
+				Type:      "toolCall",
+				ID:        "call|item",
+				Name:      "search",
+				Arguments: map[string]any{"query": "pi"},
+			}}),
+		},
+		{Role: "user", Content: "continue"},
+	}, model)
+
+	if len(messages) != 3 {
+		t.Fatalf("messages = %#v", messages)
+	}
+	if messages[1].Role != "toolResult" || !messages[1].IsError {
+		t.Fatalf("synthetic tool result = %#v", messages[1])
+	}
+	if messages[1].ToolCallID != "call_item" {
+		t.Fatalf("toolCallId = %q", messages[1].ToolCallID)
+	}
+	blocks := ParseContentBlocks(messages[1].Content)
+	if len(blocks) != 1 || blocks[0].Text != "No result provided" {
+		t.Fatalf("synthetic blocks = %#v", blocks)
+	}
+}
+
+func TestPrepareMessagesForModelDropsErroredAssistantReplay(t *testing.T) {
+	model := Model{ID: "gpt-5.4", Provider: "openai", API: "openai-responses", Input: []string{"text"}}
+	messages := PrepareMessagesForModel([]Message{
+		{Role: "assistant", Provider: "openai", API: "openai-responses", Model: "gpt-5.4", StopReason: "error", Content: "partial"},
+		{Role: "user", Content: "retry"},
+	}, model)
+
+	if len(messages) != 1 || messages[0].Role != "user" {
+		t.Fatalf("messages = %#v", messages)
+	}
+}
+
+func TestPrepareMessagesForModelConvertsCrossModelThinkingToText(t *testing.T) {
+	model := Model{ID: "target", Provider: "anthropic", API: "anthropic-messages", Input: []string{"text"}}
+	messages := PrepareMessagesForModel([]Message{{
+		Role:       "assistant",
+		Provider:   "openai",
+		API:        "openai-responses",
+		Model:      "source",
+		StopReason: "stop",
+		Content: NormalizedContent([]ContentBlock{{
+			Type:              "thinking",
+			Thinking:          "internal reasoning",
+			ThinkingSignature: "sig",
+		}}),
+	}}, model)
+
+	blocks := ParseContentBlocks(messages[0].Content)
+	if len(blocks) != 1 || blocks[0].Type != "text" || blocks[0].Text != "internal reasoning" {
+		t.Fatalf("blocks = %#v", blocks)
 	}
 }

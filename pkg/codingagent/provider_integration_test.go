@@ -144,6 +144,54 @@ func TestSessionProviderLoopUsesStoredOAuthCredentials(t *testing.T) {
 	}
 }
 
+func TestSessionUsesOAuthModelMutations(t *testing.T) {
+	const providerName = "mutating-oauth-provider"
+	ai.RegisterModel(ai.Model{
+		Provider: providerName,
+		ID:       "before-oauth",
+		API:      "x-test",
+	})
+	defer ai.ClearProviderModels(providerName)
+
+	ai.RegisterOAuthProvider(testOAuthProvider{
+		id:   providerName,
+		name: "Mutating OAuth",
+		refresh: func(ctx context.Context, credentials ai.OAuthCredentials) (ai.OAuthCredentials, error) {
+			return credentials, nil
+		},
+		getAPIKey: func(credentials ai.OAuthCredentials) string {
+			return credentials.Access
+		},
+		modifyModels: func(models []ai.Model, _ ai.OAuthCredentials) []ai.Model {
+			out := make([]ai.Model, 0, len(models))
+			for _, model := range models {
+				if model.Provider == providerName && model.ID == "before-oauth" {
+					model.ID = "after-oauth"
+				}
+				out = append(out, model)
+			}
+			return out
+		},
+	})
+	defer ai.UnregisterOAuthProvider(providerName)
+
+	session := NewSession(t.TempDir(), nil)
+	if !hasSessionModel(session.AvailableModels, providerName, "before-oauth") {
+		t.Fatalf("expected base model before oauth mutation: %#v", session.AvailableModels)
+	}
+
+	if err := session.SetOAuthCredentials(providerName, ai.OAuthCredentials{Access: "token"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if hasSessionModel(session.AvailableModels, providerName, "before-oauth") {
+		t.Fatalf("expected oauth model mutation to replace before-oauth model")
+	}
+	if !hasSessionModel(session.AvailableModels, providerName, "after-oauth") {
+		t.Fatalf("expected mutated model after oauth credentials: %#v", session.AvailableModels)
+	}
+}
+
 func TestSessionProviderLoopForwardsThinkingLevel(t *testing.T) {
 	const providerName = "thinking-provider"
 	ai.RegisterProvider(providerName, providerFunc(func(_ context.Context, req ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error) {
@@ -216,6 +264,148 @@ func TestSessionProviderLoopInjectsSkillContext(t *testing.T) {
 	}
 }
 
+func TestSessionProviderLoopInjectsHeadlessSystemContext(t *testing.T) {
+	const providerName = "headless-system-context-provider"
+	var captured []ai.Message
+	ai.RegisterProvider(providerName, providerFunc(func(_ context.Context, req ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error) {
+		captured = append([]ai.Message(nil), req.Messages...)
+		return ai.NormalizedResult{
+			Role:       "assistant",
+			StopReason: "stop",
+			Text:       "ok",
+			Content:    []any{map[string]any{"type": "text", "text": "ok"}},
+		}, []ai.NormalizedEvent{{Type: "start"}, {Type: "text_start", ContentIdx: 0}, {Type: "text_delta", ContentIdx: 0, Delta: "ok"}, {Type: "text_end", ContentIdx: 0, Content: "ok"}, {Type: "done", Reason: "stop"}}, nil
+	}))
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	session := NewSession(root, nil)
+	if _, err := session.SetModel(providerName, "test-model"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := session.Prompt(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if len(captured) == 0 || captured[0].Role != "system" {
+		t.Fatalf("captured messages = %#v", captured)
+	}
+	system, _ := captured[0].Content.(string)
+	if !strings.Contains(system, "headless coding agent") || !strings.Contains(system, "Workspace: "+root) || !strings.Contains(system, "go.mod") {
+		t.Fatalf("system context = %q", system)
+	}
+}
+
+func TestSessionPromptWithAttachmentsForwardsTextAndImageBlocks(t *testing.T) {
+	const providerName = "attachment-provider"
+	var captured []ai.Message
+	ai.RegisterProvider(providerName, providerFunc(func(_ context.Context, req ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error) {
+		captured = append([]ai.Message(nil), req.Messages...)
+		return ai.NormalizedResult{
+			Role:       "assistant",
+			StopReason: "stop",
+			Text:       "ok",
+			Content:    []any{map[string]any{"type": "text", "text": "ok"}},
+		}, []ai.NormalizedEvent{{Type: "start"}, {Type: "text_start", ContentIdx: 0}, {Type: "text_delta", ContentIdx: 0, Delta: "ok"}, {Type: "text_end", ContentIdx: 0, Content: "ok"}, {Type: "done", Reason: "stop"}}, nil
+	}))
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("attached text"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	session := NewSession(root, nil)
+	if _, err := session.SetModel(providerName, "test-model"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := session.PromptWithAttachments(context.Background(), "inspect", []PromptAttachment{
+		{Type: "file", Path: "notes.txt"},
+		{Type: "image", Data: "aW1n", MimeType: "image/png"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	last := captured[len(captured)-1]
+	content, ok := last.Content.([]any)
+	if !ok || len(content) != 3 {
+		t.Fatalf("content = %#v", last.Content)
+	}
+	if !strings.Contains(content[1].(map[string]any)["text"].(string), "attached text") {
+		t.Fatalf("file block = %#v", content[1])
+	}
+	if content[2].(map[string]any)["type"] != "image" {
+		t.Fatalf("image block = %#v", content[2])
+	}
+}
+
+func TestSessionAutoRetryRetriesProviderFailureOnce(t *testing.T) {
+	const providerName = "auto-retry-provider"
+	calls := 0
+	ai.RegisterProvider(providerName, providerFunc(func(_ context.Context, req ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error) {
+		calls++
+		if calls == 1 {
+			return ai.NormalizedResult{}, nil, fmt.Errorf("transient")
+		}
+		return ai.NormalizedResult{
+			Role:       "assistant",
+			StopReason: "stop",
+			Text:       "ok",
+			Content:    []any{map[string]any{"type": "text", "text": "ok"}},
+		}, []ai.NormalizedEvent{{Type: "start"}, {Type: "text_start", ContentIdx: 0}, {Type: "text_delta", ContentIdx: 0, Delta: "ok"}, {Type: "text_end", ContentIdx: 0, Content: "ok"}, {Type: "done", Reason: "stop"}}, nil
+	}))
+
+	session := NewSession(t.TempDir(), nil)
+	session.AutoRetry = true
+	if _, err := session.SetModel(providerName, "test-model"); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Prompt(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d", calls)
+	}
+}
+
+func TestSessionCompactWithModelUsesConfiguredProvider(t *testing.T) {
+	const providerName = "compaction-provider"
+	var captured ai.CompletionRequest
+	ai.RegisterProvider(providerName, providerFunc(func(_ context.Context, req ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error) {
+		captured = req
+		return ai.NormalizedResult{
+			Role:       "assistant",
+			StopReason: "stop",
+			Text:       "provider summary",
+			Content:    []any{map[string]any{"type": "text", "text": "provider summary"}},
+		}, []ai.NormalizedEvent{{Type: "done", Reason: "stop"}}, nil
+	}))
+
+	session := NewSession(t.TempDir(), nil)
+	if _, err := session.SetModel(providerName, "compact-model"); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.appendEntry(SessionEntry{Type: "message", Message: map[string]any{
+		"role": "user", "text": "existing turn",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	result := session.CompactWithModel(context.Background(), "keep decisions")
+	if result.Summary != "provider summary" {
+		t.Fatalf("summary = %q", result.Summary)
+	}
+	if captured.Provider != providerName || captured.Model != "compact-model" {
+		t.Fatalf("request = %#v", captured)
+	}
+	if len(captured.Messages) < 3 || captured.Messages[0].Role != "system" || captured.Messages[1].Role != "user" {
+		t.Fatalf("messages = %#v", captured.Messages)
+	}
+	if !strings.Contains(ai.MessageText(captured.Messages[1]), "keep decisions") {
+		t.Fatalf("compaction prompt = %#v", captured.Messages[1])
+	}
+}
+
 type providerFunc func(context.Context, ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error)
 
 func (fn providerFunc) Complete(ctx context.Context, req ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error) {
@@ -223,10 +413,11 @@ func (fn providerFunc) Complete(ctx context.Context, req ai.CompletionRequest) (
 }
 
 type testOAuthProvider struct {
-	id        string
-	name      string
-	refresh   func(context.Context, ai.OAuthCredentials) (ai.OAuthCredentials, error)
-	getAPIKey func(ai.OAuthCredentials) string
+	id           string
+	name         string
+	refresh      func(context.Context, ai.OAuthCredentials) (ai.OAuthCredentials, error)
+	getAPIKey    func(ai.OAuthCredentials) string
+	modifyModels func([]ai.Model, ai.OAuthCredentials) []ai.Model
 }
 
 func (p testOAuthProvider) ID() string               { return p.id }
@@ -240,4 +431,20 @@ func (p testOAuthProvider) RefreshToken(ctx context.Context, credentials ai.OAut
 }
 func (p testOAuthProvider) GetAPIKey(credentials ai.OAuthCredentials) string {
 	return p.getAPIKey(credentials)
+}
+
+func (p testOAuthProvider) ModifyModels(models []ai.Model, credentials ai.OAuthCredentials) []ai.Model {
+	if p.modifyModels == nil {
+		return models
+	}
+	return p.modifyModels(models, credentials)
+}
+
+func hasSessionModel(models []ModelInfo, provider, modelID string) bool {
+	for _, model := range models {
+		if model.Provider == provider && model.ModelID == modelID {
+			return true
+		}
+	}
+	return false
 }

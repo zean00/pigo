@@ -411,7 +411,7 @@ func runProviderAssistantTurn(ctx context.Context, sink func(Event), request ai.
 			return resultMessage, nil, nil, err
 		}
 		blocks := ai.ParseContentBlocks(resultMessage.Content)
-		assistant := assistantMessageFromNormalized(blocks, resultMessage.StopReason)
+		assistant := assistantMessageFromNormalized(resultMessage, blocks)
 		applyUsage(assistant, resultMessage.Usage)
 		if !started {
 			startEvent := ai.NormalizedEvent{Type: "start", ContentIdx: 0}
@@ -431,7 +431,7 @@ func runProviderAssistantTurn(ctx context.Context, sink func(Event), request ai.
 		return resultMessage, nil, nil, err
 	}
 	blocks := ai.ParseContentBlocks(resultMessage.Content)
-	assistant := assistantMessageFromNormalized(blocks, resultMessage.StopReason)
+	assistant := assistantMessageFromNormalized(resultMessage, blocks)
 	applyUsage(assistant, resultMessage.Usage)
 	updateEventType := firstAssistantUpdate(blocks)
 	updateEvent := map[string]any{
@@ -591,17 +591,22 @@ func drainMessages(fn func() []ai.Message) []ai.Message {
 func aiMessageToEventMessage(message ai.Message) Message {
 	switch message.Role {
 	case "assistant":
-		return AssistantMessage(ai.ParseContentBlocks(message.Content), message.StopReason)
+		assistant := AssistantMessage(ai.ParseContentBlocks(message.Content), message.StopReason)
+		applyAIMessageMetadata(assistant, message)
+		return assistant
 	case "toolResult":
-		return ToolResultMessage(message.ToolCallID, message.ToolName, ToolResult{
+		toolResult := ToolResultMessage(message.ToolCallID, message.ToolName, ToolResult{
 			Text:    ai.MessageText(message),
 			IsError: message.IsError,
 		})
+		applyAIMessageMetadata(toolResult, message)
+		return toolResult
 	default:
 		user := UserMessage(ai.MessageText(message))
 		if hasStructuredContent(message.Content) {
 			user["content"] = normalizeEventContent(message.Content)
 		}
+		applyAIMessageMetadata(user, message)
 		return user
 	}
 }
@@ -625,10 +630,31 @@ func normalizeEventContent(content any) any {
 	return ai.NormalizedContent(blocks)
 }
 
-func assistantMessageFromNormalized(blocks []ai.ContentBlock, stopReason string) Message {
-	message := AssistantMessage(blocks, stopReason)
+func assistantMessageFromNormalized(result ai.NormalizedResult, blocks []ai.ContentBlock) Message {
+	message := AssistantMessage(blocks, result.StopReason)
 	message["content"] = ai.NormalizedContent(blocks)
+	if result.Provider != "" {
+		message["provider"] = result.Provider
+	}
+	if result.API != "" {
+		message["api"] = result.API
+	}
+	if result.Model != "" {
+		message["model"] = result.Model
+	}
 	return message
+}
+
+func applyAIMessageMetadata(target Message, message ai.Message) {
+	if message.Provider != "" {
+		target["provider"] = message.Provider
+	}
+	if message.API != "" {
+		target["api"] = message.API
+	}
+	if message.Model != "" {
+		target["model"] = message.Model
+	}
 }
 
 func executeTool(ctx context.Context, tools []Tool, call ai.ContentBlock) ToolResult {

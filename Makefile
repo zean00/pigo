@@ -1,4 +1,4 @@
-.PHONY: test fmt vet conformance verify-conformance
+.PHONY: test fmt vet conformance verify-conformance generate-models
 
 test:
 	go test ./...
@@ -59,3 +59,6 @@ verify-conformance:
 	cd ../pi-mono && npx tsx packages/ai-conformance/src/coding-agent-verify-cli.ts --case ../pigo/testdata/conformance/coding-agent-headless-read-error.json --output ../pigo/tmp/conformance/coding-agent-headless-read-error.out.json
 	cd ../pi-mono && npx tsx packages/ai-conformance/src/coding-agent-verify-cli.ts --case ../pigo/testdata/conformance/coding-agent-headless-edit-error.json --output ../pigo/tmp/conformance/coding-agent-headless-edit-error.out.json
 	cd ../pi-mono && npx tsx packages/ai-conformance/src/coding-agent-verify-cli.ts --case ../pigo/testdata/conformance/coding-agent-headless-bash-error.json --output ../pigo/tmp/conformance/coding-agent-headless-bash-error.out.json
+
+generate-models:
+	go run ./cmd/pigo-generate-models

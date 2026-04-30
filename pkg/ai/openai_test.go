@@ -152,6 +152,216 @@ func TestOpenAIProviderStreamingResponse(t *testing.T) {
 	}
 }
 
+func TestOpenAIProviderStreamingPreservesInterleavedParallelToolCalls(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var chunks bytes.Buffer
+		chunks.WriteString("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"tc-1\",\"function\":{\"name\":\"first\",\"arguments\":\"{\\\"a\\\":\"}}]},\"finish_reason\":\"\"}]}\n")
+		chunks.WriteString("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"tc-2\",\"function\":{\"name\":\"second\",\"arguments\":\"{\\\"b\\\":\"}}]},\"finish_reason\":\"\"}]}\n")
+		chunks.WriteString("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"1}\"}}]},\"finish_reason\":\"\"}]}\n")
+		chunks.WriteString("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"2}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n")
+		chunks.WriteString("data: [DONE]\n")
+		_, _ = w.Write(chunks.Bytes())
+	}))
+	defer server.Close()
+
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	result, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openai",
+		Model:    "gpt-mini",
+		Tools:    []Tool{{Name: "first"}, {Name: "second"}},
+		Options:  ChatOptions{APIKey: "test-key", Stream: true},
+		Messages: []Message{{Role: "user", Content: "please"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks := ParseContentBlocks(result.Content)
+	if len(blocks) != 2 {
+		t.Fatalf("blocks = %#v", blocks)
+	}
+	if blocks[0].ID != "tc-1" || blocks[0].Name != "first" || blocks[0].Arguments["a"] != float64(1) {
+		t.Fatalf("first tool call = %#v", blocks[0])
+	}
+	if blocks[1].ID != "tc-2" || blocks[1].Name != "second" || blocks[1].Arguments["b"] != float64(2) {
+		t.Fatalf("second tool call = %#v", blocks[1])
+	}
+}
+
+func TestOpenAIProviderStreamingParsesReasoningAndToolSignatures(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var chunks bytes.Buffer
+		chunks.WriteString("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think 1\"},\"finish_reason\":\"\"}]}\n")
+		chunks.WriteString("data: {\"choices\":[{\"delta\":{\"content\":\"answer\",\"tool_calls\":[{\"index\":0,\"id\":\"tc-1\",\"function\":{\"name\":\"echo\",\"arguments\":\"{\\\"value\\\":\"}}],\"reasoning_details\":[{\"type\":\"reasoning.encrypted\",\"id\":\"tc-1\",\"data\":\"encrypted\"}]},\"finish_reason\":\"\"}]}\n")
+		chunks.WriteString("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"ok\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n")
+		chunks.WriteString("data: [DONE]\n")
+		_, _ = w.Write(chunks.Bytes())
+	}))
+	defer server.Close()
+
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	result, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openai",
+		Model:    "gpt-mini",
+		Tools:    []Tool{{Name: "echo"}},
+		Options:  ChatOptions{APIKey: "test-key", Stream: true},
+		Messages: []Message{{Role: "user", Content: "please"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks := ParseContentBlocks(result.Content)
+	if len(blocks) != 3 {
+		t.Fatalf("blocks = %#v", blocks)
+	}
+	if blocks[0].Type != "thinking" || blocks[0].Thinking != "think 1" {
+		t.Fatalf("thinking block = %#v", blocks[0])
+	}
+	if blocks[1].Type != "text" || blocks[1].Text != "answer" {
+		t.Fatalf("text block = %#v", blocks[1])
+	}
+	if blocks[2].Type != "toolCall" || blocks[2].ThoughtSignature == "" {
+		t.Fatalf("tool block = %#v", blocks[2])
+	}
+}
+
+func TestOpenAIProviderStreamingParsesChunkUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var chunks bytes.Buffer
+		chunks.WriteString("data: {\"id\":\"resp-usage\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":4,\"total_tokens\":14,\"prompt_tokens_details\":{\"cached_tokens\":5,\"cache_write_tokens\":2}}}\n")
+		chunks.WriteString("data: [DONE]\n")
+		_, _ = w.Write(chunks.Bytes())
+	}))
+	defer server.Close()
+
+	RegisterModel(Model{
+		ID:       "priced-chat-usage-model",
+		Name:     "Priced Chat Usage",
+		API:      "openai-completions",
+		Provider: "openai",
+		BaseURL:  server.URL + "/v1",
+		Input:    []string{"text"},
+		Cost: ModelCost{
+			Input:      1000,
+			Output:     2000,
+			CacheRead:  500,
+			CacheWrite: 250,
+		},
+	})
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	result, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openai",
+		Model:    "priced-chat-usage-model",
+		Options:  ChatOptions{APIKey: "test-key", Stream: true},
+		Messages: []Message{{Role: "user", Content: "please"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Usage == nil {
+		t.Fatal("missing usage")
+	}
+	if result.Usage.Input != 5 || result.Usage.Output != 4 || result.Usage.CacheRead != 3 || result.Usage.CacheWrite != 2 || result.Usage.TotalTokens != 14 {
+		t.Fatalf("usage = %#v", result.Usage)
+	}
+	if result.Usage.Cost.Total <= 0 {
+		t.Fatalf("cost = %#v", result.Usage.Cost)
+	}
+}
+
+func TestOpenAIProviderStreamingParsesChoiceUsageFallback(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var chunks bytes.Buffer
+		chunks.WriteString("data: {\"id\":\"resp-usage-choice\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\",\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":3,\"total_tokens\":11,\"prompt_tokens_details\":{\"cached_tokens\":2}}}]}\n")
+		chunks.WriteString("data: [DONE]\n")
+		_, _ = w.Write(chunks.Bytes())
+	}))
+	defer server.Close()
+
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	result, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openai",
+		Model:    "gpt-mini",
+		Options:  ChatOptions{APIKey: "test-key", Stream: true},
+		Messages: []Message{{Role: "user", Content: "please"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Usage == nil {
+		t.Fatal("missing usage")
+	}
+	if result.Usage.Input != 6 || result.Usage.Output != 3 || result.Usage.CacheRead != 2 || result.Usage.CacheWrite != 0 || result.Usage.TotalTokens != 11 {
+		t.Fatalf("usage = %#v", result.Usage)
+	}
+}
+
+func TestOpenAIProviderStreamingPreservesInterleavedBlockOrder(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var chunks bytes.Buffer
+		chunks.WriteString("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think 1\"},\"finish_reason\":\"\"}]}\n")
+		chunks.WriteString("data: {\"choices\":[{\"delta\":{\"content\":\"answer 1\"},\"finish_reason\":\"\"}]}\n")
+		chunks.WriteString("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think 2\"},\"finish_reason\":\"\"}]}\n")
+		chunks.WriteString("data: {\"choices\":[{\"delta\":{\"content\":\"answer 2\"},\"finish_reason\":\"stop\"}]}\n")
+		chunks.WriteString("data: [DONE]\n")
+		_, _ = w.Write(chunks.Bytes())
+	}))
+	defer server.Close()
+
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	result, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openai",
+		Model:    "gpt-mini",
+		Options:  ChatOptions{APIKey: "test-key", Stream: true},
+		Messages: []Message{{Role: "user", Content: "please"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks := ParseContentBlocks(result.Content)
+	if len(blocks) != 4 {
+		t.Fatalf("blocks = %#v", blocks)
+	}
+	if blocks[0].Type != "thinking" || blocks[0].Thinking != "think 1" {
+		t.Fatalf("block[0] = %#v", blocks[0])
+	}
+	if blocks[1].Type != "text" || blocks[1].Text != "answer 1" {
+		t.Fatalf("block[1] = %#v", blocks[1])
+	}
+	if blocks[2].Type != "thinking" || blocks[2].Thinking != "think 2" {
+		t.Fatalf("block[2] = %#v", blocks[2])
+	}
+	if blocks[3].Type != "text" || blocks[3].Text != "answer 2" {
+		t.Fatalf("block[3] = %#v", blocks[3])
+	}
+}
+
+func TestOpenAIProviderStreamingHandlesLargeChunkPayload(t *testing.T) {
+	large := strings.Repeat("x", 80*1024)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var chunks bytes.Buffer
+		chunks.WriteString("data: {\"choices\":[{\"delta\":{\"content\":\"")
+		chunks.WriteString(large)
+		chunks.WriteString("\"},\"finish_reason\":\"stop\"}]}\n")
+		chunks.WriteString("data: [DONE]\n")
+		_, _ = w.Write(chunks.Bytes())
+	}))
+	defer server.Close()
+
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	result, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openai",
+		Model:    "gpt-mini",
+		Options:  ChatOptions{APIKey: "test-key", Stream: true},
+		Messages: []Message{{Role: "user", Content: "please"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != large {
+		t.Fatalf("text length = %d", len(result.Text))
+	}
+}
+
 func TestOpenAIProviderAddsCacheAffinityForChatCompletions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Header.Get("session_id") != "session-abc" {
@@ -186,10 +396,20 @@ func TestOpenAIProviderAddsCacheAffinityForChatCompletions(t *testing.T) {
 	}))
 	defer server.Close()
 
+	RegisterModel(Model{
+		ID:       "chat-affinity-model",
+		Name:     "Chat Affinity",
+		API:      "openai-completions",
+		Provider: "openai",
+		BaseURL:  server.URL + "/v1",
+		Input:    []string{"text"},
+		Compat:   map[string]any{"sendSessionAffinityHeaders": true},
+	})
+
 	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
 	result, _, err := provider.Complete(context.Background(), CompletionRequest{
 		Provider: "openai",
-		Model:    "gpt-mini",
+		Model:    "chat-affinity-model",
 		Options: ChatOptions{
 			APIKey:         "test-key",
 			SessionID:      "session-abc",
@@ -287,6 +507,294 @@ func TestOpenAIProviderUsesResponsesEndpointForGpt5(t *testing.T) {
 	}
 }
 
+func TestOpenAIProviderParsesNonStreamingReasoningAndToolSignatures(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		_, _ = fmt.Fprint(w, `{
+			"choices": [{
+				"message": {
+					"role": "assistant",
+					"content": "done",
+					"reasoning_content": "internal",
+					"tool_calls": [{
+						"id": "tc-1",
+						"type": "function",
+						"function": {"name":"echo","arguments":"{\"value\":\"ok\"}"}
+					}],
+					"reasoning_details": [{
+						"type": "reasoning.encrypted",
+						"id": "tc-1",
+						"data": "encrypted"
+					}]
+				},
+				"finish_reason": "tool_calls"
+			}]
+		}`)
+	}))
+	defer server.Close()
+
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	result, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openai",
+		Model:    "gpt-mini",
+		Tools:    []Tool{{Name: "echo"}},
+		Options:  ChatOptions{APIKey: "test-key"},
+		Messages: []Message{{Role: "user", Content: "please"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks := ParseContentBlocks(result.Content)
+	if len(blocks) != 3 {
+		t.Fatalf("blocks = %#v", blocks)
+	}
+	if blocks[0].Type != "thinking" || blocks[0].Thinking != "internal" {
+		t.Fatalf("thinking block = %#v", blocks[0])
+	}
+	if blocks[2].Type != "toolCall" || blocks[2].ThoughtSignature == "" {
+		t.Fatalf("tool block = %#v", blocks[2])
+	}
+}
+
+func TestOpenAIProviderIncludesSystemMessageInChatCompletions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		messages, _ := payload["messages"].([]any)
+		if len(messages) < 2 {
+			t.Fatalf("messages = %#v", payload["messages"])
+		}
+		first, _ := messages[0].(map[string]any)
+		if first["role"] != "system" || first["content"] != "be terse" {
+			t.Fatalf("first message = %#v", first)
+		}
+		_, _ = fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openai",
+		Model:    "gpt-mini",
+		Options:  ChatOptions{APIKey: "test-key"},
+		Messages: []Message{
+			{Role: "system", Content: "be terse"},
+			{Role: "user", Content: "hi"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenAIProviderIncludesUserImagesInChatCompletions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		messages, _ := payload["messages"].([]any)
+		first, _ := messages[0].(map[string]any)
+		content, _ := first["content"].([]any)
+		if len(content) != 2 {
+			t.Fatalf("content = %#v", first["content"])
+		}
+		imagePart, _ := content[1].(map[string]any)
+		if imagePart["type"] != "image_url" {
+			t.Fatalf("image part = %#v", imagePart)
+		}
+		_, _ = fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openai",
+		Model:    "gpt-mini",
+		Options:  ChatOptions{APIKey: "test-key"},
+		Messages: []Message{{
+			Role: "user",
+			Content: []any{
+				map[string]any{"type": "text", "text": "look"},
+				map[string]any{"type": "image", "data": "abc", "mimeType": "image/png"},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenAIProviderConvertsToolResultImagesForChatCompletions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		messages, _ := payload["messages"].([]any)
+		if len(messages) != 3 {
+			t.Fatalf("messages = %#v", payload["messages"])
+		}
+		toolMsg, _ := messages[1].(map[string]any)
+		if toolMsg["role"] != "tool" || toolMsg["content"] != "(see attached image)" {
+			t.Fatalf("tool message = %#v", toolMsg)
+		}
+		userMsg, _ := messages[2].(map[string]any)
+		content, _ := userMsg["content"].([]any)
+		if len(content) != 2 {
+			t.Fatalf("user content = %#v", userMsg["content"])
+		}
+		imagePart, _ := content[1].(map[string]any)
+		if imagePart["type"] != "image_url" {
+			t.Fatalf("image part = %#v", imagePart)
+		}
+		_, _ = fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openai",
+		Model:    "gpt-mini",
+		Options:  ChatOptions{APIKey: "test-key"},
+		Messages: []Message{
+			{
+				Role: "assistant",
+				Content: []any{
+					map[string]any{"type": "toolCall", "id": "call-1", "name": "screenshot", "arguments": map[string]any{}},
+				},
+			},
+			{
+				Role:       "toolResult",
+				ToolCallID: "call-1",
+				ToolName:   "screenshot",
+				Content: []any{
+					map[string]any{"type": "image", "data": "abc", "mimeType": "image/png"},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenAIResponsesOmitsForeignFunctionCallItemIDForDifferentModelReplay(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		input, _ := payload["input"].([]any)
+		if len(input) != 2 {
+			t.Fatalf("input = %#v", payload["input"])
+		}
+		call, _ := input[0].(map[string]any)
+		if call["type"] != "function_call" || call["call_id"] != "call-1" {
+			t.Fatalf("call item = %#v", call)
+		}
+		if _, ok := call["id"]; ok {
+			t.Fatalf("unexpected id = %#v", call["id"])
+		}
+		_, _ = fmt.Fprint(w, `{"output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1},"status":"completed"}`)
+	}))
+	defer server.Close()
+
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openai",
+		Model:    "gpt-5.4",
+		Options:  ChatOptions{APIKey: "test-key"},
+		Messages: []Message{{
+			Role:       "assistant",
+			Provider:   "openai",
+			API:        "openai-responses",
+			Model:      "gpt-5.3",
+			StopReason: "toolUse",
+			Content: []any{
+				map[string]any{"type": "toolCall", "id": "call-1|fc_existing", "name": "search", "arguments": map[string]any{"q": "pi"}},
+			},
+		}, {
+			Role:       "toolResult",
+			Provider:   "openai",
+			API:        "openai-responses",
+			Model:      "gpt-5.3",
+			ToolCallID: "call-1|fc_existing",
+			ToolName:   "search",
+			Content:    []any{map[string]any{"type": "text", "text": "done"}},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenAIResponsesKeepsImageToolResultOutputString(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		input, _ := payload["input"].([]any)
+		if len(input) != 2 {
+			t.Fatalf("input = %#v", payload["input"])
+		}
+		output, _ := input[1].(map[string]any)
+		if output["type"] != "function_call_output" {
+			t.Fatalf("output item = %#v", output)
+		}
+		if got, ok := output["output"].(string); !ok || got != "(see attached image)" {
+			t.Fatalf("function output = %#v", output["output"])
+		}
+		_, _ = fmt.Fprint(w, `{"output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1},"status":"completed"}`)
+	}))
+	defer server.Close()
+
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openai",
+		Model:    "gpt-5.4",
+		Options:  ChatOptions{APIKey: "test-key"},
+		Messages: []Message{{
+			Role: "assistant",
+			Content: []any{
+				map[string]any{"type": "toolCall", "id": "call-1", "name": "screenshot", "arguments": map[string]any{}},
+			},
+		}, {
+			Role:       "toolResult",
+			ToolCallID: "call-1",
+			ToolName:   "screenshot",
+			Content: []any{
+				map[string]any{"type": "image", "data": "abc", "mimeType": "image/png"},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOpenAIProviderStreamsResponsesModels(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.URL.Path != "/v1/responses" {
@@ -306,14 +814,31 @@ func TestOpenAIProviderStreamsResponsesModels(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\"}}\n\n")
 		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"id\":\"msg-1\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call-1\",\"id\":\"fc_1\",\"name\":\"echo\",\"arguments\":\"{\\\"value\\\":\"}}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"\\\"ok\\\"}\"}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call-1\",\"id\":\"fc_1\",\"name\":\"echo\",\"arguments\":\"{\\\"value\\\":\\\"ok\\\"}\"}}\n\n")
 		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
 	}))
 	defer server.Close()
 
-	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
-	result, _, err := provider.Complete(context.Background(), CompletionRequest{
+	RegisterModel(Model{
+		ID:       "gpt-5-priced",
+		Name:     "GPT 5 Priced",
+		API:      "openai-completions",
 		Provider: "openai",
-		Model:    "gpt-5.4",
+		BaseURL:  server.URL + "/v1",
+		Input:    []string{"text"},
+		Cost: ModelCost{
+			Input:     1000,
+			Output:    2000,
+			CacheRead: 500,
+		},
+	})
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	result, events, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openai",
+		Model:    "gpt-5-priced",
 		Options: ChatOptions{
 			APIKey: "test-key",
 			Stream: true,
@@ -327,6 +852,482 @@ func TestOpenAIProviderStreamsResponsesModels(t *testing.T) {
 	}
 	if result.Text != "hi" {
 		t.Fatalf("text = %q", result.Text)
+	}
+	if result.Usage == nil || result.Usage.Cost.Total <= 0 {
+		t.Fatalf("usage = %#v", result.Usage)
+	}
+	foundToolEnd := false
+	for _, event := range events {
+		if event.Type == "toolcall_end" {
+			foundToolEnd = true
+			if event.ToolCall == nil || event.ToolCall.ID != "call-1|fc_1" {
+				t.Fatalf("toolcall_end = %#v", event)
+			}
+		}
+	}
+	if !foundToolEnd {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestOpenAIProviderUsesMaxOutputTokensForResponsesModels(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["max_output_tokens"] != float64(123) {
+			t.Fatalf("payload = %#v", payload)
+		}
+		_, _ = fmt.Fprint(w, `{"output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1},"status":"completed"}`)
+	}))
+	defer server.Close()
+
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openai",
+		Model:    "gpt-5.4",
+		Options:  ChatOptions{APIKey: "test-key", MaxTokens: 123},
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenAIProviderUsesDeepSeekReasoningPayload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		thinking, _ := payload["thinking"].(map[string]any)
+		if thinking["type"] != "enabled" {
+			t.Fatalf("thinking = %#v", payload["thinking"])
+		}
+		if payload["reasoning_effort"] != "max" {
+			t.Fatalf("payload = %#v", payload)
+		}
+		if _, ok := payload["store"]; ok {
+			t.Fatalf("payload unexpectedly set store: %#v", payload)
+		}
+		messages, _ := payload["messages"].([]any)
+		first, _ := messages[0].(map[string]any)
+		if first["role"] != "system" {
+			t.Fatalf("first message = %#v", first)
+		}
+		_, _ = fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "deepseek",
+		Model:    "deepseek-v4-pro",
+		Options:  ChatOptions{APIKey: "test-key", ReasoningEffort: "xhigh"},
+		Messages: []Message{
+			{Role: "system", Content: "follow rules"},
+			{Role: "user", Content: "hi"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenAIProviderUsesOpenRouterReasoningPayload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		reasoning, _ := payload["reasoning"].(map[string]any)
+		if reasoning["effort"] != "high" {
+			t.Fatalf("reasoning = %#v", payload["reasoning"])
+		}
+		_, _ = fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	RegisterModel(Model{
+		ID:        "or-model",
+		Name:      "OR Model",
+		API:       "openai-completions",
+		Provider:  "openrouter",
+		BaseURL:   server.URL + "/v1",
+		Reasoning: true,
+		Input:     []string{"text"},
+	})
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openrouter",
+		Model:    "or-model",
+		Options:  ChatOptions{APIKey: "test-key", ReasoningEffort: "high"},
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenAIProviderUsesOpenRouterRoutingCompat(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		provider, _ := payload["provider"].(map[string]any)
+		if provider["only"] == nil {
+			t.Fatalf("provider = %#v", payload["provider"])
+		}
+		_, _ = fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	RegisterModel(Model{
+		ID:        "or-route",
+		Name:      "OR Route",
+		API:       "openai-completions",
+		Provider:  "openrouter",
+		BaseURL:   server.URL + "/v1",
+		Reasoning: true,
+		Input:     []string{"text"},
+		Compat: map[string]any{
+			"openRouterRouting": map[string]any{"only": []any{"openai"}},
+		},
+	})
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openrouter",
+		Model:    "or-route",
+		Options:  ChatOptions{APIKey: "test-key"},
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenAIProviderUsesVercelGatewayRoutingCompat(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		providerOptions, _ := payload["providerOptions"].(map[string]any)
+		gateway, _ := providerOptions["gateway"].(map[string]any)
+		if gateway["order"] == nil {
+			t.Fatalf("providerOptions = %#v", payload["providerOptions"])
+		}
+		_, _ = fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	RegisterModel(Model{
+		ID:       "vercel-route",
+		Name:     "Vercel Route",
+		API:      "openai-completions",
+		Provider: "vercel-ai-gateway",
+		BaseURL:  server.URL + "/v1",
+		Input:    []string{"text"},
+		Compat: map[string]any{
+			"vercelGatewayRouting": map[string]any{"order": []any{"anthropic", "openai"}},
+		},
+	})
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "vercel-ai-gateway",
+		Model:    "vercel-route",
+		Options:  ChatOptions{APIKey: "test-key"},
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenAIProviderSkipsStreamUsageWhenCompatDisablesIt(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := payload["stream_options"]; ok {
+			t.Fatalf("payload = %#v", payload)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n")
+	}))
+	defer server.Close()
+
+	RegisterModel(Model{
+		ID:       "no-stream-usage",
+		Name:     "No Stream Usage",
+		API:      "openai-completions",
+		Provider: "openai",
+		BaseURL:  server.URL + "/v1",
+		Input:    []string{"text"},
+		Compat:   map[string]any{"supportsUsageInStreaming": false},
+	})
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openai",
+		Model:    "no-stream-usage",
+		Options:  ChatOptions{APIKey: "test-key", Stream: true},
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenAIProviderUsesSessionAffinityHeadersOnlyWhenCompatEnabled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Header.Get("session_id") != "session-chat" {
+			t.Fatalf("session_id = %q", req.Header.Get("session_id"))
+		}
+		_, _ = fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	RegisterModel(Model{
+		ID:       "session-affinity-model",
+		Name:     "Session Affinity",
+		API:      "openai-completions",
+		Provider: "openai",
+		BaseURL:  server.URL + "/v1",
+		Input:    []string{"text"},
+		Compat:   map[string]any{"sendSessionAffinityHeaders": true},
+	})
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openai",
+		Model:    "session-affinity-model",
+		Options:  ChatOptions{APIKey: "test-key", SessionID: "session-chat"},
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenAIProviderUsesDeveloperRoleForReasoningModelsWhenCompatEnabled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		messages, _ := payload["messages"].([]any)
+		if len(messages) == 0 {
+			t.Fatalf("messages = %#v", payload["messages"])
+		}
+		first, _ := messages[0].(map[string]any)
+		if first["role"] != "developer" {
+			t.Fatalf("first message = %#v", first)
+		}
+		_, _ = fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	RegisterModel(Model{
+		ID:        "developer-role-model",
+		Name:      "Developer Role Model",
+		API:       "openai-completions",
+		Provider:  "openai",
+		BaseURL:   server.URL + "/v1",
+		Reasoning: true,
+		Input:     []string{"text"},
+	})
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openai",
+		Model:    "developer-role-model",
+		Options:  ChatOptions{APIKey: "test-key"},
+		Messages: []Message{
+			{Role: "system", Content: "follow these rules"},
+			{Role: "user", Content: "hi"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenAIProviderHonorsReasoningEffortMapCompat(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["reasoning_effort"] != "default" {
+			t.Fatalf("payload = %#v", payload)
+		}
+		_, _ = fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	RegisterModel(Model{
+		ID:        "groq-qwen-compat",
+		Name:      "Groq Qwen Compat",
+		API:       "openai-completions",
+		Provider:  "groq",
+		BaseURL:   server.URL + "/v1",
+		Reasoning: true,
+		Input:     []string{"text"},
+		Compat: map[string]any{
+			"reasoningEffortMap": map[string]any{
+				"minimal": "default",
+				"low":     "default",
+				"medium":  "default",
+				"high":    "default",
+				"xhigh":   "default",
+			},
+		},
+	})
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "groq",
+		Model:    "groq-qwen-compat",
+		Options:  ChatOptions{APIKey: "test-key", ReasoningEffort: "xhigh"},
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenAIProviderSendsEmptyToolsArrayForToolHistoryWithoutCurrentTools(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		tools, ok := payload["tools"].([]any)
+		if !ok {
+			t.Fatalf("payload = %#v", payload)
+		}
+		if len(tools) != 0 {
+			t.Fatalf("tools = %#v", tools)
+		}
+		_, _ = fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openai",
+		Model:    "gpt-4.1-mini",
+		Options:  ChatOptions{APIKey: "test-key"},
+		Messages: []Message{
+			{
+				Role: "assistant",
+				Content: []ContentBlock{
+					{Type: "toolCall", ID: "call-1", Name: "search", Arguments: map[string]any{"q": "hi"}},
+				},
+			},
+			{Role: "toolResult", ToolCallID: "call-1", ToolName: "search", Content: "done"},
+			{Role: "user", Content: "continue"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenAIProviderAppliesAnthropicCacheControlCompat(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		messages, _ := payload["messages"].([]any)
+		if len(messages) == 0 {
+			t.Fatalf("messages = %#v", payload["messages"])
+		}
+		first, _ := messages[0].(map[string]any)
+		content, _ := first["content"].([]any)
+		part, _ := content[0].(map[string]any)
+		if part["cache_control"] == nil {
+			t.Fatalf("system content = %#v", first["content"])
+		}
+		tools, _ := payload["tools"].([]any)
+		lastTool, _ := tools[len(tools)-1].(map[string]any)
+		if lastTool["cache_control"] == nil {
+			t.Fatalf("tool = %#v", lastTool)
+		}
+		_, _ = fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	RegisterModel(Model{
+		ID:       "anthropic-cache-compatible",
+		Name:     "Anthropic Cache Compatible",
+		API:      "openai-completions",
+		Provider: "openrouter",
+		BaseURL:  server.URL + "/v1",
+		Input:    []string{"text"},
+		Compat: map[string]any{
+			"cacheControlFormat": "anthropic",
+		},
+	})
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openrouter",
+		Model:    "anthropic-cache-compatible",
+		Options: ChatOptions{
+			APIKey:         "test-key",
+			SessionID:      "session-cache",
+			CacheRetention: CacheRetentionLong,
+		},
+		Tools: []Tool{{Name: "echo"}},
+		Messages: []Message{
+			{Role: "system", Content: "be terse"},
+			{Role: "user", Content: "hi"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -366,6 +1367,38 @@ func TestOpenAIProviderRetriesRateLimits(t *testing.T) {
 	}
 	if result.Text != "ok" {
 		t.Fatalf("text = %q", result.Text)
+	}
+}
+
+func TestOpenAIProviderIncludesStructuredRawErrorMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = fmt.Fprint(w, `{
+			"error": {
+				"message": "bad prompt",
+				"metadata": {
+					"raw": "provider detail"
+				}
+			}
+		}`)
+	}))
+	defer server.Close()
+
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "openai",
+		Model:    "gpt-mini",
+		Options:  ChatOptions{APIKey: "test-key"},
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "bad prompt") {
+		t.Fatalf("error = %v", err)
+	}
+	if !strings.Contains(err.Error(), "provider detail") {
+		t.Fatalf("error = %v", err)
 	}
 }
 

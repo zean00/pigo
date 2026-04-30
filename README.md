@@ -113,4 +113,10 @@ Run the full cross-repo verifier:
 make verify-conformance
 ```
 
+Refresh the model catalog from the TypeScript source:
+
+```bash
+make generate-models
+```
+
 This still is not a full production port. The remaining gaps are higher-level parity gaps: deeper provider-specific event semantics, richer `pi-ai` utility surface, and the broader interactive coding-agent product surface beyond the headless target.

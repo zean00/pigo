@@ -741,21 +741,37 @@ func sessionMessagesToAI(messages []Message) []ai.Message {
 		role, _ := message["role"].(string)
 		switch role {
 		case "user":
+			provider, _ := message["provider"].(string)
+			api, _ := message["api"].(string)
+			model, _ := message["model"].(string)
 			if content, ok := message["content"]; ok && content != nil {
-				out = append(out, ai.Message{Role: "user", Content: content})
+				out = append(out, ai.Message{Role: "user", Content: content, Provider: provider, API: api, Model: model})
 			} else if text := messageText(message); text != "" {
-				out = append(out, ai.Message{Role: "user", Content: text})
+				out = append(out, ai.Message{Role: "user", Content: text, Provider: provider, API: api, Model: model})
 			}
 		case "assistant":
+			provider, _ := message["provider"].(string)
+			api, _ := message["api"].(string)
+			model, _ := message["model"].(string)
 			content := message["content"]
 			if content == nil {
 				content = messageText(message)
 			}
 			if content != nil {
 				stopReason, _ := message["stopReason"].(string)
-				out = append(out, ai.Message{Role: "assistant", Content: content, StopReason: stopReason})
+				out = append(out, ai.Message{
+					Role:       "assistant",
+					Content:    content,
+					Provider:   provider,
+					API:        api,
+					Model:      model,
+					StopReason: stopReason,
+				})
 			}
 		case "toolResult":
+			provider, _ := message["provider"].(string)
+			api, _ := message["api"].(string)
+			model, _ := message["model"].(string)
 			callID, _ := message["toolCallId"].(string)
 			toolName, _ := message["toolName"].(string)
 			text := messageText(message)
@@ -767,7 +783,16 @@ func sessionMessagesToAI(messages []Message) []ai.Message {
 				continue
 			}
 			isError, _ := message["isError"].(bool)
-			out = append(out, ai.Message{Role: "toolResult", ToolCallID: callID, ToolName: toolName, Content: content, IsError: isError})
+			out = append(out, ai.Message{
+				Role:       "toolResult",
+				Content:    content,
+				Provider:   provider,
+				API:        api,
+				Model:      model,
+				ToolCallID: callID,
+				ToolName:   toolName,
+				IsError:    isError,
+			})
 		}
 	}
 	return out

@@ -20,6 +20,7 @@ type rpcCommand struct {
 	Type               string `json:"type"`
 	Message            string `json:"message,omitempty"`
 	Images             any    `json:"images,omitempty"`
+	Attachments        any    `json:"attachments,omitempty"`
 	Command            string `json:"command,omitempty"`
 	Name               string `json:"name,omitempty"`
 	Label              string `json:"label,omitempty"`
@@ -100,19 +101,46 @@ func (s *RPCServer) Serve(ctx context.Context, in io.Reader, out io.Writer) erro
 func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse {
 	switch command.Type {
 	case "prompt":
-		if err := s.Session.Prompt(ctx, command.Message); err != nil {
+		attachments, err := rpcPromptAttachments(command.Attachments, command.Images)
+		if err != nil {
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+		}
+		if len(attachments) > 0 {
+			err = s.Session.PromptWithAttachments(ctx, command.Message, attachments)
+		} else {
+			err = s.Session.Prompt(ctx, command.Message)
+		}
+		if err != nil {
 			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
 		}
 		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true}
 
 	case "steer":
-		if err := s.Session.Steer(ctx, command.Message); err != nil {
+		attachments, err := rpcPromptAttachments(command.Attachments, command.Images)
+		if err != nil {
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+		}
+		if len(attachments) > 0 {
+			err = s.Session.SteerWithAttachments(ctx, command.Message, attachments)
+		} else {
+			err = s.Session.Steer(ctx, command.Message)
+		}
+		if err != nil {
 			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
 		}
 		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true}
 
 	case "follow_up":
-		if err := s.Session.FollowUp(ctx, command.Message); err != nil {
+		attachments, err := rpcPromptAttachments(command.Attachments, command.Images)
+		if err != nil {
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+		}
+		if len(attachments) > 0 {
+			err = s.Session.FollowUpWithAttachments(ctx, command.Message, attachments)
+		} else {
+			err = s.Session.FollowUp(ctx, command.Message)
+		}
+		if err != nil {
 			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
 		}
 		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true}
@@ -328,6 +356,12 @@ func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse 
 		s.Session.AbortRetry()
 		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true}
 
+	case "retry":
+		if err := s.Session.RetryLast(ctx); err != nil {
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+		}
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true}
+
 	case "bash":
 		result, err := s.Session.Bash(ctx, command.Command)
 		if err != nil {
@@ -507,4 +541,35 @@ func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse 
 			Error:   "unsupported command",
 		}
 	}
+}
+
+func rpcPromptAttachments(attachmentsRaw, imagesRaw any) ([]PromptAttachment, error) {
+	attachments, err := rpcAttachments(attachmentsRaw)
+	if err != nil {
+		return nil, err
+	}
+	images, err := rpcAttachments(imagesRaw)
+	if err != nil {
+		return nil, err
+	}
+	return append(attachments, images...), nil
+}
+
+func rpcAttachments(raw any) ([]PromptAttachment, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil, err
+	}
+	var attachments []PromptAttachment
+	if err := json.Unmarshal(data, &attachments); err == nil {
+		return attachments, nil
+	}
+	var single PromptAttachment
+	if err := json.Unmarshal(data, &single); err != nil {
+		return nil, err
+	}
+	return []PromptAttachment{single}, nil
 }

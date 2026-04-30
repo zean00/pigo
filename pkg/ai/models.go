@@ -188,6 +188,78 @@ func GetModels(provider string) []Model {
 	return out
 }
 
+func GetAllModels() []Model {
+	providers := GetProviders()
+	models := make([]Model, 0)
+	for _, provider := range providers {
+		models = append(models, GetModels(provider)...)
+	}
+	return models
+}
+
+func GetModelsWithOAuth(provider string, credentials map[string]OAuthCredentials) []Model {
+	provider = canonicalProviderName(provider)
+	models := GetModels(provider)
+	if len(models) == 0 {
+		return nil
+	}
+	providerOauth := GetOAuthProvider(provider)
+	if providerOauth == nil {
+		return models
+	}
+	providerMutator, ok := providerOauth.(OAuthModelMutator)
+	if !ok {
+		return models
+	}
+
+	cred, hasCred := credentials[provider]
+	if !hasCred {
+		if credentials != nil {
+			if normalized, ok := credentials[canonicalProviderName(provider)]; ok {
+				cred = normalized
+				hasCred = true
+			}
+		}
+	}
+	if !hasCred {
+		return models
+	}
+
+	mutated := providerMutator.ModifyModels(append([]Model(nil), models...), cred)
+	if len(mutated) == 0 {
+		return nil
+	}
+
+	out := make([]Model, 0, len(mutated))
+	for _, model := range mutated {
+		model.Provider = canonicalProviderName(model.Provider)
+		if model.Provider == "" {
+			model.Provider = provider
+		}
+		model.ID = strings.TrimSpace(model.ID)
+		if model.ID == "" {
+			continue
+		}
+		out = append(out, cloneModel(model))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Provider == out[j].Provider {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].Provider < out[j].Provider
+	})
+	return out
+}
+
+func GetAllModelsWithOAuth(credentials map[string]OAuthCredentials) []Model {
+	providers := GetProviders()
+	models := make([]Model, 0)
+	for _, provider := range providers {
+		models = append(models, GetModelsWithOAuth(provider, credentials)...)
+	}
+	return models
+}
+
 func RegisterModel(model Model) {
 	provider := canonicalProviderName(model.Provider)
 	model.Provider = provider

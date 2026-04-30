@@ -182,6 +182,7 @@ func NormalizedContent(blocks []ContentBlock) []any {
 			item := map[string]any{
 				"type":      "toolCall",
 				"id":        block.ID,
+				"hasId":     block.ID != "",
 				"name":      block.Name,
 				"arguments": block.Arguments,
 			}

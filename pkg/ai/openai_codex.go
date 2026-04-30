@@ -69,12 +69,14 @@ func (provider *openAICodexProvider) Complete(ctx context.Context, req Completio
 		baseURL = defaultOpenAICodexBaseURL
 	}
 	requestURL := resolveCodexURL(baseURL)
+	resolvedModel, _ := resolveCompletionModel(req)
+	responsesRequest := toOpenAIResponsesRequest(req, resolvedModel)
 
 	payload := openAICodexRequest{
 		Model:         req.Model,
 		Store:         false,
 		Stream:        req.Options.Stream,
-		Input:         toOpenAIResponsesRequest(req).Input,
+		Input:         responsesRequest.Input,
 		Text:          map[string]any{"verbosity": codexTextVerbosity(req.Options)},
 		Include:       []string{"reasoning.encrypted_content"},
 		ToolChoice:    "auto",
@@ -98,7 +100,7 @@ func (provider *openAICodexProvider) Complete(ctx context.Context, req Completio
 		payload.ServiceTier = tier
 	}
 	if len(req.Tools) > 0 {
-		payload.Tools = toOpenAIResponsesRequest(req).Tools
+		payload.Tools = responsesRequest.Tools
 	}
 
 	payloadValue, err := applyPayloadHook(req, payload)
@@ -241,7 +243,7 @@ func (provider *openAICodexProvider) Complete(ctx context.Context, req Completio
 		}
 
 		if req.Options.Stream {
-			result, events, streamErr := openAIResponsesSSEToResult(resp.Body)
+			result, events, streamErr := openAIResponsesSSEToResult(resp.Body, resolvedModel)
 			_ = resp.Body.Close()
 			if streamErr == nil {
 				return result, events, nil
@@ -254,7 +256,7 @@ func (provider *openAICodexProvider) Complete(ctx context.Context, req Completio
 			}
 			return NormalizedResult{}, nil, streamErr
 		}
-		result, events, responseErr := openAIResponsesToResult(resp.Body)
+		result, events, responseErr := openAIResponsesToResult(resp.Body, resolvedModel)
 		_ = resp.Body.Close()
 		if responseErr != nil {
 			return NormalizedResult{}, nil, responseErr
@@ -345,7 +347,8 @@ func completeOpenAICodexWebSocket(ctx context.Context, config *websocket.Config,
 		}
 	}
 
-	return openAIResponsesEventsToResult(func(handle func(map[string]any) error) error {
+	resolvedModel, _ := resolveCompletionModel(req)
+	return openAIResponsesEventsToResult(resolvedModel, func(handle func(map[string]any) error) error {
 		for {
 			select {
 			case <-ctx.Done():

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/badlogic/pigo/pkg/agentcore"
 	"github.com/badlogic/pigo/pkg/ai"
 )
 
@@ -49,6 +50,80 @@ func TestRunHeadlessSessionWriteRead(t *testing.T) {
 	}
 }
 
+func TestBuiltinToolsTruncateLargeReadOutputAndRecordDetails(t *testing.T) {
+	root := t.TempDir()
+	large := strings.Repeat("x", maxToolOutputBytes+2000)
+	if err := WriteWorkspaceFile(root, "large.txt", large); err != nil {
+		t.Fatal(err)
+	}
+	tools := BuiltinTools(root)
+	var readTool agentcore.Tool
+	for _, tool := range tools {
+		if tool.Name == "read" {
+			readTool = tool
+			break
+		}
+	}
+	result := readTool.Execute(context.Background(), ai.ContentBlock{
+		Name:      "read",
+		Arguments: map[string]any{"path": "large.txt"},
+	})
+	if !strings.Contains(result.Text, "[... truncated ") {
+		t.Fatalf("expected truncated output, got %d bytes", len(result.Text))
+	}
+	if result.Details["truncated"] != true {
+		t.Fatalf("details = %#v", result.Details)
+	}
+}
+
+func TestBuiltinReadRejectsBinaryFiles(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "image.bin"), []byte{1, 2, 0, 4}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var readTool agentcore.Tool
+	for _, tool := range BuiltinTools(root) {
+		if tool.Name == "read" {
+			readTool = tool
+			break
+		}
+	}
+	result := readTool.Execute(context.Background(), ai.ContentBlock{
+		Name:      "read",
+		Arguments: map[string]any{"path": "image.bin"},
+	})
+	if !result.IsError || !strings.Contains(result.Text, "binary file") {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestWorkspaceSearchSkipsIgnoredDirectoriesAndBinaryFiles(t *testing.T) {
+	root := t.TempDir()
+	if err := WriteWorkspaceFile(root, "src/main.go", "package main\nconst needle = true\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteWorkspaceFile(root, "node_modules/pkg/index.js", "needle\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "blob.bin"), []byte{'n', 'e', 'e', 'd', 'l', 'e', 0}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	grep, err := GrepWorkspace(root, ".", "needle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(grep, "node_modules") || strings.Contains(grep, "blob.bin") || !strings.Contains(grep, "src/main.go") {
+		t.Fatalf("grep output = %q", grep)
+	}
+	find, err := FindWorkspace(root, ".", "*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(find, "node_modules") {
+		t.Fatalf("find output = %q", find)
+	}
+}
+
 func TestResolveWorkspacePathRejectsEscape(t *testing.T) {
 	if _, err := ResolveWorkspacePath(t.TempDir(), "../outside.txt"); err == nil {
 		t.Fatal("expected escape error")
@@ -80,6 +155,7 @@ func TestNewSessionWithParentWritesHeader(t *testing.T) {
 }
 
 func TestNewSessionSeedsAvailableModels(t *testing.T) {
+	expectedModels := ai.GetAllModels()
 	session := NewSession(t.TempDir(), nil)
 	if len(session.AvailableModels) == 0 {
 		t.Fatal("expected default available models")
@@ -88,16 +164,14 @@ func TestNewSessionSeedsAvailableModels(t *testing.T) {
 	for _, model := range session.AvailableModels {
 		modelsByProvider[model.Provider+"/"+model.ModelID] = struct{}{}
 	}
-	var expected int
 	for _, expectedModel := range ai.DefaultModels() {
 		key := expectedModel.Provider + "/" + expectedModel.ModelID
 		if _, ok := modelsByProvider[key]; !ok {
 			t.Fatalf("missing default model %s", key)
 		}
-		expected++
 	}
-	if len(session.AvailableModels) < expected {
-		t.Fatalf("expected at least %d models, got %d", expected, len(session.AvailableModels))
+	if len(session.AvailableModels) < len(expectedModels) {
+		t.Fatalf("expected at least %d models, got %d", len(expectedModels), len(session.AvailableModels))
 	}
 }
 
@@ -251,6 +325,135 @@ func TestSessionBranchWithSummaryAddsContext(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("branch summary missing from tree: %#v", tree)
+	}
+}
+
+func TestSessionCompactSummarizesFileOperations(t *testing.T) {
+	session := NewSession(t.TempDir(), nil)
+	if err := session.appendEntry(SessionEntry{Type: "message", Message: map[string]any{
+		"role": "user", "text": "change file",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.appendEntry(SessionEntry{Type: "message", Message: map[string]any{
+		"role": "toolResult", "toolName": "read", "text": "content", "details": map[string]any{"readFiles": []string{"a.txt"}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.appendEntry(SessionEntry{Type: "message", Message: map[string]any{
+		"role": "toolResult", "toolName": "write", "text": "wrote", "details": map[string]any{"modifiedFiles": []string{"b.txt"}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.appendEntry(SessionEntry{Type: "message", Message: map[string]any{
+		"role": "assistant", "text": "done",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	result := session.Compact("keep file list")
+	if !strings.Contains(result.Summary, "Read files: a.txt") || !strings.Contains(result.Summary, "Modified files: b.txt") {
+		t.Fatalf("summary = %q", result.Summary)
+	}
+	if !strings.Contains(result.Summary, "Instructions: keep file list") {
+		t.Fatalf("summary missing instructions = %q", result.Summary)
+	}
+	last := session.Messages[len(session.Messages)-1]
+	if last["role"] != "compactionSummary" || !strings.Contains(last["summary"].(string), "b.txt") {
+		t.Fatalf("compaction message = %#v", last)
+	}
+}
+
+func TestSessionCompactWithModelUsesCompactorSummary(t *testing.T) {
+	session := NewSession(t.TempDir(), nil)
+	if err := session.appendEntry(SessionEntry{Type: "message", Message: map[string]any{
+		"role": "user", "text": "summarize me",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	session.Compactor = func(ctx context.Context, messages []ai.Message, instructions string) (string, error) {
+		if len(messages) != 1 || messages[0].Content != "summarize me" {
+			t.Fatalf("messages = %#v", messages)
+		}
+		if instructions != "custom" {
+			t.Fatalf("instructions = %q", instructions)
+		}
+		return "model summary", nil
+	}
+	result := session.CompactWithModel(context.Background(), "custom")
+	if result.Summary != "model summary" {
+		t.Fatalf("summary = %q", result.Summary)
+	}
+	last := session.Messages[len(session.Messages)-1]
+	if last["summary"] != "model summary" {
+		t.Fatalf("compaction message = %#v", last)
+	}
+}
+
+func TestBuiltinToolsUseConfiguredOutputLimitAndShellPrefix(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "large.txt"), []byte(strings.Repeat("x", 1000)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tools := BuiltinToolsWithOptions(root, BuiltinToolOptions{OutputLimit: 220, ShellCommandPrefix: "FOO=bar"})
+	byName := map[string]agentcore.Tool{}
+	for _, tool := range tools {
+		byName[tool.Name] = tool
+	}
+
+	bash := byName["bash"].Execute(context.Background(), ai.ContentBlock{Arguments: map[string]any{"command": "printf value"}})
+	bashDetails := bash.Details
+	if bashDetails["command"] != "FOO=bar printf value" {
+		t.Fatalf("bash details = %#v", bashDetails)
+	}
+
+	read := byName["read"].Execute(context.Background(), ai.ContentBlock{Arguments: map[string]any{"path": "large.txt"}})
+	readText := read.Text
+	if !strings.Contains(readText, "truncated") || len(readText) > 360 {
+		t.Fatalf("read text = %q", readText)
+	}
+}
+
+func TestSessionRetryLastReusesPrompt(t *testing.T) {
+	session := NewSession(t.TempDir(), []AssistantTurn{
+		{StopReason: "stop", Content: []ai.ContentBlock{{Type: "text", Text: "first"}}},
+		{StopReason: "stop", Content: []ai.ContentBlock{{Type: "text", Text: "second"}}},
+	})
+	if err := session.Prompt(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.RetryLast(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Messages) != 4 {
+		t.Fatalf("messages = %#v", session.Messages)
+	}
+	if session.Messages[2]["text"] != "hello" || session.Messages[3]["text"] != "second" {
+		t.Fatalf("retry messages = %#v", session.Messages)
+	}
+}
+
+func TestSessionScriptedPromptAttachesContentText(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("attached content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	session := NewSession(root, []AssistantTurn{
+		{StopReason: "stop", Content: []ai.ContentBlock{{Type: "text", Text: "ready"}}},
+	})
+	if err := session.PromptWithAttachments(context.Background(), "analyze", []PromptAttachment{
+		{Type: "file", Path: "notes.txt"},
+		{Type: "image", Data: "aW1n", MimeType: "image/png"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	userMessage := session.Messages[0]
+	if userMessage["role"] != "user" {
+		t.Fatalf("user message = %#v", userMessage)
+	}
+	text, _ := userMessage["text"].(string)
+	if !strings.Contains(text, "notes.txt") || !strings.Contains(text, "image attachment") {
+		t.Fatalf("user message text = %q", text)
 	}
 }
 

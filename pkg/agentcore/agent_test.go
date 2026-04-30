@@ -524,6 +524,37 @@ func TestAgentConversionAndContextHooks(t *testing.T) {
 	}
 }
 
+func TestSessionMessagesToAIPreservesProviderMetadata(t *testing.T) {
+	messages := sessionMessagesToAI([]Message{
+		{
+			"role":     "assistant",
+			"content":  []any{map[string]any{"type": "text", "text": "ok"}},
+			"provider": "openai",
+			"api":      "openai-responses",
+			"model":    "gpt-5.4",
+		},
+		{
+			"role":       "toolResult",
+			"content":    []any{map[string]any{"type": "text", "text": "done"}},
+			"toolCallId": "call-1",
+			"toolName":   "search",
+			"provider":   "openai",
+			"api":        "openai-responses",
+			"model":      "gpt-5.4",
+		},
+	})
+
+	if len(messages) != 2 {
+		t.Fatalf("messages = %#v", messages)
+	}
+	if messages[0].Provider != "openai" || messages[0].API != "openai-responses" || messages[0].Model != "gpt-5.4" {
+		t.Fatalf("assistant metadata = %#v", messages[0])
+	}
+	if messages[1].Provider != "openai" || messages[1].API != "openai-responses" || messages[1].Model != "gpt-5.4" {
+		t.Fatalf("tool metadata = %#v", messages[1])
+	}
+}
+
 type scriptedProviderFunc func(ctx context.Context, req ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error)
 
 func (fn scriptedProviderFunc) Complete(ctx context.Context, req ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error) {

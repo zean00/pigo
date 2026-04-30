@@ -59,6 +59,10 @@ type OAuthProviderInterface interface {
 	GetAPIKey(credentials OAuthCredentials) string
 }
 
+type OAuthModelMutator interface {
+	ModifyModels(models []Model, credentials OAuthCredentials) []Model
+}
+
 type oauthProvider struct {
 	id                 OAuthProviderID
 	name               string

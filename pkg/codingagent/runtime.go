@@ -63,23 +63,25 @@ type Session struct {
 	labelTimes    map[string]string
 	customEntries []SessionEntry
 
-	extensionCommands   []SlashCommandInfo
-	extensionHandlers   map[string]ExtensionCommandHandler
-	extensionTools      []agentcore.Tool
-	extensionToolSpecs  []ai.Tool
-	extensionFlags      map[string]ExtensionFlag
-	extensionFlagValues map[string]any
-	extensionStatuses   map[string]string
-	resourceProviders   []ExtensionResourceProvider
-	beforeSwitchHooks   []SessionBeforeSwitchHandler
-	beforeForkHooks     []SessionBeforeForkHandler
-	beforeTreeHooks     []SessionBeforeTreeHandler
-	beforeCompactHooks  []SessionBeforeCompactHandler
-	inputHooks          []InputHandler
-	contextHooks        []ContextHandler
-	promptTemplates     []SlashCommandInfo
-	skills              []SlashCommandInfo
-	resourceDiagnostics []ResourceDiagnostic
+	extensionCommands     []SlashCommandInfo
+	extensionHandlers     map[string]ExtensionCommandHandler
+	extensionTools        []agentcore.Tool
+	extensionToolSpecs    []ai.Tool
+	extensionFlags        map[string]ExtensionFlag
+	extensionFlagValues   map[string]any
+	extensionStatuses     map[string]string
+	resourceProviders     []ExtensionResourceProvider
+	beforeSwitchHooks     []SessionBeforeSwitchHandler
+	beforeForkHooks       []SessionBeforeForkHandler
+	beforeTreeHooks       []SessionBeforeTreeHandler
+	beforeCompactHooks    []SessionBeforeCompactHandler
+	inputHooks            []InputHandler
+	contextHooks          []ContextHandler
+	providerPayloadHooks  []ProviderPayloadHandler
+	providerResponseHooks []ProviderResponseHandler
+	promptTemplates       []SlashCommandInfo
+	skills                []SlashCommandInfo
+	resourceDiagnostics   []ResourceDiagnostic
 }
 
 type CompactorFunc func(ctx context.Context, messages []ai.Message, instructions string) (string, error)
@@ -211,6 +213,9 @@ type InputResult struct {
 type ContextResult struct {
 	Messages []ai.Message `json:"messages,omitempty"`
 }
+
+type ProviderPayloadHandler func(ctx context.Context, payload any, req ai.CompletionRequest) (any, error)
+type ProviderResponseHandler func(ctx context.Context, response ai.ProviderResponse, req ai.CompletionRequest) error
 
 type SessionBeforeSwitchHandler func(ctx context.Context, event SessionBeforeSwitchEvent) (SessionBeforeResult, error)
 type SessionBeforeForkHandler func(ctx context.Context, event SessionBeforeForkEvent) (SessionBeforeResult, error)
@@ -509,6 +514,24 @@ func (s *Session) RegisterContextHandler(handler ContextHandler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.contextHooks = append(s.contextHooks, handler)
+}
+
+func (s *Session) RegisterProviderPayloadHandler(handler ProviderPayloadHandler) {
+	if handler == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.providerPayloadHooks = append(s.providerPayloadHooks, handler)
+}
+
+func (s *Session) RegisterProviderResponseHandler(handler ProviderResponseHandler) {
+	if handler == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.providerResponseHooks = append(s.providerResponseHooks, handler)
 }
 
 func (s *Session) RegisterExtensionCommand(command SlashCommandInfo, handler ExtensionCommandHandler) {
@@ -1025,6 +1048,35 @@ func (s *Session) transformContextWithHooks(ctx context.Context, messages []ai.M
 	return current, nil
 }
 
+func (s *Session) applyProviderPayloadHooks(ctx context.Context, payload any, req ai.CompletionRequest) (any, error) {
+	current := payload
+	s.mu.Lock()
+	hooks := append([]ProviderPayloadHandler(nil), s.providerPayloadHooks...)
+	s.mu.Unlock()
+	for _, hook := range hooks {
+		next, err := hook(ctx, current, req)
+		if err != nil {
+			return nil, err
+		}
+		if next != nil {
+			current = next
+		}
+	}
+	return current, nil
+}
+
+func (s *Session) applyProviderResponseHooks(ctx context.Context, response ai.ProviderResponse, req ai.CompletionRequest) error {
+	s.mu.Lock()
+	hooks := append([]ProviderResponseHandler(nil), s.providerResponseHooks...)
+	s.mu.Unlock()
+	for _, hook := range hooks {
+		if err := hook(ctx, response, req); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Session) formatSkillsForPrompt() string {
 	skills := s.Skills()
 	if len(skills) == 0 {
@@ -1431,6 +1483,12 @@ func (s *Session) promptWithSource(ctx context.Context, prompt string, attachmen
 			if model, ok := ai.GetModel(s.Provider, s.ModelID); ok && !ai.SupportsXhigh(model) {
 				chatOptions.ReasoningEffort = ai.ClampReasoning(effort)
 			}
+		}
+		chatOptions.OnPayload = func(payload any, req ai.CompletionRequest) (any, error) {
+			return s.applyProviderPayloadHooks(opCtx, payload, req)
+		}
+		chatOptions.OnResponse = func(response ai.ProviderResponse, req ai.CompletionRequest) error {
+			return s.applyProviderResponseHooks(opCtx, response, req)
 		}
 		prompts, promptErr := s.promptMessages(prompt, attachments)
 		if promptErr != nil {

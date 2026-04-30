@@ -177,6 +177,56 @@ func TestSessionContextHandlersTransformProviderMessages(t *testing.T) {
 	}
 }
 
+func TestSessionProviderPayloadAndResponseHooks(t *testing.T) {
+	const providerName = "provider-hook-provider"
+	ai.RegisterProvider(providerName, providerFunc(func(_ context.Context, req ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error) {
+		payload, err := req.Options.OnPayload(map[string]any{"value": "original"}, req)
+		if err != nil {
+			return ai.NormalizedResult{}, nil, err
+		}
+		if payload.(map[string]any)["value"] != "changed" {
+			t.Fatalf("payload = %#v", payload)
+		}
+		if err := req.Options.OnResponse(ai.ProviderResponse{Status: 202, Headers: map[string]string{"x-test": "ok"}}, req); err != nil {
+			return ai.NormalizedResult{}, nil, err
+		}
+		return ai.NormalizedResult{
+			Role:       "assistant",
+			StopReason: "stop",
+			Text:       "ok",
+			Content:    []any{map[string]any{"type": "text", "text": "ok"}},
+		}, []ai.NormalizedEvent{{Type: "start"}, {Type: "text_start", ContentIdx: 0}, {Type: "text_delta", ContentIdx: 0, Delta: "ok"}, {Type: "text_end", ContentIdx: 0, Content: "ok"}, {Type: "done", Reason: "stop"}}, nil
+	}))
+
+	session := NewSession(t.TempDir(), nil)
+	if _, err := session.SetModel(providerName, "test-model"); err != nil {
+		t.Fatal(err)
+	}
+	payloadSeen := false
+	responseSeen := false
+	session.RegisterProviderPayloadHandler(func(ctx context.Context, payload any, req ai.CompletionRequest) (any, error) {
+		payloadSeen = true
+		if req.Provider != providerName {
+			t.Fatalf("payload provider = %q", req.Provider)
+		}
+		return map[string]any{"value": "changed"}, nil
+	})
+	session.RegisterProviderResponseHandler(func(ctx context.Context, response ai.ProviderResponse, req ai.CompletionRequest) error {
+		responseSeen = true
+		if response.Status != 202 || response.Headers["x-test"] != "ok" {
+			t.Fatalf("response = %#v", response)
+		}
+		return nil
+	})
+
+	if err := session.Prompt(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if !payloadSeen || !responseSeen {
+		t.Fatalf("payloadSeen=%v responseSeen=%v", payloadSeen, responseSeen)
+	}
+}
+
 func TestSessionUsesOAuthModelMutations(t *testing.T) {
 	const providerName = "mutating-oauth-provider"
 	ai.RegisterModel(ai.Model{

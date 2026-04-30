@@ -380,6 +380,7 @@ Upstream comparison surface in `pi-mono`:
   - headless lifecycle hooks can observe and cancel session replacement, fork, branch/tree navigation, and compaction flows
   - headless input hooks can continue, handle, or transform prompt text and attachments before command/template expansion
   - headless context hooks can inspect and replace provider-bound message context before model calls
+  - headless provider payload/response hooks are chainable from sessions into provider requests
 
 - `DONE` prompt/skill resource diagnostics, collision handling, and reload visibility
   - duplicate prompt and skill names are detected while preserving first-match precedence
@@ -415,7 +416,7 @@ Upstream comparison surface in `pi-mono`:
 
 - `DONE` extension runtime parity for headless-safe command flows
   - TypeScript still has interactive/UI-only extension APIs that remain out of scope
-  - `pigo` now provides executable extension command/tool registration, extension flags/statuses, resource discovery hooks, lifecycle events, cancellable lifecycle hooks, input transform hooks, and context transform hooks for headless sessions
+  - `pigo` now provides executable extension command/tool registration, extension flags/statuses, resource discovery hooks, lifecycle events, cancellable lifecycle hooks, input/context transform hooks, and provider request/response hooks for headless sessions
 
 - `DONE` prompt/resource/skill behavior depth for the headless target
   - base support plus diagnostics/collision/reload visibility exist
@@ -456,6 +457,7 @@ No remaining `PARTIAL` or `MISSING` parity items are tracked for the Go headless
 - `DONE` `codingagent`: cancellable session lifecycle hooks for switch/new, fork, branch/tree navigation, and compaction flows
 - `DONE` `codingagent`: input event hooks for headless prompt handling and transformation
 - `DONE` `codingagent`: context event hooks for headless provider message inspection and replacement
+- `DONE` `codingagent`: provider payload/response hooks chained from headless sessions into provider calls
 - `DONE` `codingagent`: richer session-manager and compaction workflow semantics, including branch-summary edge cases, abort/cancel events, context estimation, and extension hooks
 - `DONE` `ai`: non-OpenAI provider long-tail fidelity against upstream provider-specific tests and quirks
 - `DONE` `agentcore` / `ai`: exact normalized event payload and stream shape gaps where downstream clients depend on TS-compatible objects
@@ -480,6 +482,7 @@ No remaining `PARTIAL` or `MISSING` parity items are tracked for the Go headless
 - `DONE` `codingagent`: cancellable headless lifecycle hooks cover session replacement, fork, tree/branch navigation, and compaction flows
 - `DONE` `codingagent`: headless input hooks cover continue/handled/transform behavior for prompt text and attachments
 - `DONE` `codingagent`: headless context hooks cover provider-bound message transformation before model calls
+- `DONE` `codingagent`: headless provider payload/response hooks cover request and HTTP response observation/mutation surfaces
 
 ## Bottom Line
 

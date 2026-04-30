@@ -81,6 +81,9 @@ func TestLoginAnthropicOAuth(t *testing.T) {
 }
 
 func TestGetOAuthAPIKeyRefreshesExpiredGoogleCredentials(t *testing.T) {
+	t.Setenv("PIGO_GEMINI_CLI_OAUTH_CLIENT_ID", "test-client-id")
+	t.Setenv("PIGO_GEMINI_CLI_OAUTH_CLIENT_SECRET", "test-client-secret")
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		_, _ = w.Write([]byte(`{"access_token":"new-token","expires_in":3600}`))
 	}))
@@ -115,6 +118,9 @@ func TestGetOAuthAPIKeyRefreshesExpiredGoogleCredentials(t *testing.T) {
 }
 
 func TestGetOAuthAPIKeyRefreshesMissingAccessToken(t *testing.T) {
+	t.Setenv("PIGO_GEMINI_CLI_OAUTH_CLIENT_ID", "test-client-id")
+	t.Setenv("PIGO_GEMINI_CLI_OAUTH_CLIENT_SECRET", "test-client-secret")
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		_, _ = w.Write([]byte(`{"access_token":"new-token","expires_in":3600}`))
 	}))

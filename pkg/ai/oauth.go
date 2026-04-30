@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -244,10 +245,18 @@ func builtInOAuthProviders() map[string]OAuthProviderInterface {
 			name:               "Google Cloud Code Assist",
 			usesCallbackServer: true,
 			login: func(callbacks OAuthLoginCallbacks) (OAuthCredentials, error) {
-				return loginGoogleOAuth(callbacks, geminiCLIOAuthClientID, geminiCLIOAuthSecret, googleGeminiRedirectURI, googleGeminiScopes, "")
+				clientID, clientSecret, err := googleOAuthClientCredentials("google-gemini-cli", "PIGO_GEMINI_CLI_OAUTH_CLIENT_ID", "PIGO_GEMINI_CLI_OAUTH_CLIENT_SECRET", geminiCLIOAuthClientID, geminiCLIOAuthSecret)
+				if err != nil {
+					return OAuthCredentials{}, err
+				}
+				return loginGoogleOAuth(callbacks, clientID, clientSecret, googleGeminiRedirectURI, googleGeminiScopes, "")
 			},
 			refreshToken: func(ctx context.Context, credentials OAuthCredentials) (OAuthCredentials, error) {
-				return refreshGoogleOAuthToken(ctx, geminiCLIOAuthClientID, geminiCLIOAuthSecret, credentials.Refresh, credentials.ProjectID)
+				clientID, clientSecret, err := googleOAuthClientCredentials("google-gemini-cli", "PIGO_GEMINI_CLI_OAUTH_CLIENT_ID", "PIGO_GEMINI_CLI_OAUTH_CLIENT_SECRET", geminiCLIOAuthClientID, geminiCLIOAuthSecret)
+				if err != nil {
+					return OAuthCredentials{}, err
+				}
+				return refreshGoogleOAuthToken(ctx, clientID, clientSecret, credentials.Refresh, credentials.ProjectID)
 			},
 			getAPIKey: googleOAuthAPIKey,
 		},
@@ -256,10 +265,18 @@ func builtInOAuthProviders() map[string]OAuthProviderInterface {
 			name:               "Antigravity",
 			usesCallbackServer: true,
 			login: func(callbacks OAuthLoginCallbacks) (OAuthCredentials, error) {
-				return loginGoogleOAuth(callbacks, antigravityOAuthClientID, antigravityOAuthSecret, antigravityRedirectURI, antigravityScopes, defaultAntigravityProjectID)
+				clientID, clientSecret, err := googleOAuthClientCredentials("google-antigravity", "PIGO_ANTIGRAVITY_OAUTH_CLIENT_ID", "PIGO_ANTIGRAVITY_OAUTH_CLIENT_SECRET", antigravityOAuthClientID, antigravityOAuthSecret)
+				if err != nil {
+					return OAuthCredentials{}, err
+				}
+				return loginGoogleOAuth(callbacks, clientID, clientSecret, antigravityRedirectURI, antigravityScopes, defaultAntigravityProjectID)
 			},
 			refreshToken: func(ctx context.Context, credentials OAuthCredentials) (OAuthCredentials, error) {
-				return refreshGoogleOAuthToken(ctx, antigravityOAuthClientID, antigravityOAuthSecret, credentials.Refresh, credentials.ProjectID)
+				clientID, clientSecret, err := googleOAuthClientCredentials("google-antigravity", "PIGO_ANTIGRAVITY_OAUTH_CLIENT_ID", "PIGO_ANTIGRAVITY_OAUTH_CLIENT_SECRET", antigravityOAuthClientID, antigravityOAuthSecret)
+				if err != nil {
+					return OAuthCredentials{}, err
+				}
+				return refreshGoogleOAuthToken(ctx, clientID, clientSecret, credentials.Refresh, credentials.ProjectID)
 			},
 			getAPIKey: googleOAuthAPIKey,
 		},
@@ -276,6 +293,21 @@ func builtInOAuthProviders() map[string]OAuthProviderInterface {
 			getAPIKey: func(credentials OAuthCredentials) string { return credentials.Access },
 		},
 	}
+}
+
+func googleOAuthClientCredentials(providerID, clientIDEnv, clientSecretEnv, fallbackClientID, fallbackClientSecret string) (string, string, error) {
+	clientID := strings.TrimSpace(os.Getenv(clientIDEnv))
+	if clientID == "" {
+		clientID = strings.TrimSpace(fallbackClientID)
+	}
+	clientSecret := strings.TrimSpace(os.Getenv(clientSecretEnv))
+	if clientSecret == "" {
+		clientSecret = strings.TrimSpace(fallbackClientSecret)
+	}
+	if clientID == "" || clientSecret == "" {
+		return "", "", fmt.Errorf("%s oauth requires %s and %s", providerID, clientIDEnv, clientSecretEnv)
+	}
+	return clientID, clientSecret, nil
 }
 
 func resetOAuthProvidersLocked() {

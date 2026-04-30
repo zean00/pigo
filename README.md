@@ -16,7 +16,7 @@ Out of scope for the first pass:
 
 - TUI implementation.
 - Full interactive coding-agent product parity.
-- MCP, ACP, TUI, and web UI packages.
+- TUI and web UI packages.
 
 ## Conformance
 
@@ -48,6 +48,14 @@ printf '{"id":"s1","type":"get_state"}\n' | go run ./cmd/pigo-rpc
 printf '{"id":"stats1","type":"get_session_stats"}\n' | go run ./cmd/pigo-rpc --session-file tmp/session.jsonl
 printf '{"id":"o1","type":"get_oauth_providers"}\n' | go run ./cmd/pigo-rpc --auth-file tmp/auth.json
 ```
+
+Run the ACP stdio adapter:
+
+```bash
+printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}\n' | go run ./cmd/pigo-acp
+```
+
+`pigo-acp` implements the V1 Agent Client Protocol session flow (`initialize`, `session/new`, `session/prompt`, `session/cancel`, and `session/close`) and can attach MCP tools to each ACP session. MCP server config is read from ACP `mcpServers` first, then from `PI_MCP_CONFIG_JSON`, `PI_MCP_CONFIG`, `.pi/mcp.json`, and `~/.pi/agent/mcp.json`. Supported MCP transports are `stdio`, `http`, and `sse`; tools are exposed as `mcp__<server>__<tool>`.
 
 Run the interactive OAuth helper:
 

@@ -144,6 +144,39 @@ func TestSessionProviderLoopUsesStoredOAuthCredentials(t *testing.T) {
 	}
 }
 
+func TestSessionContextHandlersTransformProviderMessages(t *testing.T) {
+	const providerName = "context-hook-provider"
+	var captured []ai.Message
+	ai.RegisterProvider(providerName, providerFunc(func(_ context.Context, req ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error) {
+		captured = append([]ai.Message(nil), req.Messages...)
+		return ai.NormalizedResult{
+			Role:       "assistant",
+			StopReason: "stop",
+			Text:       "ok",
+			Content:    []any{map[string]any{"type": "text", "text": "ok"}},
+		}, []ai.NormalizedEvent{{Type: "start"}, {Type: "text_start", ContentIdx: 0}, {Type: "text_delta", ContentIdx: 0, Delta: "ok"}, {Type: "text_end", ContentIdx: 0, Content: "ok"}, {Type: "done", Reason: "stop"}}, nil
+	}))
+
+	session := NewSession(t.TempDir(), nil)
+	if _, err := session.SetModel(providerName, "test-model"); err != nil {
+		t.Fatal(err)
+	}
+	session.RegisterContextHandler(func(ctx context.Context, event ContextEvent) (ContextResult, error) {
+		if event.Type != "context" || len(event.Messages) == 0 {
+			t.Fatalf("event = %#v", event)
+		}
+		messages := append([]ai.Message{{Role: "system", Content: "context hook"}}, event.Messages...)
+		return ContextResult{Messages: messages}, nil
+	})
+
+	if err := session.Prompt(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if len(captured) < 2 || captured[0].Role != "system" || captured[0].Content != "context hook" {
+		t.Fatalf("captured = %#v", captured)
+	}
+}
+
 func TestSessionUsesOAuthModelMutations(t *testing.T) {
 	const providerName = "mutating-oauth-provider"
 	ai.RegisterModel(ai.Model{

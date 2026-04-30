@@ -76,6 +76,7 @@ type Session struct {
 	beforeTreeHooks     []SessionBeforeTreeHandler
 	beforeCompactHooks  []SessionBeforeCompactHandler
 	inputHooks          []InputHandler
+	contextHooks        []ContextHandler
 	promptTemplates     []SlashCommandInfo
 	skills              []SlashCommandInfo
 	resourceDiagnostics []ResourceDiagnostic
@@ -192,6 +193,11 @@ type InputEvent struct {
 	Source      string             `json:"source"`
 }
 
+type ContextEvent struct {
+	Type     string       `json:"type"`
+	Messages []ai.Message `json:"messages"`
+}
+
 type SessionBeforeResult struct {
 	Cancel bool `json:"cancel,omitempty"`
 }
@@ -202,11 +208,16 @@ type InputResult struct {
 	Attachments []PromptAttachment `json:"attachments,omitempty"`
 }
 
+type ContextResult struct {
+	Messages []ai.Message `json:"messages,omitempty"`
+}
+
 type SessionBeforeSwitchHandler func(ctx context.Context, event SessionBeforeSwitchEvent) (SessionBeforeResult, error)
 type SessionBeforeForkHandler func(ctx context.Context, event SessionBeforeForkEvent) (SessionBeforeResult, error)
 type SessionBeforeTreeHandler func(ctx context.Context, event SessionBeforeTreeEvent) (SessionBeforeResult, error)
 type SessionBeforeCompactHandler func(ctx context.Context, event SessionBeforeCompactEvent) (SessionBeforeResult, error)
 type InputHandler func(ctx context.Context, event InputEvent) (InputResult, error)
+type ContextHandler func(ctx context.Context, event ContextEvent) (ContextResult, error)
 
 const (
 	bashExecutionTextPrefix        = "Ran `%s`\n"
@@ -489,6 +500,15 @@ func (s *Session) RegisterInputHandler(handler InputHandler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.inputHooks = append(s.inputHooks, handler)
+}
+
+func (s *Session) RegisterContextHandler(handler ContextHandler) {
+	if handler == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.contextHooks = append(s.contextHooks, handler)
 }
 
 func (s *Session) RegisterExtensionCommand(command SlashCommandInfo, handler ExtensionCommandHandler) {
@@ -987,6 +1007,24 @@ func (s *Session) transformContextWithSkills(messages []ai.Message) []ai.Message
 	return out
 }
 
+func (s *Session) transformContextWithHooks(ctx context.Context, messages []ai.Message) ([]ai.Message, error) {
+	current := s.transformContextWithSkills(messages)
+	s.mu.Lock()
+	hooks := append([]ContextHandler(nil), s.contextHooks...)
+	s.mu.Unlock()
+	for _, hook := range hooks {
+		event := ContextEvent{Type: "context", Messages: append([]ai.Message(nil), current...)}
+		result, err := hook(ctx, event)
+		if err != nil {
+			return nil, err
+		}
+		if result.Messages != nil {
+			current = append([]ai.Message(nil), result.Messages...)
+		}
+	}
+	return current, nil
+}
+
 func (s *Session) formatSkillsForPrompt() string {
 	skills := s.Skills()
 	if len(skills) == 0 {
@@ -1410,7 +1448,7 @@ func (s *Session) promptWithSource(ctx context.Context, prompt string, attachmen
 			GetAPIKey: func(provider string) string {
 				return s.resolveProviderAPIKey(opCtx, provider)
 			},
-			TransformContext: s.transformContextWithSkills,
+			TransformContextFunc: s.transformContextWithHooks,
 			EventSink: func(event agentcore.Event) {
 				s.applyPromptStreamEvent(&streamState, event)
 			},

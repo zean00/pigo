@@ -415,6 +415,19 @@ Upstream comparison surface in `pi-mono`:
 - `DONE` exact parity with TypeScript RPC mode for headless commands
   - session state, messages, entries, events, resources, and model/auth controls are exposed over RPC
 
+### ACP / MCP adapters
+
+- `DONE` ACP server adapter
+  - `pigo`: `cmd/pigo-acp`, `pkg/acpadapter`
+  - supports initialize, prompt, cancel, close, active and persisted session listing, load, resume, fork, model/mode/config setters, no-op authenticate/logout, and ACP document notifications
+  - prompt handling forwards text, resource, image, and live open-editor document context into the coding session
+  - session lifecycle responses expose model state, mode state, and configurable options
+
+- `DONE` MCP tool adapter
+  - `pigo`: `pkg/mcpadapter`
+  - supports stdio, Streamable HTTP, and SSE MCP servers from ACP-provided server definitions, `PI_MCP_CONFIG_JSON`, `PI_MCP_CONFIG`, project `.pi/mcp.json`, and global `~/.pi/agent/mcp.json`
+  - maps MCP tools into pigo extension tools, maps text/image/audio/resource/structured results, closes client sessions on shutdown, paginates tool lists, and refreshes registered tools on MCP `toolListChanged`
+
 ### Headless-relevant gaps still open
 
 - `DONE` extension runtime parity for headless-safe command flows

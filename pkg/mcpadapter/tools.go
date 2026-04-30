@@ -16,13 +16,19 @@ import (
 )
 
 type Registry struct {
-	sessions []*mcp.ClientSession
+	session *codingagent.Session
+	servers []registeredServer
+}
+
+type registeredServer struct {
+	Name    string
+	Session *mcp.ClientSession
 }
 
 func (r *Registry) Close() error {
 	var first error
-	for _, session := range r.sessions {
-		if err := session.Close(); err != nil && first == nil {
+	for _, server := range r.servers {
+		if err := server.Session.Close(); err != nil && first == nil {
 			first = err
 		}
 	}
@@ -30,7 +36,7 @@ func (r *Registry) Close() error {
 }
 
 func RegisterTools(ctx context.Context, session *codingagent.Session, cfg Config) (*Registry, error) {
-	registry, tools, specs, err := BuildTools(ctx, cfg)
+	registry, tools, specs, err := buildTools(ctx, session, cfg)
 	if err != nil {
 		if registry != nil {
 			_ = registry.Close()
@@ -44,16 +50,20 @@ func RegisterTools(ctx context.Context, session *codingagent.Session, cfg Config
 }
 
 func BuildTools(ctx context.Context, cfg Config) (*Registry, []agentcore.Tool, []ai.Tool, error) {
-	registry := &Registry{}
+	return buildTools(ctx, nil, cfg)
+}
+
+func buildTools(ctx context.Context, codingSession *codingagent.Session, cfg Config) (*Registry, []agentcore.Tool, []ai.Tool, error) {
+	registry := &Registry{session: codingSession}
 	var tools []agentcore.Tool
 	var specs []ai.Tool
 	seen := map[string]bool{}
 	for serverName, serverCfg := range cfg.Servers {
-		clientSession, toolList, err := connectServer(ctx, serverName, serverCfg)
+		clientSession, toolList, err := registry.connectServer(ctx, serverName, serverCfg)
 		if err != nil {
 			return registry, nil, nil, err
 		}
-		registry.sessions = append(registry.sessions, clientSession)
+		registry.servers = append(registry.servers, registeredServer{Name: serverName, Session: clientSession})
 		for _, remoteTool := range toolList.Tools {
 			if remoteTool == nil {
 				continue
@@ -89,7 +99,18 @@ func BuildTools(ctx context.Context, cfg Config) (*Registry, []agentcore.Tool, [
 }
 
 func connectServer(ctx context.Context, serverName string, cfg ServerConfig) (*mcp.ClientSession, *mcp.ListToolsResult, error) {
-	client := mcp.NewClient(&mcp.Implementation{Name: "pigo-mcp-adapter", Version: "0.1.0"}, nil)
+	registry := &Registry{}
+	return registry.connectServer(ctx, serverName, cfg)
+}
+
+func (r *Registry) connectServer(ctx context.Context, serverName string, cfg ServerConfig) (*mcp.ClientSession, *mcp.ListToolsResult, error) {
+	client := mcp.NewClient(&mcp.Implementation{Name: "pigo-mcp-adapter", Version: "0.1.0"}, &mcp.ClientOptions{
+		ToolListChangedHandler: func(context.Context, *mcp.ToolListChangedRequest) {
+			if r.session != nil {
+				go r.Refresh(context.Background())
+			}
+		},
+	})
 	transport, err := transportForConfig(cfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("MCP server %q: %w", serverName, err)
@@ -106,9 +127,50 @@ func connectServer(ctx context.Context, serverName string, cfg ServerConfig) (*m
 	return session, tools, nil
 }
 
+func (r *Registry) Refresh(ctx context.Context) error {
+	if r == nil || r.session == nil {
+		return nil
+	}
+	var tools []agentcore.Tool
+	var specs []ai.Tool
+	seen := map[string]bool{}
+	for _, server := range r.servers {
+		toolList, err := listAllTools(ctx, server.Session)
+		if err != nil {
+			return fmt.Errorf("MCP server %q refresh tools: %w", server.Name, err)
+		}
+		for _, remoteTool := range toolList.Tools {
+			if remoteTool == nil {
+				continue
+			}
+			remoteName := remoteTool.Name
+			localName := MakeToolName(server.Name, remoteName)
+			if seen[localName] {
+				return fmt.Errorf("duplicate MCP tool name %q", localName)
+			}
+			seen[localName] = true
+			client := server.Session
+			tools = append(tools, agentcore.Tool{
+				Name: localName,
+				Execute: func(ctx context.Context, call ai.ContentBlock) agentcore.ToolResult {
+					result, err := client.CallTool(ctx, &mcp.CallToolParams{Name: remoteName, Arguments: call.Arguments})
+					if err != nil {
+						return agentcore.ToolResult{Text: fmt.Sprintf("MCP tool %s returned an error:\n%s", remoteName, err.Error()), IsError: true}
+					}
+					return MapToolResult(result)
+				},
+			})
+			specs = append(specs, ai.Tool{Name: localName, Description: remoteTool.Description, Parameters: schemaMap(remoteTool.InputSchema)})
+		}
+	}
+	r.session.SetExtensionTools(tools, specs)
+	return nil
+}
+
 func listAllTools(ctx context.Context, session *mcp.ClientSession) (*mcp.ListToolsResult, error) {
 	var all []*mcp.Tool
 	cursor := ""
+	seenCursors := map[string]bool{}
 	for {
 		params := &mcp.ListToolsParams{Cursor: cursor}
 		if cursor == "" {
@@ -127,6 +189,10 @@ func listAllTools(ctx context.Context, session *mcp.ClientSession) (*mcp.ListToo
 		if cursor == "" {
 			break
 		}
+		if seenCursors[cursor] {
+			return nil, fmt.Errorf("MCP server repeated list tools cursor %q", cursor)
+		}
+		seenCursors[cursor] = true
 	}
 	return &mcp.ListToolsResult{Tools: all}, nil
 }

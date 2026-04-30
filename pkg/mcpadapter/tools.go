@@ -98,12 +98,37 @@ func connectServer(ctx context.Context, serverName string, cfg ServerConfig) (*m
 	if err != nil {
 		return nil, nil, fmt.Errorf("MCP server %q connect: %w", serverName, err)
 	}
-	tools, err := session.ListTools(ctx, nil)
+	tools, err := listAllTools(ctx, session)
 	if err != nil {
 		_ = session.Close()
 		return nil, nil, fmt.Errorf("MCP server %q list tools: %w", serverName, err)
 	}
 	return session, tools, nil
+}
+
+func listAllTools(ctx context.Context, session *mcp.ClientSession) (*mcp.ListToolsResult, error) {
+	var all []*mcp.Tool
+	cursor := ""
+	for {
+		params := &mcp.ListToolsParams{Cursor: cursor}
+		if cursor == "" {
+			params = nil
+		}
+		result, err := session.ListTools(ctx, params)
+		if err != nil {
+			return nil, err
+		}
+		if result != nil {
+			all = append(all, result.Tools...)
+			cursor = strings.TrimSpace(result.NextCursor)
+		} else {
+			cursor = ""
+		}
+		if cursor == "" {
+			break
+		}
+	}
+	return &mcp.ListToolsResult{Tools: all}, nil
 }
 
 func transportForConfig(cfg ServerConfig) (mcp.Transport, error) {
@@ -202,11 +227,40 @@ func MapContent(items []mcp.Content) []ai.ContentBlock {
 			out = append(out, ai.ContentBlock{Type: "text", Text: typed.Text})
 		case *mcp.ImageContent:
 			out = append(out, ai.ContentBlock{Type: "image", Data: string(typed.Data), MimeType: typed.MIMEType})
+		case *mcp.AudioContent:
+			out = append(out, ai.ContentBlock{Type: "text", Text: fmt.Sprintf("[Audio: %s]", typed.MIMEType)})
+		case *mcp.ResourceLink:
+			out = append(out, ai.ContentBlock{Type: "text", Text: resourceLinkText(typed)})
+		case *mcp.EmbeddedResource:
+			out = append(out, ai.ContentBlock{Type: "text", Text: embeddedResourceText(typed)})
 		default:
 			out = append(out, ai.ContentBlock{Type: "text", Text: prettyJSON(item)})
 		}
 	}
 	return out
+}
+
+func resourceLinkText(link *mcp.ResourceLink) string {
+	if link == nil {
+		return ""
+	}
+	if link.Title != "" {
+		return fmt.Sprintf("Resource: %s (%s)", link.URI, link.Title)
+	}
+	return "Resource: " + link.URI
+}
+
+func embeddedResourceText(resource *mcp.EmbeddedResource) string {
+	if resource == nil || resource.Resource == nil {
+		return ""
+	}
+	if resource.Resource.Text != "" {
+		return resource.Resource.Text
+	}
+	if len(resource.Resource.Blob) > 0 {
+		return fmt.Sprintf("[Resource: %s]", resource.Resource.MIMEType)
+	}
+	return "Resource: " + resource.Resource.URI
 }
 
 func prettyJSON(value any) string {

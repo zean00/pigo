@@ -39,6 +39,9 @@ type acpSession struct {
 	ID       string
 	Session  *codingagent.Session
 	MCP      *mcpadapter.Registry
+	Cwd      string
+	Title    string
+	Updated  time.Time
 	cancelMu sync.Mutex
 	cancel   context.CancelFunc
 }
@@ -68,6 +71,7 @@ func New(options ServerOptions) *Server {
 }
 
 func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
+	defer s.closeAllSessions()
 	s.encoder = json.NewEncoder(out)
 	scanner := bufio.NewScanner(in)
 	for scanner.Scan() {
@@ -104,8 +108,14 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 func (s *Server) handleRequest(ctx context.Context, request jsonrpcRequest) (any, *jsonrpcError) {
 	switch request.Method {
 	case "initialize":
+		var params initializeParams
+		_ = json.Unmarshal(request.Params, &params)
+		protocolVersion := params.ProtocolVersion
+		if protocolVersion == 0 {
+			protocolVersion = 1
+		}
 		return map[string]any{
-			"protocolVersion": 1,
+			"protocolVersion": protocolVersion,
 			"agentInfo":       map[string]any{"name": "pigo-acp", "version": "0.1.0"},
 			"agentCapabilities": map[string]any{
 				"loadSession":        false,
@@ -113,6 +123,7 @@ func (s *Server) handleRequest(ctx context.Context, request jsonrpcRequest) (any
 				"promptCapabilities": map[string]any{"image": true},
 				"sessionCapabilities": map[string]any{
 					"close": map[string]any{},
+					"list":  map[string]any{},
 				},
 			},
 		}, nil
@@ -138,6 +149,17 @@ func (s *Server) handleRequest(ctx context.Context, request jsonrpcRequest) (any
 			return nil, invalidParams(err)
 		}
 		return map[string]any{}, s.closeSession(params.SessionID)
+	case "session/list":
+		var params listSessionsParams
+		if err := json.Unmarshal(request.Params, &params); err != nil {
+			return nil, invalidParams(err)
+		}
+		return s.listSessions(params), nil
+	case "session/cancel":
+		if err := s.handleCancel(request.Params); err != nil {
+			return nil, invalidParams(err)
+		}
+		return map[string]any{}, nil
 	default:
 		return nil, &jsonrpcError{Code: -32601, Message: "method not found"}
 	}
@@ -147,8 +169,12 @@ func (s *Server) handleNotification(request jsonrpcRequest) error {
 	if request.Method != "session/cancel" {
 		return nil
 	}
+	return s.handleCancel(request.Params)
+}
+
+func (s *Server) handleCancel(paramsRaw json.RawMessage) error {
 	var params sessionParams
-	if err := json.Unmarshal(request.Params, &params); err != nil {
+	if err := json.Unmarshal(paramsRaw, &params); err != nil {
 		return err
 	}
 	session, ok := s.getSession(params.SessionID)
@@ -198,8 +224,9 @@ func (s *Server) newSession(ctx context.Context, params newSessionParams) (strin
 		}
 	}
 	id := uuid()
+	now := time.Now().UTC()
 	s.mu.Lock()
-	s.sessions[id] = &acpSession{ID: id, Session: session, MCP: registry}
+	s.sessions[id] = &acpSession{ID: id, Session: session, MCP: registry, Cwd: root, Updated: now}
 	s.mu.Unlock()
 	return id, nil
 }
@@ -238,7 +265,29 @@ func (s *Server) prompt(ctx context.Context, params promptParams) (any, *jsonrpc
 	} else if err != nil {
 		stopReason = "refusal"
 	}
+	s.markSessionUpdated(params.SessionID)
 	return map[string]any{"stopReason": stopReason, "userMessageId": params.MessageID}, nil
+}
+
+func (s *Server) listSessions(params listSessionsParams) map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sessions := make([]map[string]any, 0, len(s.sessions))
+	for _, session := range s.sessions {
+		if params.Cwd != "" && session.Cwd != params.Cwd {
+			continue
+		}
+		item := map[string]any{
+			"sessionId": session.ID,
+			"cwd":       session.Cwd,
+			"updatedAt": session.Updated.Format(time.RFC3339),
+		}
+		if session.Title != "" {
+			item["title"] = session.Title
+		}
+		sessions = append(sessions, item)
+	}
+	return map[string]any{"sessions": sessions}
 }
 
 func (s *Server) closeSession(sessionID string) *jsonrpcError {
@@ -256,6 +305,30 @@ func (s *Server) closeSession(sessionID string) *jsonrpcError {
 		_ = session.MCP.Close()
 	}
 	return nil
+}
+
+func (s *Server) closeAllSessions() {
+	s.mu.Lock()
+	sessions := make([]*acpSession, 0, len(s.sessions))
+	for _, session := range s.sessions {
+		sessions = append(sessions, session)
+	}
+	s.sessions = map[string]*acpSession{}
+	s.mu.Unlock()
+	for _, session := range sessions {
+		session.Session.Abort()
+		if session.MCP != nil {
+			_ = session.MCP.Close()
+		}
+	}
+}
+
+func (s *Server) markSessionUpdated(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if session := s.sessions[id]; session != nil {
+		session.Updated = time.Now().UTC()
+	}
 }
 
 func (s *Server) getSession(id string) (*acpSession, bool) {
@@ -335,8 +408,17 @@ type newSessionParams struct {
 	MCPServers []mcpadapter.ACPServer `json:"mcpServers"`
 }
 
+type initializeParams struct {
+	ProtocolVersion int `json:"protocolVersion"`
+}
+
 type sessionParams struct {
 	SessionID string `json:"sessionId"`
+}
+
+type listSessionsParams struct {
+	Cursor string `json:"cursor,omitempty"`
+	Cwd    string `json:"cwd,omitempty"`
 }
 
 type promptParams struct {

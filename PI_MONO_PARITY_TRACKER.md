@@ -378,6 +378,7 @@ Upstream comparison surface in `pi-mono`:
   - extension tools can be registered with tool specs and execute in the same provider loop as built-in tools
   - extension flags, status text, resource discovery, and session lifecycle events are available to headless sessions/RPC clients
   - headless lifecycle hooks can observe and cancel session replacement, fork, branch/tree navigation, and compaction flows
+  - headless input hooks can continue, handle, or transform prompt text and attachments before command/template expansion
 
 - `DONE` prompt/skill resource diagnostics, collision handling, and reload visibility
   - duplicate prompt and skill names are detected while preserving first-match precedence
@@ -413,7 +414,7 @@ Upstream comparison surface in `pi-mono`:
 
 - `DONE` extension runtime parity for headless-safe command flows
   - TypeScript still has interactive/UI-only extension APIs that remain out of scope
-  - `pigo` now provides executable extension command/tool registration, extension flags/statuses, resource discovery hooks, lifecycle events, and cancellable lifecycle hooks for headless sessions
+  - `pigo` now provides executable extension command/tool registration, extension flags/statuses, resource discovery hooks, lifecycle events, cancellable lifecycle hooks, and input transform hooks for headless sessions
 
 - `DONE` prompt/resource/skill behavior depth for the headless target
   - base support plus diagnostics/collision/reload visibility exist
@@ -452,6 +453,7 @@ No remaining `PARTIAL` or `MISSING` parity items are tracked for the Go headless
 - `DONE` `codingagent`: extension runtime, loader, wrapper, and SDK-facing command/tool parity for headless-safe extension flows
 - `DONE` `codingagent`: extension flag/status metadata, resource discovery hooks, and lifecycle events for headless-safe extension flows
 - `DONE` `codingagent`: cancellable session lifecycle hooks for switch/new, fork, branch/tree navigation, and compaction flows
+- `DONE` `codingagent`: input event hooks for headless prompt handling and transformation
 - `DONE` `codingagent`: richer session-manager and compaction workflow semantics, including branch-summary edge cases, abort/cancel events, context estimation, and extension hooks
 - `DONE` `ai`: non-OpenAI provider long-tail fidelity against upstream provider-specific tests and quirks
 - `DONE` `agentcore` / `ai`: exact normalized event payload and stream shape gaps where downstream clients depend on TS-compatible objects
@@ -474,6 +476,7 @@ No remaining `PARTIAL` or `MISSING` parity items are tracked for the Go headless
 - `DONE` `codingagent`: extension-registered tools participate in headless provider/tool loops
 - `DONE` `codingagent`: extension flags/statuses, resource discovery, and session lifecycle events are exposed in the headless runtime/RPC surface
 - `DONE` `codingagent`: cancellable headless lifecycle hooks cover session replacement, fork, tree/branch navigation, and compaction flows
+- `DONE` `codingagent`: headless input hooks cover continue/handled/transform behavior for prompt text and attachments
 
 ## Bottom Line
 

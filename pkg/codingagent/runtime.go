@@ -75,6 +75,7 @@ type Session struct {
 	beforeForkHooks     []SessionBeforeForkHandler
 	beforeTreeHooks     []SessionBeforeTreeHandler
 	beforeCompactHooks  []SessionBeforeCompactHandler
+	inputHooks          []InputHandler
 	promptTemplates     []SlashCommandInfo
 	skills              []SlashCommandInfo
 	resourceDiagnostics []ResourceDiagnostic
@@ -184,14 +185,28 @@ type SessionBeforeCompactEvent struct {
 	CustomInstructions string `json:"customInstructions,omitempty"`
 }
 
+type InputEvent struct {
+	Type        string             `json:"type"`
+	Text        string             `json:"text"`
+	Attachments []PromptAttachment `json:"attachments,omitempty"`
+	Source      string             `json:"source"`
+}
+
 type SessionBeforeResult struct {
 	Cancel bool `json:"cancel,omitempty"`
+}
+
+type InputResult struct {
+	Action      string             `json:"action,omitempty"`
+	Text        string             `json:"text,omitempty"`
+	Attachments []PromptAttachment `json:"attachments,omitempty"`
 }
 
 type SessionBeforeSwitchHandler func(ctx context.Context, event SessionBeforeSwitchEvent) (SessionBeforeResult, error)
 type SessionBeforeForkHandler func(ctx context.Context, event SessionBeforeForkEvent) (SessionBeforeResult, error)
 type SessionBeforeTreeHandler func(ctx context.Context, event SessionBeforeTreeEvent) (SessionBeforeResult, error)
 type SessionBeforeCompactHandler func(ctx context.Context, event SessionBeforeCompactEvent) (SessionBeforeResult, error)
+type InputHandler func(ctx context.Context, event InputEvent) (InputResult, error)
 
 const (
 	bashExecutionTextPrefix        = "Ran `%s`\n"
@@ -465,6 +480,15 @@ func (s *Session) RegisterSessionBeforeCompactHandler(handler SessionBeforeCompa
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.beforeCompactHooks = append(s.beforeCompactHooks, handler)
+}
+
+func (s *Session) RegisterInputHandler(handler InputHandler) {
+	if handler == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inputHooks = append(s.inputHooks, handler)
 }
 
 func (s *Session) RegisterExtensionCommand(command SlashCommandInfo, handler ExtensionCommandHandler) {
@@ -1016,19 +1040,23 @@ func escapeXML(value string) string {
 }
 
 func (s *Session) Prompt(ctx context.Context, prompt string) error {
-	return s.prompt(ctx, prompt, nil, false)
+	return s.promptWithSource(ctx, prompt, nil, false, "extension")
 }
 
 func (s *Session) PromptWithAttachments(ctx context.Context, prompt string, attachments []PromptAttachment) error {
-	return s.prompt(ctx, prompt, attachments, false)
+	return s.promptWithSource(ctx, prompt, attachments, false, "extension")
+}
+
+func (s *Session) PromptWithSource(ctx context.Context, prompt string, attachments []PromptAttachment, source string) error {
+	return s.promptWithSource(ctx, prompt, attachments, false, source)
 }
 
 func (s *Session) SteerWithAttachments(ctx context.Context, message string, attachments []PromptAttachment) error {
-	return s.prompt(ctx, message, attachments, false)
+	return s.promptWithSource(ctx, message, attachments, false, "extension")
 }
 
 func (s *Session) FollowUpWithAttachments(ctx context.Context, message string, attachments []PromptAttachment) error {
-	return s.prompt(ctx, message, attachments, false)
+	return s.promptWithSource(ctx, message, attachments, false, "extension")
 }
 
 func waitForRetryDelay(ctx context.Context, delay time.Duration) error {
@@ -1050,6 +1078,14 @@ func clonePromptAttachments(attachments []PromptAttachment) []PromptAttachment {
 	out := make([]PromptAttachment, len(attachments))
 	copy(out, attachments)
 	return out
+}
+
+func normalizeInputAction(action string) string {
+	action = strings.TrimSpace(action)
+	if action == "" {
+		return "continue"
+	}
+	return action
 }
 
 func cloneAgentcoreMessage(message agentcore.Message) agentcore.Message {
@@ -1241,10 +1277,63 @@ func (s *Session) emitBeforeCompact(ctx context.Context, tokensBefore int, instr
 	return false, nil
 }
 
+func (s *Session) applyInputHooks(ctx context.Context, text string, attachments []PromptAttachment, source string) (string, []PromptAttachment, bool, error) {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		source = "extension"
+	}
+	currentText := text
+	currentAttachments := clonePromptAttachments(attachments)
+	s.mu.Lock()
+	hooks := append([]InputHandler(nil), s.inputHooks...)
+	s.mu.Unlock()
+	for _, hook := range hooks {
+		event := InputEvent{
+			Type:        "input",
+			Text:        currentText,
+			Attachments: clonePromptAttachments(currentAttachments),
+			Source:      source,
+		}
+		result, err := hook(ctx, event)
+		if err != nil {
+			return "", nil, false, err
+		}
+		switch normalizeInputAction(result.Action) {
+		case "continue":
+			continue
+		case "handled":
+			return currentText, currentAttachments, true, nil
+		case "transform":
+			currentText = result.Text
+			if result.Attachments != nil {
+				currentAttachments = clonePromptAttachments(result.Attachments)
+			}
+		default:
+			return "", nil, false, fmt.Errorf("unsupported input action: %s", result.Action)
+		}
+	}
+	return currentText, currentAttachments, false, nil
+}
+
 func (s *Session) prompt(ctx context.Context, prompt string, attachments []PromptAttachment, retrying bool) error {
+	return s.promptWithSource(ctx, prompt, attachments, retrying, "extension")
+}
+
+func (s *Session) promptWithSource(ctx context.Context, prompt string, attachments []PromptAttachment, retrying bool, source string) error {
 	streamState := promptStreamState{activeMessageIdx: -1}
 	if s.IsStreaming {
 		return fmt.Errorf("session is already streaming")
+	}
+	if !retrying {
+		updatedPrompt, updatedAttachments, handled, inputErr := s.applyInputHooks(ctx, prompt, attachments, source)
+		if inputErr != nil {
+			return inputErr
+		}
+		if handled {
+			return nil
+		}
+		prompt = updatedPrompt
+		attachments = updatedAttachments
 	}
 	expanded, handled, expandErr := s.expandExtensionCommand(ctx, prompt)
 	if expandErr != nil {
@@ -1351,7 +1440,7 @@ func (s *Session) prompt(ctx context.Context, prompt string, attachments []Promp
 			if err != nil {
 				return err
 			}
-			return s.prompt(ctx, prompt, s.lastAttachments, true)
+			return s.promptWithSource(ctx, prompt, s.lastAttachments, true, source)
 		}
 		return err
 	}

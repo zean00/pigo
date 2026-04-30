@@ -45,6 +45,30 @@ func TestRPCPromptStateAndMessages(t *testing.T) {
 	}
 }
 
+func TestRPCPromptUsesInputSource(t *testing.T) {
+	session := NewSession(t.TempDir(), []AssistantTurn{{Content: []ai.ContentBlock{{Type: "text", Text: "ok"}}, StopReason: "stop"}})
+	session.RegisterInputHandler(func(ctx context.Context, event InputEvent) (InputResult, error) {
+		if event.Source != "rpc" {
+			t.Fatalf("source = %q", event.Source)
+		}
+		return InputResult{Action: "transform", Text: event.Text + " via rpc"}, nil
+	})
+
+	var out bytes.Buffer
+	server := RPCServer{Session: session}
+	input := strings.NewReader(`{"id":"p1","type":"prompt","message":"hello"}` + "\n")
+	if err := server.Serve(context.Background(), input, &out); err != nil {
+		t.Fatal(err)
+	}
+	responses := decodeRPCResponses(t, out.String())
+	if len(responses) != 1 || responses[0]["success"] != true {
+		t.Fatalf("responses = %#v", responses)
+	}
+	if got, _ := session.Messages[0]["text"].(string); got != "hello via rpc" {
+		t.Fatalf("prompt = %q", got)
+	}
+}
+
 func TestRPCPromptWithAttachmentsAndRetry(t *testing.T) {
 	session := NewSession(t.TempDir(), []AssistantTurn{
 		{StopReason: "stop", Content: []ai.ContentBlock{{Type: "text", Text: "first"}}},

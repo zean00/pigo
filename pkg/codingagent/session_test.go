@@ -728,6 +728,66 @@ func TestSessionExtensionCommandHandlerCanRewritePrompt(t *testing.T) {
 	}
 }
 
+func TestSessionInputHandlersTransformAndHandlePrompt(t *testing.T) {
+	session := NewSession(t.TempDir(), []AssistantTurn{
+		{StopReason: "stop", Content: []ai.ContentBlock{{Type: "text", Text: "ok"}}},
+		{StopReason: "stop", Content: []ai.ContentBlock{{Type: "text", Text: "unused"}}},
+	})
+	var seen []InputEvent
+	session.RegisterInputHandler(func(ctx context.Context, event InputEvent) (InputResult, error) {
+		seen = append(seen, event)
+		return InputResult{Action: "transform", Text: event.Text + "[1]"}, nil
+	})
+	session.RegisterInputHandler(func(ctx context.Context, event InputEvent) (InputResult, error) {
+		seen = append(seen, event)
+		return InputResult{Action: "transform", Text: event.Text + "[2]"}, nil
+	})
+	if err := session.PromptWithSource(context.Background(), "go", nil, "rpc"); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 2 || seen[0].Source != "rpc" || seen[0].Text != "go" || seen[1].Text != "go[1]" {
+		t.Fatalf("seen = %#v", seen)
+	}
+	if got, _ := session.Messages[0]["text"].(string); got != "go[1][2]" {
+		t.Fatalf("prompt = %q", got)
+	}
+
+	session.RegisterInputHandler(func(ctx context.Context, event InputEvent) (InputResult, error) {
+		return InputResult{Action: "handled"}, nil
+	})
+	if err := session.Prompt(context.Background(), "skip"); err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Messages) != 2 {
+		t.Fatalf("handled prompt changed messages: %#v", session.Messages)
+	}
+}
+
+func TestSessionInputHandlersPreserveAndReplaceAttachments(t *testing.T) {
+	session := NewSession(t.TempDir(), []AssistantTurn{{StopReason: "stop", Content: []ai.ContentBlock{{Type: "text", Text: "ok"}}}})
+	original := []PromptAttachment{{Type: "image", Data: "orig", MimeType: "image/png"}}
+	session.RegisterInputHandler(func(ctx context.Context, event InputEvent) (InputResult, error) {
+		if len(event.Attachments) != 1 || event.Attachments[0].Data != "orig" {
+			t.Fatalf("event attachments = %#v", event.Attachments)
+		}
+		return InputResult{Action: "transform", Text: event.Text + " image"}, nil
+	})
+	session.RegisterInputHandler(func(ctx context.Context, event InputEvent) (InputResult, error) {
+		return InputResult{
+			Action:      "transform",
+			Text:        event.Text,
+			Attachments: []PromptAttachment{{Type: "image", Data: "new", MimeType: "image/jpeg"}},
+		}, nil
+	})
+	if err := session.PromptWithAttachments(context.Background(), "inspect", original); err != nil {
+		t.Fatal(err)
+	}
+	text, _ := session.Messages[0]["text"].(string)
+	if !strings.Contains(text, "inspect image") || !strings.Contains(text, "image/jpeg") || strings.Contains(text, "orig") {
+		t.Fatalf("message text = %q", text)
+	}
+}
+
 func TestSessionExtensionCommandHandlerCanHandleWithoutPrompt(t *testing.T) {
 	session := NewSession(t.TempDir(), []AssistantTurn{{Content: []ai.ContentBlock{{Type: "text", Text: "unused"}}, StopReason: "stop"}})
 	handled := false

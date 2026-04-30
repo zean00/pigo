@@ -111,9 +111,9 @@ func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse 
 			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
 		}
 		if len(attachments) > 0 {
-			err = s.Session.PromptWithAttachments(ctx, command.Message, attachments)
+			err = s.Session.PromptWithSource(ctx, command.Message, attachments, "rpc")
 		} else {
-			err = s.Session.Prompt(ctx, command.Message)
+			err = s.Session.PromptWithSource(ctx, command.Message, nil, "rpc")
 		}
 		if err != nil {
 			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
@@ -126,9 +126,9 @@ func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse 
 			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
 		}
 		if len(attachments) > 0 {
-			err = s.Session.SteerWithAttachments(ctx, command.Message, attachments)
+			err = s.Session.promptWithSource(ctx, command.Message, attachments, false, "rpc")
 		} else {
-			err = s.Session.Steer(ctx, command.Message)
+			err = s.Session.promptWithSource(ctx, command.Message, nil, false, "rpc")
 		}
 		if err != nil {
 			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
@@ -141,9 +141,9 @@ func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse 
 			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
 		}
 		if len(attachments) > 0 {
-			err = s.Session.FollowUpWithAttachments(ctx, command.Message, attachments)
+			err = s.Session.promptWithSource(ctx, command.Message, attachments, false, "rpc")
 		} else {
-			err = s.Session.FollowUp(ctx, command.Message)
+			err = s.Session.promptWithSource(ctx, command.Message, nil, false, "rpc")
 		}
 		if err != nil {
 			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}

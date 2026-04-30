@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -154,13 +155,16 @@ func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse 
 		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true}
 
 	case "new_session":
-		s.Session.NewSessionWithParent(command.ParentSession)
+		cancelled, err := s.Session.TryNewSessionWithParent(ctx, command.ParentSession)
+		if err != nil {
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+		}
 		return rpcResponse{
 			ID:      command.ID,
 			Type:    "response",
 			Command: command.Type,
 			Success: true,
-			Data:    map[string]any{"cancelled": false},
+			Data:    map[string]any{"cancelled": cancelled},
 		}
 
 	case "branch":
@@ -171,9 +175,12 @@ func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse 
 			err = s.Session.Branch(command.EntryID)
 		}
 		if err != nil {
+			if errors.Is(err, ErrSessionOperationCancelled) {
+				return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: map[string]any{"cancelled": true}}
+			}
 			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
 		}
-		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true}
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: map[string]any{"cancelled": false}}
 
 	case "tree":
 		return rpcResponse{
@@ -424,13 +431,15 @@ func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse 
 		if sessionPath == "" {
 			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: "missing sessionPath"}
 		}
-		if err := s.Session.SwitchSession(sessionPath); err != nil {
+		cancelled, err := s.Session.SwitchSessionContext(ctx, sessionPath)
+		if err != nil {
 			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
 		}
-		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: map[string]any{"cancelled": false}}
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: map[string]any{"cancelled": cancelled}}
 
 	case "switch_session":
-		if err := s.Session.SwitchSession(command.SessionPath); err != nil {
+		cancelled, err := s.Session.SwitchSessionContext(ctx, command.SessionPath)
+		if err != nil {
 			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
 		}
 		return rpcResponse{
@@ -438,7 +447,7 @@ func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse 
 			Type:    "response",
 			Command: command.Type,
 			Success: true,
-			Data:    map[string]any{"cancelled": false},
+			Data:    map[string]any{"cancelled": cancelled},
 		}
 
 	case "fork":

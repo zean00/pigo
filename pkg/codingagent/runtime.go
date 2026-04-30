@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"os"
@@ -19,6 +20,8 @@ import (
 	"github.com/badlogic/pigo/pkg/agentcore"
 	"github.com/badlogic/pigo/pkg/ai"
 )
+
+var ErrSessionOperationCancelled = errors.New("session operation cancelled")
 
 type Session struct {
 	Root               string
@@ -68,6 +71,9 @@ type Session struct {
 	extensionFlagValues map[string]any
 	extensionStatuses   map[string]string
 	resourceProviders   []ExtensionResourceProvider
+	beforeSwitchHooks   []SessionBeforeSwitchHandler
+	beforeForkHooks     []SessionBeforeForkHandler
+	beforeTreeHooks     []SessionBeforeTreeHandler
 	promptTemplates     []SlashCommandInfo
 	skills              []SlashCommandInfo
 	resourceDiagnostics []ResourceDiagnostic
@@ -152,6 +158,32 @@ type ExtensionResourceResult struct {
 }
 
 type ExtensionResourceProvider func(ctx context.Context, event ExtensionResourceEvent) (ExtensionResourceResult, error)
+
+type SessionBeforeSwitchEvent struct {
+	Type              string `json:"type"`
+	Reason            string `json:"reason"`
+	TargetSessionFile string `json:"targetSessionFile,omitempty"`
+}
+
+type SessionBeforeForkEvent struct {
+	Type     string `json:"type"`
+	EntryID  string `json:"entryId"`
+	Position string `json:"position"`
+}
+
+type SessionBeforeTreeEvent struct {
+	Type      string `json:"type"`
+	TargetID  string `json:"targetId"`
+	OldLeafID string `json:"oldLeafId,omitempty"`
+}
+
+type SessionBeforeResult struct {
+	Cancel bool `json:"cancel,omitempty"`
+}
+
+type SessionBeforeSwitchHandler func(ctx context.Context, event SessionBeforeSwitchEvent) (SessionBeforeResult, error)
+type SessionBeforeForkHandler func(ctx context.Context, event SessionBeforeForkEvent) (SessionBeforeResult, error)
+type SessionBeforeTreeHandler func(ctx context.Context, event SessionBeforeTreeEvent) (SessionBeforeResult, error)
 
 const (
 	bashExecutionTextPrefix        = "Ran `%s`\n"
@@ -389,6 +421,33 @@ func (s *Session) RegisterExtensionResourceProvider(provider ExtensionResourcePr
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.resourceProviders = append(s.resourceProviders, provider)
+}
+
+func (s *Session) RegisterSessionBeforeSwitchHandler(handler SessionBeforeSwitchHandler) {
+	if handler == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.beforeSwitchHooks = append(s.beforeSwitchHooks, handler)
+}
+
+func (s *Session) RegisterSessionBeforeForkHandler(handler SessionBeforeForkHandler) {
+	if handler == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.beforeForkHooks = append(s.beforeForkHooks, handler)
+}
+
+func (s *Session) RegisterSessionBeforeTreeHandler(handler SessionBeforeTreeHandler) {
+	if handler == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.beforeTreeHooks = append(s.beforeTreeHooks, handler)
 }
 
 func (s *Session) RegisterExtensionCommand(command SlashCommandInfo, handler ExtensionCommandHandler) {
@@ -1068,6 +1127,76 @@ func (s *Session) EmitSessionShutdown(reason, targetSessionFile string) {
 	s.emitSessionEvent("session_shutdown", data)
 }
 
+func (s *Session) emitBeforeSwitch(ctx context.Context, reason, targetSessionFile string) (bool, error) {
+	reason = strings.TrimSpace(reason)
+	event := SessionBeforeSwitchEvent{Type: "session_before_switch", Reason: reason, TargetSessionFile: strings.TrimSpace(targetSessionFile)}
+	data := map[string]any{"reason": reason}
+	if event.TargetSessionFile != "" {
+		data["targetSessionFile"] = event.TargetSessionFile
+	}
+	s.emitSessionEvent("session_before_switch", data)
+
+	s.mu.Lock()
+	hooks := append([]SessionBeforeSwitchHandler(nil), s.beforeSwitchHooks...)
+	s.mu.Unlock()
+	for _, hook := range hooks {
+		result, err := hook(ctx, event)
+		if err != nil {
+			return false, err
+		}
+		if result.Cancel {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *Session) emitBeforeFork(ctx context.Context, entryID, position string) (bool, error) {
+	position = strings.TrimSpace(position)
+	if position == "" {
+		position = "before"
+	}
+	event := SessionBeforeForkEvent{Type: "session_before_fork", EntryID: strings.TrimSpace(entryID), Position: position}
+	s.emitSessionEvent("session_before_fork", map[string]any{"entryId": event.EntryID, "position": event.Position})
+
+	s.mu.Lock()
+	hooks := append([]SessionBeforeForkHandler(nil), s.beforeForkHooks...)
+	s.mu.Unlock()
+	for _, hook := range hooks {
+		result, err := hook(ctx, event)
+		if err != nil {
+			return false, err
+		}
+		if result.Cancel {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *Session) emitBeforeTree(ctx context.Context, targetID string) (bool, error) {
+	event := SessionBeforeTreeEvent{Type: "session_before_tree", TargetID: strings.TrimSpace(targetID), OldLeafID: s.leafID}
+	data := map[string]any{"targetId": event.TargetID}
+	if event.OldLeafID != "" {
+		data["oldLeafId"] = event.OldLeafID
+	}
+	s.emitSessionEvent("session_before_tree", data)
+
+	s.mu.Lock()
+	hooks := append([]SessionBeforeTreeHandler(nil), s.beforeTreeHooks...)
+	s.mu.Unlock()
+	for _, hook := range hooks {
+		result, err := hook(ctx, event)
+		if err != nil {
+			return false, err
+		}
+		if result.Cancel {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *Session) prompt(ctx context.Context, prompt string, attachments []PromptAttachment, retrying bool) error {
 	streamState := promptStreamState{activeMessageIdx: -1}
 	if s.IsStreaming {
@@ -1492,6 +1621,17 @@ func (s *Session) NewSession() {
 }
 
 func (s *Session) NewSessionWithParent(parentSession string) {
+	cancelled, err := s.TryNewSessionWithParent(context.Background(), parentSession)
+	if cancelled || err != nil {
+		return
+	}
+}
+
+func (s *Session) TryNewSessionWithParent(ctx context.Context, parentSession string) (bool, error) {
+	cancelled, err := s.emitBeforeSwitch(ctx, "new", "")
+	if cancelled || err != nil {
+		return cancelled, err
+	}
 	previousSessionFile := ""
 	if s.Store != nil {
 		previousSessionFile = s.Store.Path
@@ -1538,6 +1678,7 @@ func (s *Session) NewSessionWithParent(parentSession string) {
 		}
 	}
 	s.EmitSessionStart("new", previousSessionFile)
+	return false, nil
 }
 
 func (s *Session) nextSessionPathOrCurrent() string {
@@ -1983,13 +2124,27 @@ func (s *Session) Share(outputPath string) (string, error) {
 }
 
 func (s *Session) SwitchSession(sessionPath string) error {
-	return s.switchSession(sessionPath, "resume")
+	cancelled, err := s.SwitchSessionContext(context.Background(), sessionPath)
+	if cancelled && err == nil {
+		return ErrSessionOperationCancelled
+	}
+	return err
 }
 
-func (s *Session) switchSession(sessionPath, reason string) error {
+func (s *Session) SwitchSessionContext(ctx context.Context, sessionPath string) (bool, error) {
+	return s.switchSession(ctx, sessionPath, "resume", true)
+}
+
+func (s *Session) switchSession(ctx context.Context, sessionPath, reason string, emitBefore bool) (bool, error) {
 	sessionPath = strings.TrimSpace(sessionPath)
 	if sessionPath == "" {
-		return fmt.Errorf("missing sessionPath")
+		return false, fmt.Errorf("missing sessionPath")
+	}
+	if emitBefore {
+		cancelled, err := s.emitBeforeSwitch(ctx, reason, sessionPath)
+		if cancelled || err != nil {
+			return cancelled, err
+		}
 	}
 	previousSessionFile := ""
 	if s.Store != nil {
@@ -1998,7 +2153,7 @@ func (s *Session) switchSession(sessionPath, reason string) error {
 	store := NewSessionStore(sessionPath)
 	entries, err := store.ReadEntries()
 	if err != nil {
-		return err
+		return false, err
 	}
 	s.EmitSessionShutdown(reason, sessionPath)
 	shutdownEvents := s.RuntimeEvents()
@@ -2006,11 +2161,15 @@ func (s *Session) switchSession(sessionPath, reason string) error {
 	s.loadSession(entries)
 	s.Events = append(shutdownEvents, s.Events...)
 	s.EmitSessionStart(reason, previousSessionFile)
-	return nil
+	return false, nil
 }
 
 func (s *Session) Fork(entryID string) (string, bool, error) {
 	entryID = strings.TrimSpace(entryID)
+	cancelled, err := s.emitBeforeFork(context.Background(), entryID, "before")
+	if cancelled || err != nil {
+		return "", cancelled, err
+	}
 	if entryID == "" {
 		return "", false, fmt.Errorf("missing entryId")
 	}
@@ -2047,13 +2206,12 @@ func (s *Session) Fork(entryID string) (string, bool, error) {
 	if s.Store != nil {
 		header.ParentSession = s.Store.Path
 	}
-	s.emitSessionEvent("session_before_fork", map[string]any{"entryID": entryID, "targetSessionFile": targetPath})
 	sessionEntries := append([]SessionEntry{header}, path...)
 	if err := writeSessionEntries(targetPath, sessionEntries); err != nil {
 		return "", false, err
 	}
-	if err := s.switchSession(targetPath, "fork"); err != nil {
-		return "", false, err
+	if cancelled, err := s.switchSession(context.Background(), targetPath, "fork", false); cancelled || err != nil {
+		return "", cancelled, err
 	}
 	return selectedText, false, nil
 }
@@ -2079,17 +2237,28 @@ func (s *Session) Clone() (bool, error) {
 	if err := writeSessionEntries(targetPath, sessionEntries); err != nil {
 		return false, err
 	}
-	if err := s.switchSession(targetPath, "new"); err != nil {
-		return false, err
+	if cancelled, err := s.switchSession(context.Background(), targetPath, "new", true); cancelled || err != nil {
+		return cancelled, err
 	}
 	return false, nil
 }
 
 func (s *Session) Branch(entryID string) error {
 	entryID = strings.TrimSpace(entryID)
+	cancelled, err := s.emitBeforeTree(context.Background(), defaultString(entryID, "root"))
+	if cancelled || err != nil {
+		if cancelled && err == nil {
+			return ErrSessionOperationCancelled
+		}
+		return err
+	}
+	beforeEvents := s.RuntimeEvents()
+	oldLeafID := s.leafID
 	if entryID == "" || strings.EqualFold(entryID, "root") {
 		s.leafID = ""
 		s.rebuildStateFromLeaf("")
+		s.Events = append(beforeEvents, s.Events...)
+		s.emitSessionEvent("session_tree", map[string]any{"newLeafId": "", "oldLeafId": oldLeafID})
 		return nil
 	}
 	if s.entriesByID == nil {
@@ -2101,6 +2270,8 @@ func (s *Session) Branch(entryID string) error {
 	}
 	s.leafID = entry.ID
 	s.rebuildStateFromLeaf(s.leafID)
+	s.Events = append(beforeEvents, s.Events...)
+	s.emitSessionEvent("session_tree", map[string]any{"newLeafId": s.leafID, "oldLeafId": oldLeafID})
 	return nil
 }
 

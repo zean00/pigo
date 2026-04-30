@@ -2,6 +2,7 @@ package codingagent
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -858,7 +859,7 @@ func TestSessionLifecycleEventsForSwitchAndFork(t *testing.T) {
 	for _, event := range session.Events {
 		switch event["type"] {
 		case "session_before_fork":
-			seenBeforeFork = event["entryID"] == userID
+			seenBeforeFork = event["entryId"] == userID
 		case "session_shutdown":
 			seenShutdown = event["reason"] == "fork"
 		case "session_start":
@@ -867,6 +868,60 @@ func TestSessionLifecycleEventsForSwitchAndFork(t *testing.T) {
 	}
 	if !seenBeforeFork || !seenShutdown || !seenStart {
 		t.Fatalf("events = %#v", session.Events)
+	}
+}
+
+func TestSessionLifecycleHooksCanCancelSwitchForkAndBranch(t *testing.T) {
+	root := t.TempDir()
+	storePath := filepath.Join(root, "session.jsonl")
+	session := NewSession(root, nil)
+	session.Store = NewSessionStore(storePath)
+	session.NewSession()
+	currentStorePath := session.Store.Path
+	if err := session.appendEntry(SessionEntry{Type: "message", Message: map[string]any{"role": "user", "text": "hello"}}); err != nil {
+		t.Fatal(err)
+	}
+	userID := session.leafID
+	otherPath := filepath.Join(root, "other.jsonl")
+	if err := writeSessionEntries(otherPath, []SessionEntry{{Type: "session", ID: "s1"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	session.RegisterSessionBeforeSwitchHandler(func(ctx context.Context, event SessionBeforeSwitchEvent) (SessionBeforeResult, error) {
+		if event.Reason != "resume" || event.TargetSessionFile != otherPath {
+			t.Fatalf("switch event = %#v", event)
+		}
+		return SessionBeforeResult{Cancel: true}, nil
+	})
+	cancelled, err := session.SwitchSessionContext(context.Background(), otherPath)
+	if err != nil || !cancelled {
+		t.Fatalf("switch cancelled=%v err=%v", cancelled, err)
+	}
+	if session.Store.Path != currentStorePath {
+		t.Fatalf("store changed to %q", session.Store.Path)
+	}
+
+	session.RegisterSessionBeforeForkHandler(func(ctx context.Context, event SessionBeforeForkEvent) (SessionBeforeResult, error) {
+		if event.EntryID != userID || event.Position != "before" {
+			t.Fatalf("fork event = %#v", event)
+		}
+		return SessionBeforeResult{Cancel: true}, nil
+	})
+	if _, cancelled, err := session.Fork(userID); err != nil || !cancelled {
+		t.Fatalf("fork cancelled=%v err=%v", cancelled, err)
+	}
+
+	session.RegisterSessionBeforeTreeHandler(func(ctx context.Context, event SessionBeforeTreeEvent) (SessionBeforeResult, error) {
+		if event.TargetID != "root" || event.OldLeafID != userID {
+			t.Fatalf("tree event = %#v", event)
+		}
+		return SessionBeforeResult{Cancel: true}, nil
+	})
+	if err := session.Branch("root"); !errors.Is(err, ErrSessionOperationCancelled) {
+		t.Fatalf("branch err = %v", err)
+	}
+	if session.leafID != userID {
+		t.Fatalf("leaf changed to %q", session.leafID)
 	}
 }
 

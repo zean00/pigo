@@ -71,7 +71,11 @@ func New(options ServerOptions) *Server {
 }
 
 func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
-	defer s.closeAllSessions()
+	var wg sync.WaitGroup
+	defer func() {
+		wg.Wait()
+		s.closeAllSessions()
+	}()
 	s.encoder = json.NewEncoder(out)
 	scanner := bufio.NewScanner(in)
 	for scanner.Scan() {
@@ -93,23 +97,35 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 			}
 			continue
 		}
-		result, rpcErr := s.handleRequest(ctx, request)
-		response := jsonrpcResponse{JSONRPC: "2.0", ID: request.ID, Result: result, Error: rpcErr}
-		if rpcErr != nil {
-			response.Result = nil
+		if request.Method == "session/prompt" {
+			wg.Add(1)
+			go func(request jsonrpcRequest) {
+				defer wg.Done()
+				s.handleRequestAndWrite(ctx, request)
+			}(request)
+			continue
 		}
-		if err := s.write(response); err != nil {
+		if err := s.handleRequestAndWrite(ctx, request); err != nil {
 			return err
 		}
 	}
 	return scanner.Err()
 }
 
+func (s *Server) handleRequestAndWrite(ctx context.Context, request jsonrpcRequest) error {
+	result, rpcErr := s.handleRequest(ctx, request)
+	response := jsonrpcResponse{JSONRPC: "2.0", ID: request.ID, Result: result, Error: rpcErr}
+	if rpcErr != nil {
+		response.Result = nil
+	}
+	return s.write(response)
+}
+
 func (s *Server) handleRequest(ctx context.Context, request jsonrpcRequest) (any, *jsonrpcError) {
 	switch request.Method {
 	case "initialize":
 		var params initializeParams
-		_ = json.Unmarshal(request.Params, &params)
+		_ = unmarshalParams(request.Params, &params)
 		protocolVersion := params.ProtocolVersion
 		if protocolVersion == 0 {
 			protocolVersion = 1
@@ -129,7 +145,7 @@ func (s *Server) handleRequest(ctx context.Context, request jsonrpcRequest) (any
 		}, nil
 	case "session/new":
 		var params newSessionParams
-		if err := json.Unmarshal(request.Params, &params); err != nil {
+		if err := unmarshalParams(request.Params, &params); err != nil {
 			return nil, invalidParams(err)
 		}
 		id, err := s.newSession(ctx, params)
@@ -139,19 +155,19 @@ func (s *Server) handleRequest(ctx context.Context, request jsonrpcRequest) (any
 		return map[string]any{"sessionId": id}, nil
 	case "session/prompt":
 		var params promptParams
-		if err := json.Unmarshal(request.Params, &params); err != nil {
+		if err := unmarshalParams(request.Params, &params); err != nil {
 			return nil, invalidParams(err)
 		}
 		return s.prompt(ctx, params)
 	case "session/close":
 		var params sessionParams
-		if err := json.Unmarshal(request.Params, &params); err != nil {
+		if err := unmarshalParams(request.Params, &params); err != nil {
 			return nil, invalidParams(err)
 		}
 		return map[string]any{}, s.closeSession(params.SessionID)
 	case "session/list":
 		var params listSessionsParams
-		if err := json.Unmarshal(request.Params, &params); err != nil {
+		if err := unmarshalParams(request.Params, &params); err != nil {
 			return nil, invalidParams(err)
 		}
 		return s.listSessions(params), nil
@@ -174,7 +190,7 @@ func (s *Server) handleNotification(request jsonrpcRequest) error {
 
 func (s *Server) handleCancel(paramsRaw json.RawMessage) error {
 	var params sessionParams
-	if err := json.Unmarshal(paramsRaw, &params); err != nil {
+	if err := unmarshalParams(paramsRaw, &params); err != nil {
 		return err
 	}
 	session, ok := s.getSession(params.SessionID)
@@ -390,6 +406,13 @@ func invalidParams(err error) *jsonrpcError {
 
 func internalError(err error) *jsonrpcError {
 	return &jsonrpcError{Code: -32603, Message: "internal error", Data: err.Error()}
+}
+
+func unmarshalParams(data json.RawMessage, target any) error {
+	if len(data) == 0 {
+		data = []byte("{}")
+	}
+	return json.Unmarshal(data, target)
 }
 
 func uuid() string {

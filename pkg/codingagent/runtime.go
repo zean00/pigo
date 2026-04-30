@@ -79,6 +79,8 @@ type Session struct {
 	contextHooks          []ContextHandler
 	providerPayloadHooks  []ProviderPayloadHandler
 	providerResponseHooks []ProviderResponseHandler
+	toolCallHooks         []ToolCallHandler
+	toolResultHooks       []ToolResultHandler
 	promptTemplates       []SlashCommandInfo
 	skills                []SlashCommandInfo
 	resourceDiagnostics   []ResourceDiagnostic
@@ -214,8 +216,41 @@ type ContextResult struct {
 	Messages []ai.Message `json:"messages,omitempty"`
 }
 
+type ToolCallEvent struct {
+	Type       string         `json:"type"`
+	ToolName   string         `json:"toolName"`
+	ToolCallID string         `json:"toolCallId"`
+	Input      map[string]any `json:"input"`
+}
+
+type ToolCallResult struct {
+	Block  bool           `json:"block,omitempty"`
+	Reason string         `json:"reason,omitempty"`
+	Input  map[string]any `json:"input,omitempty"`
+}
+
+type ToolResultEvent struct {
+	Type       string            `json:"type"`
+	ToolName   string            `json:"toolName"`
+	ToolCallID string            `json:"toolCallId"`
+	Input      map[string]any    `json:"input"`
+	Content    []ai.ContentBlock `json:"content,omitempty"`
+	Text       string            `json:"text,omitempty"`
+	Details    map[string]any    `json:"details,omitempty"`
+	IsError    bool              `json:"isError"`
+}
+
+type ToolResultPatch struct {
+	Content []ai.ContentBlock `json:"content,omitempty"`
+	Text    *string           `json:"text,omitempty"`
+	Details map[string]any    `json:"details,omitempty"`
+	IsError *bool             `json:"isError,omitempty"`
+}
+
 type ProviderPayloadHandler func(ctx context.Context, payload any, req ai.CompletionRequest) (any, error)
 type ProviderResponseHandler func(ctx context.Context, response ai.ProviderResponse, req ai.CompletionRequest) error
+type ToolCallHandler func(ctx context.Context, event ToolCallEvent) (ToolCallResult, error)
+type ToolResultHandler func(ctx context.Context, event ToolResultEvent) (ToolResultPatch, error)
 
 type SessionBeforeSwitchHandler func(ctx context.Context, event SessionBeforeSwitchEvent) (SessionBeforeResult, error)
 type SessionBeforeForkHandler func(ctx context.Context, event SessionBeforeForkEvent) (SessionBeforeResult, error)
@@ -532,6 +567,24 @@ func (s *Session) RegisterProviderResponseHandler(handler ProviderResponseHandle
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.providerResponseHooks = append(s.providerResponseHooks, handler)
+}
+
+func (s *Session) RegisterToolCallHandler(handler ToolCallHandler) {
+	if handler == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.toolCallHooks = append(s.toolCallHooks, handler)
+}
+
+func (s *Session) RegisterToolResultHandler(handler ToolResultHandler) {
+	if handler == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.toolResultHooks = append(s.toolResultHooks, handler)
 }
 
 func (s *Session) RegisterExtensionCommand(command SlashCommandInfo, handler ExtensionCommandHandler) {
@@ -1077,6 +1130,66 @@ func (s *Session) applyProviderResponseHooks(ctx context.Context, response ai.Pr
 	return nil
 }
 
+func (s *Session) applyToolCallHooks(ctx context.Context, input agentcore.BeforeToolCallContext) (agentcore.BeforeToolCallResult, error) {
+	currentInput := cloneMap(input.Args)
+	s.mu.Lock()
+	hooks := append([]ToolCallHandler(nil), s.toolCallHooks...)
+	s.mu.Unlock()
+	for _, hook := range hooks {
+		result, err := hook(ctx, ToolCallEvent{
+			Type:       "tool_call",
+			ToolName:   input.ToolCall.Name,
+			ToolCallID: input.ToolCall.ID,
+			Input:      cloneMap(currentInput),
+		})
+		if err != nil {
+			return agentcore.BeforeToolCallResult{}, err
+		}
+		if result.Input != nil {
+			currentInput = cloneMap(result.Input)
+		}
+		if result.Block {
+			return agentcore.BeforeToolCallResult{Block: true, Reason: result.Reason}, nil
+		}
+	}
+	return agentcore.BeforeToolCallResult{Args: currentInput}, nil
+}
+
+func (s *Session) applyToolResultHooks(ctx context.Context, input agentcore.AfterToolCallContext) (agentcore.ToolResult, error) {
+	current := input.Result
+	s.mu.Lock()
+	hooks := append([]ToolResultHandler(nil), s.toolResultHooks...)
+	s.mu.Unlock()
+	for _, hook := range hooks {
+		patch, err := hook(ctx, ToolResultEvent{
+			Type:       "tool_result",
+			ToolName:   input.ToolCall.Name,
+			ToolCallID: input.ToolCall.ID,
+			Input:      cloneMap(input.Args),
+			Content:    append([]ai.ContentBlock(nil), current.Content...),
+			Text:       current.Text,
+			Details:    cloneMap(current.Details),
+			IsError:    current.IsError,
+		})
+		if err != nil {
+			return agentcore.ToolResult{}, err
+		}
+		if patch.Content != nil {
+			current.Content = append([]ai.ContentBlock(nil), patch.Content...)
+		}
+		if patch.Text != nil {
+			current.Text = *patch.Text
+		}
+		if patch.Details != nil {
+			current.Details = cloneMap(patch.Details)
+		}
+		if patch.IsError != nil {
+			current.IsError = *patch.IsError
+		}
+	}
+	return current, nil
+}
+
 func (s *Session) formatSkillsForPrompt() string {
 	skills := s.Skills()
 	if len(skills) == 0 {
@@ -1167,6 +1280,17 @@ func clonePromptAttachments(attachments []PromptAttachment) []PromptAttachment {
 	}
 	out := make([]PromptAttachment, len(attachments))
 	copy(out, attachments)
+	return out
+}
+
+func cloneMap(values map[string]any) map[string]any {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]any, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
 	return out
 }
 
@@ -1507,6 +1631,8 @@ func (s *Session) promptWithSource(ctx context.Context, prompt string, attachmen
 				return s.resolveProviderAPIKey(opCtx, provider)
 			},
 			TransformContextFunc: s.transformContextWithHooks,
+			BeforeToolCall:       s.applyToolCallHooks,
+			AfterToolCall:        s.applyToolResultHooks,
 			EventSink: func(event agentcore.Event) {
 				s.applyPromptStreamEvent(&streamState, event)
 			},

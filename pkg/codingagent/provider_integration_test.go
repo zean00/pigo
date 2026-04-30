@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/badlogic/pigo/pkg/agentcore"
 	"github.com/badlogic/pigo/pkg/ai"
 )
 
@@ -224,6 +225,74 @@ func TestSessionProviderPayloadAndResponseHooks(t *testing.T) {
 	}
 	if !payloadSeen || !responseSeen {
 		t.Fatalf("payloadSeen=%v responseSeen=%v", payloadSeen, responseSeen)
+	}
+}
+
+func TestSessionToolCallAndResultHooks(t *testing.T) {
+	const providerName = "tool-hook-provider"
+	callCount := 0
+	var secondRequest []ai.Message
+	ai.RegisterProvider(providerName, providerFunc(func(_ context.Context, req ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error) {
+		callCount++
+		if callCount == 1 {
+			return ai.NormalizedResult{
+				Role:       "assistant",
+				StopReason: "toolUse",
+				Content: []any{map[string]any{
+					"type":      "toolCall",
+					"id":        "call-1",
+					"name":      "echo",
+					"arguments": map[string]any{"value": "original"},
+				}},
+			}, nil, nil
+		}
+		secondRequest = append([]ai.Message(nil), req.Messages...)
+		return ai.NormalizedResult{
+			Role:       "assistant",
+			StopReason: "stop",
+			Text:       "done",
+			Content:    []any{map[string]any{"type": "text", "text": "done"}},
+		}, nil, nil
+	}))
+
+	session := NewSession(t.TempDir(), nil)
+	if _, err := session.SetModel(providerName, "test-model"); err != nil {
+		t.Fatal(err)
+	}
+	session.RegisterExtensionTool(agentcore.Tool{
+		Name: "echo",
+		Execute: func(_ context.Context, call ai.ContentBlock) agentcore.ToolResult {
+			return agentcore.ToolResult{Text: "tool:" + call.Arguments["value"].(string)}
+		},
+	}, ai.Tool{Name: "echo", Parameters: map[string]any{"type": "object"}})
+	session.RegisterToolCallHandler(func(ctx context.Context, event ToolCallEvent) (ToolCallResult, error) {
+		if event.ToolName != "echo" || event.ToolCallID != "call-1" || event.Input["value"] != "original" {
+			t.Fatalf("tool call event = %#v", event)
+		}
+		return ToolCallResult{Input: map[string]any{"value": "changed"}}, nil
+	})
+	text := "hooked"
+	session.RegisterToolResultHandler(func(ctx context.Context, event ToolResultEvent) (ToolResultPatch, error) {
+		if event.Text != "tool:changed" || event.Input["value"] != "changed" {
+			t.Fatalf("tool result event = %#v", event)
+		}
+		return ToolResultPatch{Text: &text}, nil
+	})
+
+	if err := session.Prompt(context.Background(), "run"); err != nil {
+		t.Fatal(err)
+	}
+	if len(secondRequest) == 0 {
+		t.Fatal("missing second provider request")
+	}
+	found := false
+	for _, message := range secondRequest {
+		if message.Role == "toolResult" && message.Content == "hooked" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("second request = %#v", secondRequest)
 	}
 }
 

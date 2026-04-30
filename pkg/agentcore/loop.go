@@ -38,6 +38,7 @@ type Tool struct {
 type BeforeToolCallResult struct {
 	Block  bool
 	Reason string
+	Args   map[string]any
 }
 
 type BeforeToolCallContext struct {
@@ -746,6 +747,8 @@ func executeToolBatch(ctx context.Context, input ProviderLoopInput, assistant Me
 				call.immediate = true
 				call.result = ToolResult{Text: text, IsError: true}
 				call.message = ToolResultMessage(call.call.ID, call.call.Name, call.result)
+			} else if beforeResult.Args != nil {
+				call.call.Arguments = cloneArguments(beforeResult.Args)
 			}
 		}
 	}

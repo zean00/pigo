@@ -1653,6 +1653,14 @@ func getOpenAICompat(model Model) openAICompat {
 	if strings.Contains(baseURL, "chutes.ai") {
 		compat.MaxTokensField = "max_tokens"
 	}
+	providerCompat := modelCompatForProvider(provider)
+	if len(providerCompat) > 0 {
+		merged := cloneCompatMap(providerCompat)
+		for key, value := range model.Compat {
+			merged[key] = value
+		}
+		model.Compat = merged
+	}
 	if model.Compat == nil {
 		return compat
 	}

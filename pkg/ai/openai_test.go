@@ -1229,6 +1229,53 @@ func TestOpenAIProviderHonorsReasoningEffortMapCompat(t *testing.T) {
 	}
 }
 
+func TestOpenAIProviderUsesRegisteredProviderCompatDefaults(t *testing.T) {
+	ClearModelCompatDefaults()
+	defer ClearModelCompatDefaults()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := payload["store"]; ok {
+			t.Fatalf("store should be disabled by provider compat: %#v", payload)
+		}
+		if payload["max_tokens"] != float64(32) {
+			t.Fatalf("payload = %#v", payload)
+		}
+		_, _ = fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	RegisterModelCompatDefaults("new-compatible", map[string]any{
+		"supportsStore":  false,
+		"maxTokensField": "max_tokens",
+	})
+	RegisterModel(Model{
+		ID:       "provider-default-compat",
+		Name:     "Provider Default Compat",
+		API:      "openai-completions",
+		Provider: "new-compatible",
+		BaseURL:  server.URL + "/v1",
+		Input:    []string{"text"},
+	})
+	provider := OpenAIProvider(WithOpenAIBaseURL(server.URL + "/v1"))
+	_, _, err := provider.Complete(context.Background(), CompletionRequest{
+		Provider: "new-compatible",
+		Model:    "provider-default-compat",
+		Options:  ChatOptions{APIKey: "test-key", MaxTokens: 32},
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOpenAIProviderSendsEmptyToolsArrayForToolHistoryWithoutCurrentTools(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		body, err := io.ReadAll(req.Body)

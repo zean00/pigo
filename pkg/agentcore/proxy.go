@@ -31,6 +31,7 @@ type ProxyStreamOptions struct {
 type ProxyAssistantMessageEvent struct {
 	Type             string    `json:"type"`
 	ContentIndex     int       `json:"contentIndex,omitempty"`
+	ContentIdx       int       `json:"contentIdx,omitempty"`
 	Delta            string    `json:"delta,omitempty"`
 	ContentSignature string    `json:"contentSignature,omitempty"`
 	ID               string    `json:"id,omitempty"`
@@ -144,50 +145,54 @@ func proxySerializableOptions(options ProxyStreamOptions) map[string]any {
 }
 
 func processProxyEvent(proxyEvent ProxyAssistantMessageEvent, partial *ai.NormalizedResult) (ai.NormalizedEvent, bool) {
+	contentIndex := proxyEvent.ContentIndex
+	if contentIndex == 0 && proxyEvent.ContentIdx != 0 {
+		contentIndex = proxyEvent.ContentIdx
+	}
 	switch proxyEvent.Type {
 	case "start":
 		return ai.NormalizedEvent{Type: "start", Partial: partial}, true
 	case "text_start":
-		setProxyContent(partial, proxyEvent.ContentIndex, map[string]any{"type": "text", "text": ""})
-		return ai.NormalizedEvent{Type: "text_start", ContentIdx: proxyEvent.ContentIndex, Partial: partial}, true
+		setProxyContent(partial, contentIndex, map[string]any{"type": "text", "text": ""})
+		return ai.NormalizedEvent{Type: "text_start", ContentIdx: contentIndex, Partial: partial}, true
 	case "text_delta":
-		block := proxyContentMap(partial, proxyEvent.ContentIndex, "text")
+		block := proxyContentMap(partial, contentIndex, "text")
 		block["text"] = asString(block["text"]) + proxyEvent.Delta
 		partial.Text = proxyText(partial.Content)
-		return ai.NormalizedEvent{Type: "text_delta", ContentIdx: proxyEvent.ContentIndex, Delta: proxyEvent.Delta, Partial: partial}, true
+		return ai.NormalizedEvent{Type: "text_delta", ContentIdx: contentIndex, Delta: proxyEvent.Delta, Partial: partial}, true
 	case "text_end":
-		block := proxyContentMap(partial, proxyEvent.ContentIndex, "text")
+		block := proxyContentMap(partial, contentIndex, "text")
 		block["textSignature"] = proxyEvent.ContentSignature
 		partial.Text = proxyText(partial.Content)
-		return ai.NormalizedEvent{Type: "text_end", ContentIdx: proxyEvent.ContentIndex, Content: asString(block["text"]), Partial: partial}, true
+		return ai.NormalizedEvent{Type: "text_end", ContentIdx: contentIndex, Content: asString(block["text"]), Partial: partial}, true
 	case "thinking_start":
-		setProxyContent(partial, proxyEvent.ContentIndex, map[string]any{"type": "thinking", "thinking": ""})
-		return ai.NormalizedEvent{Type: "thinking_start", ContentIdx: proxyEvent.ContentIndex, Partial: partial}, true
+		setProxyContent(partial, contentIndex, map[string]any{"type": "thinking", "thinking": ""})
+		return ai.NormalizedEvent{Type: "thinking_start", ContentIdx: contentIndex, Partial: partial}, true
 	case "thinking_delta":
-		block := proxyContentMap(partial, proxyEvent.ContentIndex, "thinking")
+		block := proxyContentMap(partial, contentIndex, "thinking")
 		block["thinking"] = asString(block["thinking"]) + proxyEvent.Delta
-		return ai.NormalizedEvent{Type: "thinking_delta", ContentIdx: proxyEvent.ContentIndex, Delta: proxyEvent.Delta, Partial: partial}, true
+		return ai.NormalizedEvent{Type: "thinking_delta", ContentIdx: contentIndex, Delta: proxyEvent.Delta, Partial: partial}, true
 	case "thinking_end":
-		block := proxyContentMap(partial, proxyEvent.ContentIndex, "thinking")
+		block := proxyContentMap(partial, contentIndex, "thinking")
 		block["thinkingSignature"] = proxyEvent.ContentSignature
-		return ai.NormalizedEvent{Type: "thinking_end", ContentIdx: proxyEvent.ContentIndex, Content: asString(block["thinking"]), Partial: partial}, true
+		return ai.NormalizedEvent{Type: "thinking_end", ContentIdx: contentIndex, Content: asString(block["thinking"]), Partial: partial}, true
 	case "toolcall_start":
-		setProxyContent(partial, proxyEvent.ContentIndex, map[string]any{"type": "toolCall", "id": proxyEvent.ID, "name": proxyEvent.ToolName, "arguments": map[string]any{}, "partialJson": ""})
-		return ai.NormalizedEvent{Type: "toolcall_start", ContentIdx: proxyEvent.ContentIndex, Partial: partial}, true
+		setProxyContent(partial, contentIndex, map[string]any{"type": "toolCall", "id": proxyEvent.ID, "name": proxyEvent.ToolName, "arguments": map[string]any{}, "partialJson": ""})
+		return ai.NormalizedEvent{Type: "toolcall_start", ContentIdx: contentIndex, Partial: partial}, true
 	case "toolcall_delta":
-		block := proxyContentMap(partial, proxyEvent.ContentIndex, "toolCall")
+		block := proxyContentMap(partial, contentIndex, "toolCall")
 		partialJSON := asString(block["partialJson"]) + proxyEvent.Delta
 		block["partialJson"] = partialJSON
 		var args map[string]any
 		if json.Unmarshal([]byte(partialJSON), &args) == nil {
 			block["arguments"] = args
 		}
-		return ai.NormalizedEvent{Type: "toolcall_delta", ContentIdx: proxyEvent.ContentIndex, Delta: proxyEvent.Delta, Partial: partial}, true
+		return ai.NormalizedEvent{Type: "toolcall_delta", ContentIdx: contentIndex, Delta: proxyEvent.Delta, Partial: partial}, true
 	case "toolcall_end":
-		block := proxyContentMap(partial, proxyEvent.ContentIndex, "toolCall")
+		block := proxyContentMap(partial, contentIndex, "toolCall")
 		delete(block, "partialJson")
 		tool := &ai.NormalizedTool{ID: asString(block["id"]), Name: asString(block["name"]), Arguments: mapStringAny(block["arguments"]), HasID: asString(block["id"]) != ""}
-		return ai.NormalizedEvent{Type: "toolcall_end", ContentIdx: proxyEvent.ContentIndex, ToolCall: tool, Partial: partial}, true
+		return ai.NormalizedEvent{Type: "toolcall_end", ContentIdx: contentIndex, ToolCall: tool, Partial: partial}, true
 	case "done":
 		partial.StopReason = proxyEvent.Reason
 		partial.Usage = proxyEvent.Usage

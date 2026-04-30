@@ -981,6 +981,25 @@ func TestWorkspaceEdit(t *testing.T) {
 	}
 }
 
+func TestWorkspaceMutationDetailsIncludeDiff(t *testing.T) {
+	root := t.TempDir()
+	writeDetails, err := WriteWorkspaceFileWithDetails(root, "notes.txt", "hello\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeDetails["afterBytes"] != 6 || !strings.Contains(writeDetails["diff"].(string), "+hello") {
+		t.Fatalf("write details = %#v", writeDetails)
+	}
+
+	editDetails, err := EditWorkspaceFileWithDetails(root, "notes.txt", []WorkspaceEdit{{OldText: "hello", NewText: "goodbye"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if editDetails["editCount"] != 1 || !strings.Contains(editDetails["diff"].(string), "-hello") || !strings.Contains(editDetails["diff"].(string), "+goodbye") {
+		t.Fatalf("edit details = %#v", editDetails)
+	}
+}
+
 func TestWorkspaceEditMapsFuzzyMatchOffsetsToOriginalContent(t *testing.T) {
 	root := t.TempDir()
 	original := "prefix\u00a0\nsay \u201chello\u201d now\nsuffix\n"

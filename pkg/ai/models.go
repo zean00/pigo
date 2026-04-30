@@ -38,6 +38,9 @@ var (
 	modelsMu       sync.RWMutex
 	modelRegistry  = map[string]map[string]Model{}
 	defaultCatalog = buildDefaultModelCatalog()
+
+	modelCompatDefaultsMu sync.RWMutex
+	modelCompatDefaults   = map[string]map[string]any{}
 )
 
 func init() {
@@ -287,6 +290,53 @@ func RegisterModel(model Model) {
 	providerModels[model.ID] = cloneModel(model)
 }
 
+func RegisterModelCompatDefaults(provider string, compat map[string]any) {
+	provider = canonicalProviderName(provider)
+	modelCompatDefaultsMu.Lock()
+	defer modelCompatDefaultsMu.Unlock()
+	if len(compat) == 0 {
+		delete(modelCompatDefaults, provider)
+		return
+	}
+	modelCompatDefaults[provider] = cloneCompatMap(compat)
+}
+
+func ClearModelCompatDefaults() {
+	modelCompatDefaultsMu.Lock()
+	defer modelCompatDefaultsMu.Unlock()
+	modelCompatDefaults = map[string]map[string]any{}
+}
+
+func modelCompatForProvider(provider string) map[string]any {
+	modelCompatDefaultsMu.RLock()
+	defer modelCompatDefaultsMu.RUnlock()
+	return cloneCompatMap(modelCompatDefaults[canonicalProviderName(provider)])
+}
+
+func LoadModelCatalogJSON(data []byte) error {
+	catalog, err := parseGeneratedModelCatalog(data)
+	if err != nil {
+		return err
+	}
+	modelsMu.Lock()
+	defer modelsMu.Unlock()
+	modelRegistry = map[string]map[string]Model{}
+	for provider, models := range catalog {
+		modelRegistry[provider] = cloneModelMap(models)
+	}
+	return nil
+}
+
+func ExportModelCatalogJSON() ([]byte, error) {
+	modelsMu.RLock()
+	defer modelsMu.RUnlock()
+	catalog := map[string]map[string]Model{}
+	for provider, models := range modelRegistry {
+		catalog[provider] = cloneModelMap(models)
+	}
+	return json.MarshalIndent(catalog, "", "  ")
+}
+
 func parseGeneratedModelCatalog(data []byte) (map[string]map[string]Model, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return nil, nil
@@ -338,6 +388,17 @@ func parseGeneratedModelCatalog(data []byte) (map[string]map[string]Model, error
 		return nil, nil
 	}
 	return modelCatalog, nil
+}
+
+func cloneModelMap(models map[string]Model) map[string]Model {
+	if len(models) == 0 {
+		return map[string]Model{}
+	}
+	copied := map[string]Model{}
+	for modelID, model := range models {
+		copied[modelID] = cloneModel(model)
+	}
+	return copied
 }
 
 func mergeHeaders(base, over map[string]string) map[string]string {
@@ -418,11 +479,7 @@ func ResetModels() {
 	defer modelsMu.Unlock()
 	modelRegistry = map[string]map[string]Model{}
 	for provider, models := range defaultCatalog {
-		copied := map[string]Model{}
-		for modelID, model := range models {
-			copied[modelID] = cloneModel(model)
-		}
-		modelRegistry[provider] = copied
+		modelRegistry[provider] = cloneModelMap(models)
 	}
 }
 

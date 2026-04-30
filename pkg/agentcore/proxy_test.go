@@ -70,3 +70,14 @@ func TestStreamProxyReconstructsAssistantEvents(t *testing.T) {
 		t.Fatalf("events = %#v, want %#v", eventTypes, want)
 	}
 }
+
+func TestStreamProxyAcceptsContentIdxAlias(t *testing.T) {
+	partial := &ai.NormalizedResult{Role: "assistant", StopReason: "stop", Content: []any{}}
+	event, emit := processProxyEvent(ProxyAssistantMessageEvent{Type: "text_start", ContentIdx: 2}, partial)
+	if !emit || event.ContentIdx != 2 {
+		t.Fatalf("event = %#v emit=%v", event, emit)
+	}
+	if len(partial.Content) != 3 {
+		t.Fatalf("content = %#v", partial.Content)
+	}
+}

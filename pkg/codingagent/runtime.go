@@ -366,6 +366,26 @@ func (s *Session) CustomEntries(customType string) []SessionEntry {
 	return out
 }
 
+func (s *Session) Entries() []SessionEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]SessionEntry(nil), s.entries...)
+}
+
+func (s *Session) RuntimeEvents() []agentcore.Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]agentcore.Event, 0, len(s.Events))
+	for _, event := range s.Events {
+		cloned := agentcore.Event{}
+		for key, value := range event {
+			cloned[key] = value
+		}
+		out = append(out, cloned)
+	}
+	return out
+}
+
 func copySlashCommands(commands []SlashCommandInfo) []SlashCommandInfo {
 	if len(commands) == 0 {
 		return nil

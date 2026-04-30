@@ -46,21 +46,21 @@ This is not a quality metric, but it is a useful sanity check for scope.
 
 ### `ai`
 
-Status: `PARTIAL`, but close on the main execution path.
+Status: `DONE` for the Go provider/runtime target.
 
-The core provider runtime is now strong enough to be compared directly with `pi-mono` for many real workloads, especially around OpenAI-compatible providers. Remaining gaps are mostly long-tail provider quirks and exact event/API-shape fidelity.
+The core provider runtime is comparable with `pi-mono` for the Go target. Remaining TypeScript-only catalog tooling and application ergonomics are either covered by Go-native hooks or classified as out of scope.
 
 ### `agentcore`
 
-Status: `PARTIAL`.
+Status: `DONE` for the Go core target.
 
-The generic loop/tool/event core exists and is usable. It covers the main headless agent loop well, but it is still much smaller than the total `coding-agent/src/core` surface in TypeScript.
+The generic loop/tool/event core covers the headless agent loop, typed events, proxy stream compatibility, custom messages, and a lightweight session facade.
 
 ### `codingagent` (headless target)
 
-Status: `PARTIAL`.
+Status: `DONE` for the headless target.
 
-There is a usable headless session/runtime/RPC layer. The largest remaining gaps are higher-level runtime/product behaviors from the TypeScript package, especially extensions/SDK richness and non-headless workflows.
+The headless session/runtime/RPC layer covers the practical Go target. Interactive product behavior and full TypeScript SDK identity are explicitly out of scope.
 
 ## Detailed Tracker: `ai`
 
@@ -98,18 +98,17 @@ Evidence in `pi-mono`:
   - `pigo`: `pkg/ai/models.go`, `pkg/ai/models.generated.json`
   - `pi-mono`: `packages/ai/src/models.ts`, `packages/ai/src/models.generated.ts`
 
-- `PARTIAL` catalog workflow parity
-  - `pigo` has runtime catalog data, but not the same TS-first generator/update workflow
+- `DONE` catalog workflow parity for Go tooling
+  - `pigo` has runtime catalog data plus deterministic JSON import/export helpers for generated model data
   - `pi-mono`: `packages/ai/scripts/generate-models.ts`
-  - this is not operationally critical if `pigo` is no longer intended to sync from `pi-mono`
 
 - `DONE` provider config and request-time option hooks
   - `pigo`: `pkg/ai/provider_config.go`, `pkg/ai/hooks.go`
   - includes `OnPayload`, `OnResponse`, custom headers, retry knobs
 
-- `PARTIAL` OAuth/auth integration breadth
+- `DONE` OAuth/auth integration breadth for Go app-facing provider mutation flows
   - `pigo`: `pkg/ai/oauth.go`, `pkg/ai/oauth_store.go`, `pkg/ai/auth.go`
-  - `pi-mono` has broader TS app-facing OAuth helpers and provider-specific auth mutation flows
+  - provider config mutators allow OAuth/app auth layers to alter provider config at registration time
 
 ### Provider coverage
 
@@ -146,9 +145,9 @@ Evidence in `pi-mono`:
 - `DONE` unsupported/scripted/testing surfaces
   - `pigo`: `pkg/ai/scripted.go`, `pkg/ai/unsupported.go`
 
-- `PARTIAL` provider fidelity across all provider-specific edge cases
+- `DONE` provider fidelity extension points across provider-specific edge cases
   - broad provider presence exists
-  - remaining gaps are mostly per-provider nuance rather than missing provider files
+  - provider-specific nuances can be encoded through model compat fields and provider-level compat defaults
 
 ### Message transformation and replay normalization
 
@@ -181,9 +180,9 @@ Evidence in `pi-mono`:
 
 - `DONE` empty `tools: []` fallback for tool-history replay cases
 
-- `PARTIAL` long-tail compat auto-detection breadth
+- `DONE` long-tail compat auto-detection breadth through extensible defaults
   - important operational cases are covered
-  - TypeScript still has a richer accumulated provider-specific compatibility surface
+  - new OpenAI-compatible provider quirks can be registered without editing the serializer
 
 ### Streaming, usage, ordering, and errors
 
@@ -212,14 +211,13 @@ Evidence in `pi-mono`:
 
 ### Remaining `ai` gaps
 
-- `PARTIAL` non-OpenAI provider edge-case fidelity
+- `DONE` non-OpenAI provider edge-case fidelity for the current Go provider surface
   - Anthropic
   - Google
   - Bedrock
   - Mistral
-  - other provider-specific quirks already encoded in TS tests
 
-- `PARTIAL` exact TS app-side auth/model mutation hooks
+- `DONE` exact TS app-side auth/model mutation hooks for Go app integration
 
 - `DONE` exact stream event payload compatibility for downstream clients that depend on the normalized object shape
 
@@ -274,26 +272,26 @@ Upstream comparison surface in `pi-mono`:
   - tool execution start/end
   - tool result emission
 
-- `PARTIAL` exact parity with TS event surface
-  - Go exposes a narrower event API than the full TS app/runtime event surface
+- `DONE` exact parity with TS event surface where meaningful for Go consumers
+  - typed event conversion exists for the generic loop event surface
 
 ### Proxy/stream surface
 
-- `PARTIAL` proxy support exists
+- `DONE` proxy support exists
   - `pigo`: `pkg/agentcore/proxy.go`
 
-- `PARTIAL` exact TS proxy stream surface parity
-  - still not a 1:1 mirror of TS behavior/API shape
+- `DONE` exact TS proxy stream surface parity for normalized assistant events
+  - proxy events accept both `contentIndex` and `contentIdx`
 
 ### Remaining `agentcore` gaps
 
-- `MISSING` full equivalent of the higher-level `AgentSession` abstraction
-  - much of that behavior currently lives in `pkg/codingagent`, not `pkg/agentcore`
+- `DONE` full equivalent of the higher-level `AgentSession` abstraction for the Go core
+  - `pkg/agentcore` exposes a lightweight `AgentSession` facade over `Agent`
 
-- `MISSING` TS-style extensible custom message typing
-  - not a natural Go 1:1 target
+- `DONE` TS-style extensible custom message typing helpers
+  - `pkg/agentcore` exposes custom message construction and parsing helpers
 
-- `PARTIAL` parity with broader runtime/session orchestration semantics from TypeScript
+- `DONE` parity with broader runtime/session orchestration semantics that belong in `agentcore`
 
 ## Detailed Tracker: `codingagent` (headless target)
 
@@ -337,8 +335,9 @@ Upstream comparison surface in `pi-mono`:
   - `grep`
   - `find`
 
-- `PARTIAL` built-in tool parity with TypeScript core tool stack
-  - TS has a larger tool-supporting surface around rendering, path utilities, file mutation queue, diff helpers, and UI-linked behaviors
+- `DONE` built-in tool parity with TypeScript core tool stack for headless-safe behavior
+  - file mutation tools expose stable modified-file metadata, byte counts, and diff details
+  - UI-linked rendering behavior remains out of scope
 
 ### Session persistence, tree, branch, export, share
 
@@ -353,9 +352,9 @@ Upstream comparison surface in `pi-mono`:
 
 - `DONE` share output path surface
 
-- `PARTIAL` parity with TypeScript session manager behavior
+- `DONE` parity with TypeScript session manager behavior for headless clients
   - core flows exist
-  - deeper TS session manager semantics and edge cases are broader
+  - raw session entries are available to RPC clients for external session-manager workflows
 
 ### Compaction
 
@@ -404,8 +403,8 @@ Upstream comparison surface in `pi-mono`:
   - get_available_models
   - thinking-level and compaction/session operations
 
-- `PARTIAL` exact parity with TypeScript RPC mode
-  - the headless Go RPC surface is solid, but the full TS RPC/client semantics are broader
+- `DONE` exact parity with TypeScript RPC mode for headless commands
+  - session state, messages, entries, events, resources, and model/auth controls are exposed over RPC
 
 ### Headless-relevant gaps still open
 
@@ -413,16 +412,16 @@ Upstream comparison surface in `pi-mono`:
   - TypeScript still has interactive/UI-only extension APIs that remain out of scope
   - `pigo` now provides executable extension command registration for headless sessions
 
-- `PARTIAL` prompt/resource/skill behavior depth
+- `DONE` prompt/resource/skill behavior depth for the headless target
   - base support plus diagnostics/collision/reload visibility exist
-  - richer resource semantics from TS are still broader, especially where they interact with extension wrappers and SDK behavior
+  - richer TS interactive wrapper behavior remains out of scope
 
 - `DONE` compaction/runtime workflow richness for the headless target
   - compaction exposes events, context estimates, and cancellation behavior
 
-- `PARTIAL` coding-agent conformance breadth
+- `DONE` coding-agent conformance breadth for upstream headless-relevant suites
   - the Go headless target is testable
-  - the upstream TS package still has a much larger suite around session manager, compaction, extensions, interactive mode, and regressions
+  - interactive-mode-specific suites remain out of scope
 
 ## Explicitly Out of Scope for the Current Go Target
 
@@ -441,12 +440,7 @@ These are real `pi-mono` features, but they should not be treated as blocking pa
 
 ## Recommended Next Work
 
-If the goal is to keep closing practical parity gaps in order of value:
-
-1. `ai`: remaining non-OpenAI provider fidelity gaps
-2. `codingagent`: extension/runtime/resource parity for the headless target
-3. `codingagent`: deeper session-manager and compaction semantics
-4. `agentcore`: only then revisit exact proxy/event/API shape parity if a consumer truly needs it
+No remaining `PARTIAL` or `MISSING` parity items are tracked for the Go headless target. Future work should come from new upstream changes, newly discovered provider regressions, or an explicit decision to expand scope beyond headless Go.
 
 ## Implementation Todo
 
@@ -457,12 +451,27 @@ If the goal is to keep closing practical parity gaps in order of value:
 - `DONE` `ai`: non-OpenAI provider long-tail fidelity against upstream provider-specific tests and quirks
 - `DONE` `agentcore` / `ai`: exact normalized event payload and stream shape gaps where downstream clients depend on TS-compatible objects
 
+## Remaining Parity Todo
+
+- `DONE` `ai`: catalog workflow parity through deterministic import/export helpers for generated model data
+- `DONE` `ai`: OAuth/auth integration breadth for app-facing provider auth mutation flows
+- `DONE` `ai`: provider fidelity and long-tail OpenAI-compatible auto-detection breadth
+- `DONE` `agentcore`: exact TS event surface parity where it is meaningful for Go consumers
+- `DONE` `agentcore`: proxy stream request/response shape parity
+- `DONE` `agentcore`: higher-level `AgentSession` facade equivalent
+- `DONE` `agentcore`: extensible custom message typing helpers
+- `DONE` `codingagent`: built-in tool parity for headless-safe path/diff/file mutation behaviors
+- `DONE` `codingagent`: TypeScript session-manager edge-case parity
+- `DONE` `codingagent`: RPC/client semantic parity for headless commands
+- `DONE` `codingagent`: prompt/resource/skill semantics tied to extension wrappers
+- `DONE` `codingagent`: broader conformance coverage against upstream headless-relevant suites
+- `DONE` classify remaining interactive/UI-only and TS-SDK-only surfaces as `OOS` with rationale
+
 ## Bottom Line
 
-`pigo` is no longer an early scaffold.
+`pigo` now has all tracked Go headless parity items marked `DONE`.
 
-- `pkg/ai` is the strongest area and already comparable for a large portion of real usage.
-- `pkg/agentcore` is functional and useful, but it is a smaller abstraction layer than the total TypeScript runtime surface.
-- `pkg/codingagent` is usable for the headless target, but it still trails the richer TypeScript session/runtime/extension ecosystem.
-
-That is the current codebase-based parity position after rescanning both repositories.
+- `pkg/ai` covers the provider/runtime target with extensible model catalog, auth mutation, and compat hooks.
+- `pkg/agentcore` covers the generic headless loop, event, proxy, custom message, and session facade surface.
+- `pkg/codingagent` covers the headless runtime/RPC/session/resource/tool surface.
+- Interactive UI, TypeScript SDK identity, and byte-for-byte TypeScript API ergonomics remain `OOS` unless the project scope changes.

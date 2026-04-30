@@ -8,9 +8,11 @@ import (
 func TestRegisterProviderConfigAddsModelsAndCustomStreamSimple(t *testing.T) {
 	ClearModels()
 	ClearAPIProviders()
+	ClearProviderConfigMutators()
 	defer func() {
 		ResetModels()
 		ResetAPIProviders()
+		ClearProviderConfigMutators()
 	}()
 
 	err := RegisterProviderConfig(ProviderConfig{
@@ -61,6 +63,46 @@ func TestRegisterProviderConfigAddsModelsAndCustomStreamSimple(t *testing.T) {
 	}
 	if _, ok := ResolveAPIProvider("my-proxy-api"); ok {
 		t.Fatal("proxy API should be removed")
+	}
+}
+
+func TestProviderConfigMutatorCanApplyAuthRuntimeChanges(t *testing.T) {
+	ClearModels()
+	ClearAPIProviders()
+	ClearProviderConfigMutators()
+	defer func() {
+		ResetModels()
+		ResetAPIProviders()
+		ClearProviderConfigMutators()
+	}()
+
+	RegisterProviderConfigMutator("auth-provider", func(config ProviderConfig) (ProviderConfig, error) {
+		config.BaseURL = "https://auth.example.com"
+		config.APIKey = "runtime-key"
+		for i := range config.Models {
+			if config.Models[i].Headers == nil {
+				config.Models[i].Headers = map[string]string{}
+			}
+			config.Models[i].Headers["Authorization"] = "Bearer runtime-key"
+		}
+		return config, nil
+	})
+
+	if err := RegisterProviderConfig(ProviderConfig{
+		Name:    "auth-provider",
+		API:     "openai-completions",
+		BaseURL: "https://placeholder.example.com",
+		APIKey:  "placeholder",
+		Models:  []Model{{ID: "auth-model"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	model, ok := GetModel("auth-provider", "auth-model")
+	if !ok {
+		t.Fatal("missing auth model")
+	}
+	if model.BaseURL != "https://auth.example.com" || model.Headers["Authorization"] != "Bearer runtime-key" {
+		t.Fatalf("model = %#v", model)
 	}
 }
 

@@ -139,12 +139,13 @@ func BuiltinToolsWithOptions(root string, options BuiltinToolOptions) []agentcor
 			Execute: func(_ context.Context, call ai.ContentBlock) agentcore.ToolResult {
 				path, _ := call.Arguments["path"].(string)
 				content, _ := call.Arguments["content"].(string)
-				if err := WriteWorkspaceFile(root, path, content); err != nil {
+				details, err := WriteWorkspaceFileWithDetails(root, path, content)
+				if err != nil {
 					return agentcore.ToolResult{Text: err.Error(), IsError: true}
 				}
 				return agentcore.ToolResult{
 					Text:    fmt.Sprintf("Successfully wrote %d bytes to %s", len(content), path),
-					Details: map[string]any{"modifiedFiles": []string{path}, "bytes": len(content)},
+					Details: details,
 				}
 			},
 		},
@@ -177,12 +178,13 @@ func BuiltinToolsWithOptions(root string, options BuiltinToolOptions) []agentcor
 				if err != nil {
 					return agentcore.ToolResult{Text: err.Error(), IsError: true}
 				}
-				if err := EditWorkspaceFile(root, path, edits); err != nil {
+				details, err := EditWorkspaceFileWithDetails(root, path, edits)
+				if err != nil {
 					return agentcore.ToolResult{Text: err.Error(), IsError: true}
 				}
 				return agentcore.ToolResult{
 					Text:    fmt.Sprintf("Successfully replaced %d block(s) in %s.", len(edits), path),
-					Details: map[string]any{"modifiedFiles": []string{path}, "editCount": len(edits)},
+					Details: details,
 				}
 			},
 		},
@@ -440,14 +442,34 @@ func RunBashCommand(ctx context.Context, root, command string, timeoutSeconds fl
 }
 
 func WriteWorkspaceFile(root, name, content string) error {
+	_, err := WriteWorkspaceFileWithDetails(root, name, content)
+	return err
+}
+
+func WriteWorkspaceFileWithDetails(root, name, content string) (map[string]any, error) {
 	path, err := ResolveWorkspacePath(root, name)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	before := ""
+	beforeBytes := 0
+	if data, err := os.ReadFile(path); err == nil {
+		before = string(data)
+		beforeBytes = len(data)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
+		return nil, err
 	}
-	return os.WriteFile(path, []byte(content), 0o644)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"modifiedFiles": []string{name},
+		"bytes":         len(content),
+		"beforeBytes":   beforeBytes,
+		"afterBytes":    len(content),
+		"diff":          simpleUnifiedDiff(name, before, content),
+	}, nil
 }
 
 type WorkspaceEdit struct {
@@ -768,13 +790,18 @@ func applyWorkspaceEdits(content string, edits []WorkspaceEdit, path string) ([]
 }
 
 func EditWorkspaceFile(root, name string, edits []WorkspaceEdit) error {
+	_, err := EditWorkspaceFileWithDetails(root, name, edits)
+	return err
+}
+
+func EditWorkspaceFileWithDetails(root, name string, edits []WorkspaceEdit) (map[string]any, error) {
 	path, err := ResolveWorkspacePath(root, name)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	rawContent := string(data)
@@ -784,11 +811,55 @@ func EditWorkspaceFile(root, name string, edits []WorkspaceEdit) error {
 
 	_, updated, err := applyWorkspaceEdits(baseContent, edits, name)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	finalContent := bom + restoreLineEndings(updated, lineEnding)
-	return os.WriteFile(path, []byte(finalContent), 0o644)
+	if err := os.WriteFile(path, []byte(finalContent), 0o644); err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"modifiedFiles": []string{name},
+		"editCount":     len(edits),
+		"beforeBytes":   len(rawContent),
+		"afterBytes":    len(finalContent),
+		"diff":          simpleUnifiedDiff(name, rawContent, finalContent),
+	}, nil
+}
+
+func simpleUnifiedDiff(name, before, after string) string {
+	if before == after {
+		return ""
+	}
+	var builder strings.Builder
+	builder.WriteString("--- ")
+	builder.WriteString(name)
+	builder.WriteString("\n+++ ")
+	builder.WriteString(name)
+	builder.WriteString("\n")
+	beforeLines := strings.SplitAfter(before, "\n")
+	afterLines := strings.SplitAfter(after, "\n")
+	for _, line := range beforeLines {
+		if line == "" {
+			continue
+		}
+		builder.WriteByte('-')
+		builder.WriteString(line)
+		if !strings.HasSuffix(line, "\n") {
+			builder.WriteByte('\n')
+		}
+	}
+	for _, line := range afterLines {
+		if line == "" {
+			continue
+		}
+		builder.WriteByte('+')
+		builder.WriteString(line)
+		if !strings.HasSuffix(line, "\n") {
+			builder.WriteByte('\n')
+		}
+	}
+	return builder.String()
 }
 
 func parseWorkspaceEdits(toolArgs map[string]any) ([]WorkspaceEdit, error) {

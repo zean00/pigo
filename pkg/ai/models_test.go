@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -83,6 +84,41 @@ func TestGeneratedModelCatalogCoversProviders(t *testing.T) {
 		if len(models) == 0 {
 			t.Fatalf("missing generated models for provider %q", name)
 		}
+	}
+}
+
+func TestModelCatalogJSONImportExport(t *testing.T) {
+	ResetModels()
+	defer ResetModels()
+
+	if err := LoadModelCatalogJSON([]byte(`{
+		"OpenAI": {
+			"custom": {
+				"id": "custom",
+				"name": "Custom",
+				"api": "openai-responses",
+				"provider": "ignored",
+				"input": ["text"],
+				"contextWindow": 123
+			}
+		}
+	}`)); err != nil {
+		t.Fatal(err)
+	}
+	model, ok := GetModel("openai", "custom")
+	if !ok {
+		t.Fatal("expected imported model")
+	}
+	if model.Provider != "openai" || model.ContextWindow != 123 {
+		t.Fatalf("model = %#v", model)
+	}
+
+	exported, err := ExportModelCatalogJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(exported), `"custom"`) || !strings.Contains(string(exported), `"contextWindow": 123`) {
+		t.Fatalf("exported = %s", exported)
 	}
 }
 

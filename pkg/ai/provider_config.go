@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 )
 
 type ProviderConfig struct {
@@ -16,8 +17,52 @@ type ProviderConfig struct {
 	CompleteSimple CompleteFunction
 }
 
+type ProviderConfigMutator func(config ProviderConfig) (ProviderConfig, error)
+
+var (
+	providerConfigMutatorsMu sync.RWMutex
+	providerConfigMutators   = map[string]ProviderConfigMutator{}
+)
+
+func RegisterProviderConfigMutator(provider string, mutator ProviderConfigMutator) {
+	provider = canonicalProviderName(provider)
+	providerConfigMutatorsMu.Lock()
+	defer providerConfigMutatorsMu.Unlock()
+	if mutator == nil {
+		delete(providerConfigMutators, provider)
+		return
+	}
+	providerConfigMutators[provider] = mutator
+}
+
+func ClearProviderConfigMutators() {
+	providerConfigMutatorsMu.Lock()
+	defer providerConfigMutatorsMu.Unlock()
+	providerConfigMutators = map[string]ProviderConfigMutator{}
+}
+
+func mutateProviderConfig(config ProviderConfig) (ProviderConfig, error) {
+	providerConfigMutatorsMu.RLock()
+	mutator := providerConfigMutators[canonicalProviderName(config.Name)]
+	providerConfigMutatorsMu.RUnlock()
+	if mutator == nil {
+		return config, nil
+	}
+	return mutator(config)
+}
+
 func RegisterProviderConfig(config ProviderConfig) error {
 	name := canonicalProviderName(config.Name)
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("missing provider name")
+	}
+	config.Name = name
+	var err error
+	config, err = mutateProviderConfig(config)
+	if err != nil {
+		return err
+	}
+	name = canonicalProviderName(config.Name)
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("missing provider name")
 	}

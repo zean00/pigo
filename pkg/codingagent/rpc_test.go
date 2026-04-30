@@ -377,6 +377,32 @@ func TestRPCGetCommandsIncludesRegisteredSources(t *testing.T) {
 	}
 }
 
+func TestRPCExposesSessionEntriesAndEvents(t *testing.T) {
+	session := NewSession(t.TempDir(), []AssistantTurn{{Content: []ai.ContentBlock{{Type: "text", Text: "ok"}}, StopReason: "stop"}})
+	if err := session.Prompt(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	server := RPCServer{Session: session}
+	input := strings.NewReader(
+		`{"id":"e1","type":"get_session_entries"}` + "\n" +
+			`{"id":"e2","type":"get_events"}` + "\n",
+	)
+	if err := server.Serve(context.Background(), input, &out); err != nil {
+		t.Fatal(err)
+	}
+	responses := decodeRPCResponses(t, out.String())
+	if len(responses) != 2 {
+		t.Fatalf("responses = %#v", responses)
+	}
+	entries := responses[0]["data"].(map[string]any)["entries"].([]any)
+	events := responses[1]["data"].(map[string]any)["events"].([]any)
+	if len(entries) == 0 || len(events) == 0 {
+		t.Fatalf("entries=%#v events=%#v", entries, events)
+	}
+}
+
 func TestRPCRegisterCommandsAndReloadResources(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "prompts"), 0o755); err != nil {

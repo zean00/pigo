@@ -498,6 +498,12 @@ func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse 
 	case "get_messages":
 		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: map[string]any{"messages": s.Session.Messages}}
 
+	case "get_session_entries":
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: map[string]any{"entries": s.Session.Entries()}}
+
+	case "get_events":
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: map[string]any{"events": s.Session.RuntimeEvents()}}
+
 	case "get_commands":
 		commands := make([]rpcSlashCommand, 0, 2+len(s.Session.extensionCommands)+len(s.Session.promptTemplates)+len(s.Session.skills))
 		for _, command := range s.Session.GetSlashCommands() {

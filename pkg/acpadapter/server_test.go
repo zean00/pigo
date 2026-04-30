@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/badlogic/pigo/pkg/agentcore"
+	"github.com/badlogic/pigo/pkg/codingagent"
 )
 
 func TestInitialize(t *testing.T) {
@@ -49,5 +52,40 @@ func TestToolKind(t *testing.T) {
 		if got := toolKind(name); got != want {
 			t.Fatalf("toolKind(%q) = %q, want %q", name, got, want)
 		}
+	}
+}
+
+func TestBridgeEventsStartsAtPromptBoundary(t *testing.T) {
+	session := codingagent.NewSession(t.TempDir(), nil)
+	session.Events = append(session.Events, agentcore.Event{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":    "text_delta",
+			"content": "old",
+		},
+	})
+	start := len(session.RuntimeEvents())
+	session.Events = append(session.Events, agentcore.Event{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":    "text_delta",
+			"content": "new",
+		},
+	})
+
+	var output bytes.Buffer
+	server := New(ServerOptions{})
+	server.encoder = json.NewEncoder(&output)
+	done := make(chan struct{})
+	close(done)
+	if err := server.bridgeEvents(context.Background(), "s1", session, start, done); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("notifications = %q", output.String())
+	}
+	if strings.Contains(lines[0], "old") || !strings.Contains(lines[0], "new") {
+		t.Fatalf("notification = %s", lines[0])
 	}
 }

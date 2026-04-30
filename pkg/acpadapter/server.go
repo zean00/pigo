@@ -222,14 +222,15 @@ func (s *Server) prompt(ctx context.Context, params promptParams) (any, *jsonrpc
 	}()
 
 	done := make(chan struct{})
-	var bridgeErr error
+	bridgeErr := make(chan error, 1)
+	eventStart := len(session.Session.RuntimeEvents())
 	go func() {
-		bridgeErr = s.bridgeEvents(promptCtx, params.SessionID, session.Session, done)
+		bridgeErr <- s.bridgeEvents(promptCtx, params.SessionID, session.Session, eventStart, done)
 	}()
 	err := session.Session.PromptWithSource(promptCtx, text, attachments, "acp")
 	close(done)
-	if bridgeErr != nil {
-		return nil, internalError(bridgeErr)
+	if err := <-bridgeErr; err != nil {
+		return nil, internalError(err)
 	}
 	stopReason := "end_turn"
 	if errors.Is(err, context.Canceled) || promptCtx.Err() == context.Canceled {
@@ -264,8 +265,7 @@ func (s *Server) getSession(id string) (*acpSession, bool) {
 	return session, ok
 }
 
-func (s *Server) bridgeEvents(ctx context.Context, sessionID string, session *codingagent.Session, done <-chan struct{}) error {
-	seen := 0
+func (s *Server) bridgeEvents(ctx context.Context, sessionID string, session *codingagent.Session, seen int, done <-chan struct{}) error {
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 	for {

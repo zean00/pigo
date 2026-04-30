@@ -718,6 +718,48 @@ func TestSessionExtensionCommandHandlerCanHandleWithoutPrompt(t *testing.T) {
 	}
 }
 
+func TestSessionExtensionToolExecutesInProviderLoop(t *testing.T) {
+	session := NewSession(t.TempDir(), []AssistantTurn{
+		{
+			Content: []ai.ContentBlock{{
+				Type:      "toolCall",
+				ID:        "ext-1",
+				Name:      "ext_echo",
+				Arguments: map[string]any{"value": "ok"},
+			}},
+			StopReason: "toolUse",
+		},
+		{Content: []ai.ContentBlock{{Type: "text", Text: "done"}}, StopReason: "stop"},
+	})
+	session.RegisterExtensionTool(agentcore.Tool{
+		Name: "ext_echo",
+		Execute: func(_ context.Context, call ai.ContentBlock) agentcore.ToolResult {
+			return agentcore.ToolResult{Text: "ext:" + call.Arguments["value"].(string)}
+		},
+	}, ai.Tool{
+		Name:        "ext_echo",
+		Description: "echo from extension",
+		Parameters:  map[string]any{"type": "object"},
+	})
+
+	if err := session.Prompt(context.Background(), "use extension tool"); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, message := range session.Messages {
+		if message["role"] == "toolResult" && message["toolName"] == "ext_echo" && message["text"] == "ext:ok" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("messages = %#v", session.Messages)
+	}
+	specs := session.toolSpecs()
+	if specs[len(specs)-1].Name != "ext_echo" {
+		t.Fatalf("specs = %#v", specs)
+	}
+}
+
 func TestSessionLoadsPromptAndSkillCommandsFromResources(t *testing.T) {
 	root := t.TempDir()
 	agentDir := filepath.Join(t.TempDir(), "agent")

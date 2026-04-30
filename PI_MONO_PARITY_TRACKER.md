@@ -375,6 +375,7 @@ Upstream comparison surface in `pi-mono`:
 - `DONE` headless-safe skills/extensions parity
   - `pigo` has session-facing slots for extension commands, prompt templates, and skills
   - extension commands can be registered with Go handlers that rewrite prompts or handle commands without invoking the model
+  - extension tools can be registered with tool specs and execute in the same provider loop as built-in tools
 
 - `DONE` prompt/skill resource diagnostics, collision handling, and reload visibility
   - duplicate prompt and skill names are detected while preserving first-match precedence
@@ -410,7 +411,7 @@ Upstream comparison surface in `pi-mono`:
 
 - `DONE` extension runtime parity for headless-safe command flows
   - TypeScript still has interactive/UI-only extension APIs that remain out of scope
-  - `pigo` now provides executable extension command registration for headless sessions
+  - `pigo` now provides executable extension command and tool registration for headless sessions
 
 - `DONE` prompt/resource/skill behavior depth for the headless target
   - base support plus diagnostics/collision/reload visibility exist
@@ -466,6 +467,7 @@ No remaining `PARTIAL` or `MISSING` parity items are tracked for the Go headless
 - `DONE` `codingagent`: prompt/resource/skill semantics tied to extension wrappers
 - `DONE` `codingagent`: broader conformance coverage against upstream headless-relevant suites
 - `DONE` classify remaining interactive/UI-only and TS-SDK-only surfaces as `OOS` with rationale
+- `DONE` `codingagent`: extension-registered tools participate in headless provider/tool loops
 
 ## Bottom Line
 

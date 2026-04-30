@@ -62,6 +62,8 @@ type Session struct {
 
 	extensionCommands   []SlashCommandInfo
 	extensionHandlers   map[string]ExtensionCommandHandler
+	extensionTools      []agentcore.Tool
+	extensionToolSpecs  []ai.Tool
 	promptTemplates     []SlashCommandInfo
 	skills              []SlashCommandInfo
 	resourceDiagnostics []ResourceDiagnostic
@@ -266,6 +268,33 @@ func (s *Session) RegisterExtensionCommand(command SlashCommandInfo, handler Ext
 	if handler != nil {
 		s.extensionHandlers[strings.ToLower(command.Name)] = handler
 	}
+}
+
+func (s *Session) SetExtensionTools(tools []agentcore.Tool, specs []ai.Tool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.extensionTools = append([]agentcore.Tool(nil), tools...)
+	s.extensionToolSpecs = append([]ai.Tool(nil), specs...)
+}
+
+func (s *Session) RegisterExtensionTool(tool agentcore.Tool, spec ai.Tool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, existing := range s.extensionTools {
+		if strings.EqualFold(existing.Name, tool.Name) {
+			s.extensionTools[i] = tool
+			s.extensionToolSpecs[i] = spec
+			return
+		}
+	}
+	s.extensionTools = append(s.extensionTools, tool)
+	s.extensionToolSpecs = append(s.extensionToolSpecs, spec)
+}
+
+func (s *Session) ExtensionTools() ([]agentcore.Tool, []ai.Tool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]agentcore.Tool(nil), s.extensionTools...), append([]ai.Tool(nil), s.extensionToolSpecs...)
 }
 
 func (s *Session) ExecuteExtensionCommand(ctx context.Context, name, args string) (ExtensionCommandResult, bool, error) {
@@ -944,7 +973,7 @@ func (s *Session) prompt(ctx context.Context, prompt string, attachments []Promp
 			History:        s.providerHistory(),
 			Provider:       s.Provider,
 			Model:          s.ModelID,
-			ToolSpecs:      BuiltinToolSpecs(),
+			ToolSpecs:      s.toolSpecs(),
 			Options:        chatOptions,
 			GetAPIKey: func(provider string) string {
 				return s.resolveProviderAPIKey(opCtx, provider)
@@ -1096,10 +1125,18 @@ func (s *Session) promptTextWithAttachments(prompt string, attachments []PromptA
 }
 
 func (s *Session) builtinTools() []agentcore.Tool {
-	return BuiltinToolsWithOptions(s.Root, BuiltinToolOptions{
+	tools := BuiltinToolsWithOptions(s.Root, BuiltinToolOptions{
 		OutputLimit:        s.ToolOutputLimit,
 		ShellCommandPrefix: s.ShellCommandPrefix,
 	})
+	extensionTools, _ := s.ExtensionTools()
+	return append(tools, extensionTools...)
+}
+
+func (s *Session) toolSpecs() []ai.Tool {
+	specs := BuiltinToolSpecs()
+	_, extensionSpecs := s.ExtensionTools()
+	return append(specs, extensionSpecs...)
 }
 
 func (s *Session) attachmentContentBlock(attachment PromptAttachment) (any, error) {

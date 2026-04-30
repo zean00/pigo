@@ -382,6 +382,7 @@ Upstream comparison surface in `pi-mono`:
   - headless context hooks can inspect and replace provider-bound message context before model calls
   - headless provider payload/response hooks are chainable from sessions into provider requests
   - headless tool call/result hooks can mutate tool input, block execution, and patch tool results
+  - headless before-agent-start hooks can inject custom context messages and override the system prompt per turn
 
 - `DONE` prompt/skill resource diagnostics, collision handling, and reload visibility
   - duplicate prompt and skill names are detected while preserving first-match precedence
@@ -417,7 +418,7 @@ Upstream comparison surface in `pi-mono`:
 
 - `DONE` extension runtime parity for headless-safe command flows
   - TypeScript still has interactive/UI-only extension APIs that remain out of scope
-  - `pigo` now provides executable extension command/tool registration, extension flags/statuses, resource discovery hooks, lifecycle events, cancellable lifecycle hooks, input/context transform hooks, provider request/response hooks, and tool call/result hooks for headless sessions
+  - `pigo` now provides executable extension command/tool registration, extension flags/statuses, resource discovery hooks, lifecycle events, cancellable lifecycle hooks, input/context transform hooks, provider request/response hooks, tool call/result hooks, and before-agent-start hooks for headless sessions
 
 - `DONE` prompt/resource/skill behavior depth for the headless target
   - base support plus diagnostics/collision/reload visibility exist
@@ -460,6 +461,7 @@ No remaining `PARTIAL` or `MISSING` parity items are tracked for the Go headless
 - `DONE` `codingagent`: context event hooks for headless provider message inspection and replacement
 - `DONE` `codingagent`: provider payload/response hooks chained from headless sessions into provider calls
 - `DONE` `codingagent`: tool call/result hooks for headless tool interception and result patching
+- `DONE` `codingagent`: before-agent-start hooks for custom context injection and system prompt override
 - `DONE` `codingagent`: richer session-manager and compaction workflow semantics, including branch-summary edge cases, abort/cancel events, context estimation, and extension hooks
 - `DONE` `ai`: non-OpenAI provider long-tail fidelity against upstream provider-specific tests and quirks
 - `DONE` `agentcore` / `ai`: exact normalized event payload and stream shape gaps where downstream clients depend on TS-compatible objects
@@ -486,6 +488,7 @@ No remaining `PARTIAL` or `MISSING` parity items are tracked for the Go headless
 - `DONE` `codingagent`: headless context hooks cover provider-bound message transformation before model calls
 - `DONE` `codingagent`: headless provider payload/response hooks cover request and HTTP response observation/mutation surfaces
 - `DONE` `codingagent`: headless tool hooks cover input mutation, blocking, and result patching
+- `DONE` `codingagent`: headless before-agent-start hooks cover custom context messages and per-turn system prompt changes
 
 ## Bottom Line
 

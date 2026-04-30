@@ -75,6 +75,7 @@ type Session struct {
 	beforeForkHooks       []SessionBeforeForkHandler
 	beforeTreeHooks       []SessionBeforeTreeHandler
 	beforeCompactHooks    []SessionBeforeCompactHandler
+	beforeAgentStartHooks []BeforeAgentStartHandler
 	inputHooks            []InputHandler
 	contextHooks          []ContextHandler
 	providerPayloadHooks  []ProviderPayloadHandler
@@ -202,6 +203,13 @@ type ContextEvent struct {
 	Messages []ai.Message `json:"messages"`
 }
 
+type BeforeAgentStartEvent struct {
+	Type         string             `json:"type"`
+	Prompt       string             `json:"prompt"`
+	Attachments  []PromptAttachment `json:"attachments,omitempty"`
+	SystemPrompt string             `json:"systemPrompt"`
+}
+
 type SessionBeforeResult struct {
 	Cancel bool `json:"cancel,omitempty"`
 }
@@ -214,6 +222,11 @@ type InputResult struct {
 
 type ContextResult struct {
 	Messages []ai.Message `json:"messages,omitempty"`
+}
+
+type BeforeAgentStartResult struct {
+	Message      agentcore.Message `json:"message,omitempty"`
+	SystemPrompt *string           `json:"systemPrompt,omitempty"`
 }
 
 type ToolCallEvent struct {
@@ -251,6 +264,7 @@ type ProviderPayloadHandler func(ctx context.Context, payload any, req ai.Comple
 type ProviderResponseHandler func(ctx context.Context, response ai.ProviderResponse, req ai.CompletionRequest) error
 type ToolCallHandler func(ctx context.Context, event ToolCallEvent) (ToolCallResult, error)
 type ToolResultHandler func(ctx context.Context, event ToolResultEvent) (ToolResultPatch, error)
+type BeforeAgentStartHandler func(ctx context.Context, event BeforeAgentStartEvent) (BeforeAgentStartResult, error)
 
 type SessionBeforeSwitchHandler func(ctx context.Context, event SessionBeforeSwitchEvent) (SessionBeforeResult, error)
 type SessionBeforeForkHandler func(ctx context.Context, event SessionBeforeForkEvent) (SessionBeforeResult, error)
@@ -531,6 +545,15 @@ func (s *Session) RegisterSessionBeforeCompactHandler(handler SessionBeforeCompa
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.beforeCompactHooks = append(s.beforeCompactHooks, handler)
+}
+
+func (s *Session) RegisterBeforeAgentStartHandler(handler BeforeAgentStartHandler) {
+	if handler == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.beforeAgentStartHooks = append(s.beforeAgentStartHooks, handler)
 }
 
 func (s *Session) RegisterInputHandler(handler InputHandler) {
@@ -1529,6 +1552,40 @@ func (s *Session) applyInputHooks(ctx context.Context, text string, attachments 
 	return currentText, currentAttachments, false, nil
 }
 
+func (s *Session) applyBeforeAgentStartHooks(ctx context.Context, prompt string, attachments []PromptAttachment, systemPrompt string) (string, error) {
+	currentSystemPrompt := systemPrompt
+	s.mu.Lock()
+	hooks := append([]BeforeAgentStartHandler(nil), s.beforeAgentStartHooks...)
+	s.mu.Unlock()
+	for _, hook := range hooks {
+		result, err := hook(ctx, BeforeAgentStartEvent{
+			Type:         "before_agent_start",
+			Prompt:       prompt,
+			Attachments:  clonePromptAttachments(attachments),
+			SystemPrompt: currentSystemPrompt,
+		})
+		if err != nil {
+			return "", err
+		}
+		if result.Message != nil {
+			message := cloneAgentcoreMessage(result.Message)
+			if _, ok := message["role"].(string); !ok {
+				message["role"] = "custom"
+			}
+			if _, ok := message["timestamp"]; !ok {
+				message["timestamp"] = time.Now().UTC().Format(time.RFC3339Nano)
+			}
+			if err := s.appendEntry(SessionEntry{Type: "message", Message: message}); err != nil {
+				return "", err
+			}
+		}
+		if result.SystemPrompt != nil {
+			currentSystemPrompt = *result.SystemPrompt
+		}
+	}
+	return currentSystemPrompt, nil
+}
+
 func (s *Session) prompt(ctx context.Context, prompt string, attachments []PromptAttachment, retrying bool) error {
 	return s.promptWithSource(ctx, prompt, attachments, retrying, "extension")
 }
@@ -1558,7 +1615,13 @@ func (s *Session) promptWithSource(ctx context.Context, prompt string, attachmen
 	}
 	prompt = expanded
 	prompt = s.expandPromptTemplate(prompt)
+	systemPrompt := s.HeadlessSystemPrompt()
 	if !retrying {
+		startPrompt, startErr := s.applyBeforeAgentStartHooks(ctx, prompt, attachments, systemPrompt)
+		if startErr != nil {
+			return startErr
+		}
+		systemPrompt = startPrompt
 		s.LastPrompt = prompt
 		s.lastAttachments = clonePromptAttachments(attachments)
 	}
@@ -1622,7 +1685,7 @@ func (s *Session) promptWithSource(ctx context.Context, prompt string, attachmen
 		loop, err = agentcore.RunProviderLoop(opCtx, agentcore.ProviderLoopInput{
 			PromptMessages: prompts,
 			Tools:          s.builtinTools(),
-			History:        s.providerHistory(),
+			History:        s.providerHistoryWithSystem(systemPrompt),
 			Provider:       s.Provider,
 			Model:          s.ModelID,
 			ToolSpecs:      s.toolSpecs(),
@@ -1846,8 +1909,12 @@ func (s *Session) attachmentContentBlock(attachment PromptAttachment) (any, erro
 }
 
 func (s *Session) providerHistory() []ai.Message {
+	return s.providerHistoryWithSystem(s.HeadlessSystemPrompt())
+}
+
+func (s *Session) providerHistoryWithSystem(systemPrompt string) []ai.Message {
 	history := sessionMessagesToAI(s.Messages)
-	if system := strings.TrimSpace(s.HeadlessSystemPrompt()); system != "" {
+	if system := strings.TrimSpace(systemPrompt); system != "" {
 		history = append([]ai.Message{{Role: "system", Content: system}}, history...)
 	}
 	return history

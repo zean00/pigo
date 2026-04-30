@@ -296,6 +296,60 @@ func TestSessionToolCallAndResultHooks(t *testing.T) {
 	}
 }
 
+func TestSessionBeforeAgentStartInjectsMessageAndSystemPrompt(t *testing.T) {
+	const providerName = "before-agent-start-provider"
+	var captured []ai.Message
+	ai.RegisterProvider(providerName, providerFunc(func(_ context.Context, req ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error) {
+		captured = append([]ai.Message(nil), req.Messages...)
+		return ai.NormalizedResult{
+			Role:       "assistant",
+			StopReason: "stop",
+			Text:       "ok",
+			Content:    []any{map[string]any{"type": "text", "text": "ok"}},
+		}, nil, nil
+	}))
+
+	session := NewSession(t.TempDir(), nil)
+	if _, err := session.SetModel(providerName, "test-model"); err != nil {
+		t.Fatal(err)
+	}
+	session.RegisterBeforeAgentStartHandler(func(ctx context.Context, event BeforeAgentStartEvent) (BeforeAgentStartResult, error) {
+		if event.Type != "before_agent_start" || event.Prompt != "hello" || !strings.Contains(event.SystemPrompt, "headless coding agent") {
+			t.Fatalf("event = %#v", event)
+		}
+		systemPrompt := event.SystemPrompt + "\nextra instructions"
+		return BeforeAgentStartResult{
+			Message:      agentcore.NewCustomMessage("before-start", "injected", true, map[string]any{"source": "test"}),
+			SystemPrompt: &systemPrompt,
+		}, nil
+	})
+
+	if err := session.Prompt(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if len(captured) < 3 || !strings.Contains(fmt.Sprint(captured[0].Content), "extra instructions") {
+		t.Fatalf("captured = %#v", captured)
+	}
+	foundInjected := false
+	for _, message := range captured {
+		if message.Role != "user" {
+			continue
+		}
+		if message.Content == "injected" {
+			foundInjected = true
+		}
+		if blocks, ok := message.Content.([]ai.ContentBlock); ok && len(blocks) == 1 && blocks[0].Text == "injected" {
+			foundInjected = true
+		}
+	}
+	if !foundInjected {
+		t.Fatalf("captured = %#v", captured)
+	}
+	if len(session.Messages) == 0 || session.Messages[0]["role"] != "custom" || session.Messages[0]["customType"] != "before-start" {
+		t.Fatalf("messages = %#v", session.Messages)
+	}
+}
+
 func TestSessionUsesOAuthModelMutations(t *testing.T) {
 	const providerName = "mutating-oauth-provider"
 	ai.RegisterModel(ai.Model{

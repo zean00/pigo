@@ -390,6 +390,73 @@ func TestSessionCompactWithModelUsesCompactorSummary(t *testing.T) {
 	}
 }
 
+func TestSessionCompactionEventsAndContextUsage(t *testing.T) {
+	session := NewSession(t.TempDir(), nil)
+	if err := session.appendEntry(SessionEntry{Type: "message", Message: map[string]any{
+		"role": "user",
+		"text": strings.Repeat("context ", 20),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	usage := session.ContextUsage()
+	if usage.EstimatedTokens == 0 || usage.MessageCount != 1 {
+		t.Fatalf("usage = %#v", usage)
+	}
+	if stateUsage, ok := session.State().ContextUsage.(ContextUsage); !ok || stateUsage.EstimatedTokens != usage.EstimatedTokens {
+		t.Fatalf("state context usage = %#v", session.State().ContextUsage)
+	}
+	result := session.Compact("keep context")
+	if result.TokensBefore == 0 {
+		t.Fatalf("tokens before = %#v", result)
+	}
+	seenBefore := false
+	seenAfter := false
+	for _, event := range session.Events {
+		switch event["type"] {
+		case "session_before_compact":
+			seenBefore = true
+		case "session_compact":
+			seenAfter = event["summary"] == result.Summary && event["tokensBefore"] == result.TokensBefore
+		}
+	}
+	if !seenBefore || !seenAfter {
+		t.Fatalf("compaction events = %#v", session.Events)
+	}
+}
+
+func TestSessionAbortCancelsCompaction(t *testing.T) {
+	session := NewSession(t.TempDir(), nil)
+	if err := session.appendEntry(SessionEntry{Type: "message", Message: map[string]any{
+		"role": "user",
+		"text": "hello",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	session.Compactor = func(ctx context.Context, _ []ai.Message, _ string) (string, error) {
+		close(started)
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+
+	results := make(chan CompactionResult, 1)
+	go func() {
+		results <- session.CompactWithModel(context.Background(), "")
+	}()
+	<-started
+	session.Abort()
+
+	select {
+	case result := <-results:
+		if !result.Cancelled {
+			t.Fatalf("result = %#v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("compaction did not cancel")
+	}
+}
+
 func TestBuiltinToolsUseConfiguredOutputLimitAndShellPrefix(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "large.txt"), []byte(strings.Repeat("x", 1000)), 0o644); err != nil {
@@ -598,6 +665,56 @@ func TestSessionSlashCommandRegistration(t *testing.T) {
 		if !found {
 			t.Fatalf("missing command %q from %q: %#v", command.name, command.source, commands)
 		}
+	}
+}
+
+func TestSessionExtensionCommandHandlerCanRewritePrompt(t *testing.T) {
+	session := NewSession(t.TempDir(), []AssistantTurn{{Content: []ai.ContentBlock{{Type: "text", Text: "done"}}, StopReason: "stop"}})
+	session.RegisterExtensionCommand(SlashCommandInfo{
+		Name:        "review",
+		Description: "review command",
+		SourceInfo:  map[string]any{"path": "extension.go"},
+	}, func(_ context.Context, command ExtensionCommandContext) (ExtensionCommandResult, error) {
+		if command.Session != session {
+			t.Fatalf("handler session mismatch")
+		}
+		return ExtensionCommandResult{Prompt: "rewritten: " + command.Args}, nil
+	})
+
+	if err := session.Prompt(context.Background(), "/review main.go"); err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Messages) == 0 || session.Messages[0]["text"] != "rewritten: main.go" {
+		t.Fatalf("messages = %#v", session.Messages)
+	}
+	commands := session.GetSlashCommands()
+	found := false
+	for _, command := range commands {
+		if command.Name == "review" && command.Source == "extension" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing extension command: %#v", commands)
+	}
+}
+
+func TestSessionExtensionCommandHandlerCanHandleWithoutPrompt(t *testing.T) {
+	session := NewSession(t.TempDir(), []AssistantTurn{{Content: []ai.ContentBlock{{Type: "text", Text: "unused"}}, StopReason: "stop"}})
+	handled := false
+	session.RegisterExtensionCommand(SlashCommandInfo{Name: "mark"}, func(_ context.Context, command ExtensionCommandContext) (ExtensionCommandResult, error) {
+		handled = command.Args == "now"
+		return ExtensionCommandResult{Handled: true}, nil
+	})
+
+	if err := session.Prompt(context.Background(), "/mark now"); err != nil {
+		t.Fatal(err)
+	}
+	if !handled {
+		t.Fatalf("handler was not called")
+	}
+	if len(session.Messages) != 0 {
+		t.Fatalf("handled command should not prompt model: %#v", session.Messages)
 	}
 }
 

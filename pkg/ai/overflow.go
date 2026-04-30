@@ -22,7 +22,7 @@ var overflowPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)context[_ ]length[_ ]exceeded`),
 	regexp.MustCompile(`(?i)too many tokens`),
 	regexp.MustCompile(`(?i)token limit exceeded`),
-	regexp.MustCompile(`(?i)^4(?:00|13)\s*(?:status code)?\s*\(no body\)`),
+	regexp.MustCompile(`(?i)^4(?:00|13|29)\s*(?:status code)?\s*\(no body\)`),
 }
 
 var nonOverflowPatterns = []*regexp.Regexp{

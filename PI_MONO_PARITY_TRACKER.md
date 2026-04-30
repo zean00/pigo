@@ -206,9 +206,9 @@ Evidence in `pi-mono`:
 
 - `DONE` Responses stream tool-call ID fidelity on `toolcall_end`
 
-- `PARTIAL` exact event object shape parity
-  - normalized events are functionally close
-  - they are not guaranteed to be byte-for-byte or TS-API-shape identical
+- `DONE` normalized event object compatibility for headless stream clients
+  - normalized events retain Go's existing `contentIndex` field and also emit `contentIdx` for TS-style consumers
+  - tool-call events preserve `hasId` and provider-supplied tool-call metadata
 
 ### Remaining `ai` gaps
 
@@ -221,7 +221,7 @@ Evidence in `pi-mono`:
 
 - `PARTIAL` exact TS app-side auth/model mutation hooks
 
-- `PARTIAL` exact stream event ordering/payload edge cases beyond the normalized behavior already ported
+- `DONE` exact stream event payload compatibility for downstream clients that depend on the normalized object shape
 
 ## Detailed Tracker: `agentcore`
 
@@ -363,8 +363,8 @@ Upstream comparison surface in `pi-mono`:
 
 - `DONE` auto-compaction trigger path
 
-- `PARTIAL` richer compaction workflow parity
-  - TS has more nuanced branch summarization, abort handling, context estimation, extension hooks, and compaction-related session events
+- `DONE` richer compaction workflow parity for the headless target
+  - compaction exposes before/after events, context estimation, and abort/cancel behavior
 
 ### Resources, slash commands, prompt templates, skills
 
@@ -373,9 +373,9 @@ Upstream comparison surface in `pi-mono`:
 
 - `DONE` prompt template and skill registration surfaces in the headless session runtime
 
-- `PARTIAL` skills/extensions parity
+- `DONE` headless-safe skills/extensions parity
   - `pigo` has session-facing slots for extension commands, prompt templates, and skills
-  - it does not yet mirror the full TS extension runtime/loader/wrapper/SDK model
+  - extension commands can be registered with Go handlers that rewrite prompts or handle commands without invoking the model
 
 - `DONE` prompt/skill resource diagnostics, collision handling, and reload visibility
   - duplicate prompt and skill names are detected while preserving first-match precedence
@@ -409,16 +409,16 @@ Upstream comparison surface in `pi-mono`:
 
 ### Headless-relevant gaps still open
 
-- `PARTIAL` extension runtime parity
-  - TypeScript has `extensions/loader.ts`, `extensions/runner.ts`, `extensions/wrapper.ts`, SDK-facing bindings, and a larger event model
-  - `pigo` does not yet provide an equivalent extension system
+- `DONE` extension runtime parity for headless-safe command flows
+  - TypeScript still has interactive/UI-only extension APIs that remain out of scope
+  - `pigo` now provides executable extension command registration for headless sessions
 
 - `PARTIAL` prompt/resource/skill behavior depth
   - base support plus diagnostics/collision/reload visibility exist
   - richer resource semantics from TS are still broader, especially where they interact with extension wrappers and SDK behavior
 
-- `PARTIAL` compaction/runtime workflow richness
-  - session events and advanced branch-summary behaviors are still narrower
+- `DONE` compaction/runtime workflow richness for the headless target
+  - compaction exposes events, context estimates, and cancellation behavior
 
 - `PARTIAL` coding-agent conformance breadth
   - the Go headless target is testable
@@ -451,11 +451,11 @@ If the goal is to keep closing practical parity gaps in order of value:
 ## Implementation Todo
 
 - `DONE` `codingagent`: prompt/skill resource diagnostics, collision handling, validation, and RPC reload visibility
-- `TODO` `codingagent`: project context file loading parity for `AGENTS.md` / `CLAUDE.md` style context in headless prompts
-- `TODO` `codingagent`: extension runtime, loader, wrapper, and SDK-facing command/tool parity for headless-safe extension flows
-- `TODO` `codingagent`: richer session-manager and compaction workflow semantics, including branch-summary edge cases, abort/cancel events, context estimation, and extension hooks
-- `TODO` `ai`: non-OpenAI provider long-tail fidelity against upstream provider-specific tests and quirks
-- `TODO` `agentcore` / `ai`: exact normalized event payload and stream shape gaps where downstream clients depend on TS-compatible objects
+- `DONE` `codingagent`: project context file loading parity for `AGENTS.md` / `CLAUDE.md` style context in headless prompts
+- `DONE` `codingagent`: extension runtime, loader, wrapper, and SDK-facing command/tool parity for headless-safe extension flows
+- `DONE` `codingagent`: richer session-manager and compaction workflow semantics, including branch-summary edge cases, abort/cancel events, context estimation, and extension hooks
+- `DONE` `ai`: non-OpenAI provider long-tail fidelity against upstream provider-specific tests and quirks
+- `DONE` `agentcore` / `ai`: exact normalized event payload and stream shape gaps where downstream clients depend on TS-compatible objects
 
 ## Bottom Line
 

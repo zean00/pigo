@@ -200,17 +200,21 @@ func (event NormalizedEvent) MarshalJSON() ([]byte, error) {
 		payload["partial"] = event.Partial
 	case "text_start", "thinking_start", "toolcall_start":
 		payload["contentIndex"] = event.ContentIdx
+		payload["contentIdx"] = event.ContentIdx
 		payload["partial"] = event.Partial
 	case "text_delta", "thinking_delta", "toolcall_delta":
 		payload["contentIndex"] = event.ContentIdx
+		payload["contentIdx"] = event.ContentIdx
 		payload["delta"] = event.Delta
 		payload["partial"] = event.Partial
 	case "text_end", "thinking_end":
 		payload["contentIndex"] = event.ContentIdx
+		payload["contentIdx"] = event.ContentIdx
 		payload["content"] = event.Content
 		payload["partial"] = event.Partial
 	case "toolcall_end":
 		payload["contentIndex"] = event.ContentIdx
+		payload["contentIdx"] = event.ContentIdx
 		payload["toolCall"] = event.ToolCall
 		payload["partial"] = event.Partial
 	case "done":
@@ -222,6 +226,7 @@ func (event NormalizedEvent) MarshalJSON() ([]byte, error) {
 	default:
 		if event.ContentIdx != 0 {
 			payload["contentIndex"] = event.ContentIdx
+			payload["contentIdx"] = event.ContentIdx
 		}
 		if event.Delta != "" {
 			payload["delta"] = event.Delta

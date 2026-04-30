@@ -13,6 +13,17 @@ func TestIsContextOverflowMatchesErrorPatterns(t *testing.T) {
 	}
 }
 
+func TestIsContextOverflowMatchesNoBody429(t *testing.T) {
+	result := NormalizedResult{
+		Role:         "assistant",
+		StopReason:   "error",
+		ErrorMessage: "429 status code (no body)",
+	}
+	if !IsContextOverflow(result, 0) {
+		t.Fatal("expected overflow")
+	}
+}
+
 func TestIsContextOverflowIgnoresRateLimitMessages(t *testing.T) {
 	result := NormalizedResult{
 		Role:         "assistant",

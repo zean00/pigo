@@ -49,6 +49,7 @@ type Session struct {
 	promptCancel       context.CancelFunc
 	retryCancel        context.CancelFunc
 	bashCancel         context.CancelFunc
+	compactionCancel   context.CancelFunc
 
 	entries       []SessionEntry
 	entriesByID   map[string]SessionEntry
@@ -60,6 +61,7 @@ type Session struct {
 	customEntries []SessionEntry
 
 	extensionCommands   []SlashCommandInfo
+	extensionHandlers   map[string]ExtensionCommandHandler
 	promptTemplates     []SlashCommandInfo
 	skills              []SlashCommandInfo
 	resourceDiagnostics []ResourceDiagnostic
@@ -104,6 +106,24 @@ type ResourceDiagnostic struct {
 	Path      string             `json:"path,omitempty"`
 	Collision *ResourceCollision `json:"collision,omitempty"`
 }
+
+type ProjectContextFile struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+type ExtensionCommandContext struct {
+	Session *Session
+	Name    string
+	Args    string
+}
+
+type ExtensionCommandResult struct {
+	Prompt  string
+	Handled bool
+}
+
+type ExtensionCommandHandler func(ctx context.Context, command ExtensionCommandContext) (ExtensionCommandResult, error)
 
 const (
 	bashExecutionTextPrefix        = "Ran `%s`\n"
@@ -159,6 +179,7 @@ type State struct {
 	IsCompacting   bool   `json:"isCompacting"`
 	// Not used in the simplified runtime yet.
 	PendingMessageCnt int `json:"pendingMessageCount"`
+	ContextUsage      any `json:"contextUsage,omitempty"`
 }
 
 type BashResult struct {
@@ -187,6 +208,13 @@ type Stats struct {
 	ContextUsage any     `json:"contextUsage,omitempty"`
 }
 
+type ContextUsage struct {
+	EstimatedTokens int     `json:"estimatedTokens"`
+	MessageCount    int     `json:"messageCount"`
+	Limit           int     `json:"limit,omitempty"`
+	Percent         float64 `json:"percent,omitempty"`
+}
+
 func NewSession(root string, turns []AssistantTurn) *Session {
 	session := &Session{
 		Root:         root,
@@ -210,6 +238,50 @@ func (s *Session) SetExtensionCommands(commands []SlashCommandInfo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.extensionCommands = copySlashCommands(commands)
+	s.extensionHandlers = nil
+}
+
+func (s *Session) RegisterExtensionCommand(command SlashCommandInfo, handler ExtensionCommandHandler) {
+	command.Source = "extension"
+	command.Name = strings.TrimSpace(command.Name)
+	if command.SourceInfo == nil {
+		command.SourceInfo = map[string]any{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.extensionHandlers == nil {
+		s.extensionHandlers = map[string]ExtensionCommandHandler{}
+	}
+	replaced := false
+	for i, existing := range s.extensionCommands {
+		if strings.EqualFold(existing.Name, command.Name) {
+			s.extensionCommands[i] = cloneSlashCommand(command)
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		s.extensionCommands = append(s.extensionCommands, cloneSlashCommand(command))
+	}
+	if handler != nil {
+		s.extensionHandlers[strings.ToLower(command.Name)] = handler
+	}
+}
+
+func (s *Session) ExecuteExtensionCommand(ctx context.Context, name, args string) (ExtensionCommandResult, bool, error) {
+	key := strings.ToLower(strings.TrimSpace(name))
+	s.mu.Lock()
+	handler := s.extensionHandlers[key]
+	s.mu.Unlock()
+	if handler == nil {
+		return ExtensionCommandResult{}, false, nil
+	}
+	result, err := handler(ctx, ExtensionCommandContext{
+		Session: s,
+		Name:    strings.TrimSpace(name),
+		Args:    strings.TrimSpace(args),
+	})
+	return result, true, err
 }
 
 func (s *Session) PromptTemplates() []SlashCommandInfo {
@@ -398,6 +470,30 @@ func (s *Session) expandPromptTemplate(prompt string) string {
 		}
 	}
 	return prompt
+}
+
+func (s *Session) expandExtensionCommand(ctx context.Context, prompt string) (string, bool, error) {
+	if !strings.HasPrefix(prompt, "/") {
+		return prompt, false, nil
+	}
+	name, args := splitCommandPrompt(prompt)
+	if name == "" {
+		return prompt, false, nil
+	}
+	result, ok, err := s.ExecuteExtensionCommand(ctx, name, args)
+	if err != nil {
+		return "", true, err
+	}
+	if !ok {
+		return prompt, false, nil
+	}
+	if result.Handled {
+		return "", true, nil
+	}
+	if strings.TrimSpace(result.Prompt) == "" {
+		return prompt, false, nil
+	}
+	return result.Prompt, false, nil
 }
 
 func splitCommandPrompt(prompt string) (string, string) {
@@ -742,11 +838,30 @@ func (s *Session) applyPromptStreamEvent(state *promptStreamState, event agentco
 	s.Events = append(s.Events, event)
 }
 
+func (s *Session) emitSessionEvent(eventType string, data map[string]any) {
+	if data == nil {
+		data = map[string]any{}
+	}
+	event := agentcore.Event{"type": eventType}
+	for key, value := range data {
+		event[key] = value
+	}
+	s.Events = append(s.Events, event)
+}
+
 func (s *Session) prompt(ctx context.Context, prompt string, attachments []PromptAttachment, retrying bool) error {
 	streamState := promptStreamState{activeMessageIdx: -1}
 	if s.IsStreaming {
 		return fmt.Errorf("session is already streaming")
 	}
+	expanded, handled, expandErr := s.expandExtensionCommand(ctx, prompt)
+	if expandErr != nil {
+		return expandErr
+	}
+	if handled {
+		return nil
+	}
+	prompt = expanded
 	prompt = s.expandPromptTemplate(prompt)
 	if !retrying {
 		s.LastPrompt = prompt
@@ -1042,7 +1157,59 @@ func (s *Session) HeadlessSystemPrompt() string {
 	if packages := packageContext(s.Root); packages != "" {
 		lines = append(lines, "Project context:\n"+packages)
 	}
+	if contextFiles := LoadProjectContextFiles(s.Root, DefaultAgentDir()); len(contextFiles) > 0 {
+		var builder strings.Builder
+		builder.WriteString("Project-specific instructions and guidelines:")
+		for _, file := range contextFiles {
+			builder.WriteString("\n\n## ")
+			builder.WriteString(file.Path)
+			builder.WriteString("\n\n")
+			builder.WriteString(file.Content)
+		}
+		lines = append(lines, "Project context files:\n"+builder.String())
+	}
 	return strings.Join(lines, "\n")
+}
+
+func LoadProjectContextFiles(root, agentDir string) []ProjectContextFile {
+	root = filepath.Clean(root)
+	agentDir = filepath.Clean(agentDir)
+	contextFiles := []ProjectContextFile{}
+	seen := map[string]struct{}{}
+
+	if file, ok := loadContextFileFromDir(agentDir); ok {
+		contextFiles = append(contextFiles, file)
+		seen[file.Path] = struct{}{}
+	}
+
+	var ancestors []ProjectContextFile
+	current := root
+	for {
+		if file, ok := loadContextFileFromDir(current); ok {
+			if _, exists := seen[file.Path]; !exists {
+				ancestors = append([]ProjectContextFile{file}, ancestors...)
+				seen[file.Path] = struct{}{}
+			}
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	contextFiles = append(contextFiles, ancestors...)
+	return contextFiles
+}
+
+func loadContextFileFromDir(dir string) (ProjectContextFile, bool) {
+	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
+		path := filepath.Join(dir, name)
+		content, err := os.ReadFile(path)
+		if err == nil {
+			return ProjectContextFile{Path: path, Content: string(content)}, true
+		}
+	}
+	return ProjectContextFile{}, false
 }
 
 func (s *Session) Steer(ctx context.Context, message string) error {
@@ -1074,6 +1241,7 @@ func (s *Session) State() State {
 		AutoCompaction:    s.AutoCompaction,
 		IsCompacting:      s.IsCompacting,
 		PendingMessageCnt: 0,
+		ContextUsage:      s.ContextUsage(),
 	}
 }
 
@@ -1085,6 +1253,9 @@ func (s *Session) Abort() {
 	}
 	if s.bashCancel != nil {
 		s.bashCancel()
+	}
+	if s.compactionCancel != nil {
+		s.compactionCancel()
 	}
 	s.mu.Unlock()
 }
@@ -1331,13 +1502,28 @@ func (s *Session) CompactWithModel(ctx context.Context, customInstructions strin
 }
 
 func (s *Session) compact(ctx context.Context, customInstructions string, useModel bool) CompactionResult {
+	ctx, cancel := context.WithCancel(ctx)
 	s.IsCompacting = true
+	s.mu.Lock()
+	s.compactionCancel = cancel
+	s.mu.Unlock()
 	instructions := strings.TrimSpace(customInstructions)
 	defer func() {
+		cancel()
+		s.mu.Lock()
+		s.compactionCancel = nil
+		s.mu.Unlock()
 		s.IsCompacting = false
 	}()
 
 	tokensBefore := s.Stats().Tokens.Total
+	if tokensBefore == 0 {
+		tokensBefore = s.ContextUsage().EstimatedTokens
+	}
+	s.emitSessionEvent("session_before_compact", map[string]any{
+		"tokensBefore":       tokensBefore,
+		"customInstructions": instructions,
+	})
 	summary := s.buildCompactionSummary(instructions)
 	if useModel && s.Compactor != nil {
 		if generated, err := s.Compactor(ctx, sessionMessagesToAI(s.Messages), instructions); err == nil && strings.TrimSpace(generated) != "" {
@@ -1347,6 +1533,9 @@ func (s *Session) compact(ctx context.Context, customInstructions string, useMod
 		if generated, err := s.compactWithConfiguredModel(ctx, instructions); err == nil && strings.TrimSpace(generated) != "" {
 			summary = strings.TrimSpace(generated)
 		}
+	}
+	if ctx.Err() != nil {
+		return CompactionResult{TokensBefore: tokensBefore, Cancelled: true}
 	}
 	kept := ""
 	branch := s.resolveBranchEntries(s.leafID)
@@ -1368,12 +1557,19 @@ func (s *Session) compact(ctx context.Context, customInstructions string, useMod
 			"fromCompaction": true,
 		},
 	})
-	return CompactionResult{
+	result := CompactionResult{
 		Summary:        summary,
 		FirstKeptEntry: kept,
 		TokensBefore:   tokensBefore,
 		Cancelled:      false,
 	}
+	s.emitSessionEvent("session_compact", map[string]any{
+		"summary":          summary,
+		"firstKeptEntryId": kept,
+		"tokensBefore":     tokensBefore,
+		"fromExtension":    false,
+	})
+	return result
 }
 
 func (s *Session) compactWithConfiguredModel(ctx context.Context, instructions string) (string, error) {
@@ -1860,7 +2056,66 @@ func (s *Session) Stats() Stats {
 			stats.ToolResults++
 		}
 	}
+	stats.ContextUsage = s.ContextUsage()
 	return stats
+}
+
+func (s *Session) ContextUsage() ContextUsage {
+	total := 0
+	for _, message := range s.Messages {
+		total += estimateTokensFromValue(message)
+	}
+	usage := ContextUsage{
+		EstimatedTokens: total,
+		MessageCount:    len(s.Messages),
+	}
+	if s.Provider != "" && s.ModelID != "" {
+		if model, ok := ai.GetModel(s.Provider, s.ModelID); ok && model.ContextWindow > 0 {
+			usage.Limit = model.ContextWindow
+			usage.Percent = float64(total) / float64(model.ContextWindow)
+		}
+	}
+	return usage
+}
+
+func estimateTokensFromValue(value any) int {
+	text := textFromValue(value)
+	if text == "" {
+		return 0
+	}
+	estimate := len([]rune(text)) / 4
+	if estimate < 1 {
+		estimate = 1
+	}
+	return estimate
+}
+
+func textFromValue(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case agentcore.Message:
+		return textFromValue(map[string]any(typed))
+	case map[string]any:
+		var parts []string
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			parts = append(parts, textFromValue(typed[key]))
+		}
+		return strings.Join(parts, " ")
+	case []any:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			parts = append(parts, textFromValue(item))
+		}
+		return strings.Join(parts, " ")
+	default:
+		return ""
+	}
 }
 
 func (s *Session) consumePromptTurns() []AssistantTurn {

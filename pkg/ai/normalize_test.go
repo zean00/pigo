@@ -139,6 +139,9 @@ func TestNormalizedEventJSONMatchesTypeScriptShape(t *testing.T) {
 	if decoded[0]["contentIndex"] != float64(0) {
 		t.Fatalf("event = %#v", decoded[0])
 	}
+	if decoded[0]["contentIdx"] != float64(0) {
+		t.Fatalf("event = %#v", decoded[0])
+	}
 	if _, ok := decoded[0]["errorMessage"]; ok {
 		t.Fatalf("unexpected errorMessage = %#v", decoded[0])
 	}

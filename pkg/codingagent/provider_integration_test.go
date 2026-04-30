@@ -298,6 +298,51 @@ func TestSessionProviderLoopInjectsHeadlessSystemContext(t *testing.T) {
 	}
 }
 
+func TestSessionProviderLoopInjectsProjectContextFiles(t *testing.T) {
+	const providerName = "project-context-provider"
+	var captured []ai.Message
+	ai.RegisterProvider(providerName, providerFunc(func(_ context.Context, req ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error) {
+		captured = append([]ai.Message(nil), req.Messages...)
+		return ai.NormalizedResult{
+			Role:       "assistant",
+			StopReason: "stop",
+			Text:       "ok",
+			Content:    []any{map[string]any{"type": "text", "text": "ok"}},
+		}, []ai.NormalizedEvent{{Type: "start"}, {Type: "text_start", ContentIdx: 0}, {Type: "text_delta", ContentIdx: 0, Delta: "ok"}, {Type: "text_end", ContentIdx: 0, Content: "ok"}, {Type: "done", Reason: "stop"}}, nil
+	}))
+
+	root := t.TempDir()
+	parent := filepath.Join(root, "parent")
+	child := filepath.Join(parent, "child")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(parent, "AGENTS.md"), []byte("parent instructions"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(child, "CLAUDE.md"), []byte("child instructions"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	session := NewSession(child, nil)
+	if _, err := session.SetModel(providerName, "test-model"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := session.Prompt(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if len(captured) == 0 || captured[0].Role != "system" {
+		t.Fatalf("captured messages = %#v", captured)
+	}
+	system, _ := captured[0].Content.(string)
+	if !strings.Contains(system, "Project context files:") || !strings.Contains(system, "parent instructions") || !strings.Contains(system, "child instructions") {
+		t.Fatalf("system context = %q", system)
+	}
+	if strings.Index(system, filepath.Join(parent, "AGENTS.md")) > strings.Index(system, filepath.Join(child, "CLAUDE.md")) {
+		t.Fatalf("context file order = %q", system)
+	}
+}
+
 func TestSessionPromptWithAttachmentsForwardsTextAndImageBlocks(t *testing.T) {
 	const providerName = "attachment-provider"
 	var captured []ai.Message

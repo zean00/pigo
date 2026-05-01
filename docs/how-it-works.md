@@ -1,0 +1,66 @@
+# How It Works
+
+`pigo` runs a headless coding-agent session around a workspace root. A client sends prompts, the agent calls a model provider, the model may request tools, and the runtime applies tool calls against the workspace or external MCP servers.
+
+## ACP Session Flow
+
+1. The host process starts `pigo-acp`.
+2. The ACP client sends `initialize`.
+3. The client creates or loads a session with `session/new`, `session/load`, `session/resume`, or `session/fork`.
+4. The client sends user input with `session/prompt`.
+5. `pigo` streams `session/update` notifications for assistant text, tool calls, tool results, errors, and completion.
+6. The client may cancel with `session/cancel` or close with `session/close`.
+
+## Agent Loop
+
+For each prompt:
+
+1. The session builds the current conversation state.
+2. The agent core applies the configured system prompt and available tools.
+3. The provider layer converts normalized messages into provider-specific request payloads.
+4. Streaming provider events are normalized into common event types.
+5. Tool calls are routed to coding-agent tools or MCP tools.
+6. Tool results are appended to the model conversation.
+7. The loop continues until the provider returns a final assistant response or the request is canceled.
+
+## Workspace Tools
+
+The coding-agent runtime provides tools for common headless coding tasks:
+
+- Reading files.
+- Editing files.
+- Searching with grep-style behavior.
+- Running shell commands.
+- Discovering workspace files.
+- Tracking session state, branches, labels, and metadata.
+
+Workspace paths are resolved against the session root to avoid unintended access outside the workspace.
+
+## Event Mapping
+
+Internal runtime events are normalized before being sent to clients. ACP clients receive `session/update` notifications for:
+
+- Assistant message chunks.
+- Tool call lifecycle updates.
+- Tool call output.
+- Diagnostics and errors.
+- Session lifecycle changes.
+
+Streaming assistant chunks use stable message identifiers so ACP clients can append chunks to the same visible message.
+
+## Provider Selection
+
+The selected model determines the provider transport. `pigo` includes a generated model catalog and provider specs. It can also register custom provider configs at runtime for OpenAI-compatible services, including local LLM servers.
+
+## Cancellation
+
+ACP `session/cancel` cancels an active prompt context. Provider calls and tool execution paths receive context cancellation where supported, and the session emits cancellation-aware events.
+
+## Validation
+
+Behavior is checked with:
+
+- Go unit tests: `go test ./...`
+- Fixture conformance: `make verify-conformance`
+- Cross-repo parity comparator: `make parity`
+- Optional live OpenRouter smoke test: `OPENROUTER_API_KEY=... make live-openrouter-smoke`

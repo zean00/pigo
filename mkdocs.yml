@@ -1,0 +1,19 @@
+site_name: pigo
+site_description: Headless Go coding agent runtime with ACP and MCP adapters.
+repo_url: https://github.com/zean00/pigo
+theme:
+  name: mkdocs
+nav:
+  - Overview: index.md
+  - Installation: installation.md
+  - Configuration: configuration.md
+  - Architecture: architecture.md
+  - How It Works: how-it-works.md
+  - pi-mono Comparison: pi-mono-comparison.md
+  - ACP: acp.md
+  - MCP: mcp.md
+markdown_extensions:
+  - toc:
+      permalink: true
+  - tables
+  - fenced_code

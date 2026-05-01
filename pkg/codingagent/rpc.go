@@ -52,6 +52,8 @@ type rpcCommand struct {
 	EnabledFilters   []string             `json:"enabledFilters,omitempty"`
 	DisabledFilters  []string             `json:"disabledFilters,omitempty"`
 	MaxBytes         int                  `json:"maxBytes,omitempty"`
+	Allow            []string             `json:"allow,omitempty"`
+	Deny             []string             `json:"deny,omitempty"`
 	OAuthCredentials *ai.OAuthCredentials `json:"oauthCredentials,omitempty"`
 	OAuthStorePath   string               `json:"oauthStorePath,omitempty"`
 }
@@ -387,6 +389,25 @@ func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse 
 
 	case "get_command_compression":
 		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: s.Session.GetCommandCompression().Metadata()}
+
+	case "set_bash_permission_policy":
+		policy := s.Session.GetBashPermissionPolicy()
+		if strings.TrimSpace(command.Mode) != "" {
+			policy.Mode = command.Mode
+		}
+		if command.Allow != nil {
+			policy.Allow = command.Allow
+		}
+		if command.Deny != nil {
+			policy.Deny = command.Deny
+		}
+		if err := s.Session.SetBashPermissionPolicy(policy); err != nil {
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+		}
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: s.Session.GetBashPermissionPolicy().Metadata()}
+
+	case "get_bash_permission_policy":
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: s.Session.GetBashPermissionPolicy().Metadata()}
 
 	case "abort_retry":
 		s.Session.AbortRetry()

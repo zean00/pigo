@@ -143,6 +143,41 @@ func TestRPCCommandCompressionConfig(t *testing.T) {
 	}
 }
 
+func TestRPCBashPermissionPolicy(t *testing.T) {
+	root := t.TempDir()
+	session := NewSession(root, nil)
+	var out bytes.Buffer
+	server := RPCServer{Session: session}
+	input := strings.NewReader(
+		`{"id":"p1","type":"set_bash_permission_policy","mode":"allow-list","allow":["exact:printf ok"],"deny":["glob:rm *"]}` + "\n" +
+			`{"id":"p2","type":"get_bash_permission_policy"}` + "\n" +
+			`{"id":"b1","type":"bash","command":"touch side-effect.txt"}` + "\n",
+	)
+
+	if err := server.Serve(context.Background(), input, &out); err != nil {
+		t.Fatal(err)
+	}
+	responses := decodeRPCResponses(t, out.String())
+	if responses[0]["success"] != true || responses[1]["success"] != true || responses[2]["success"] != true {
+		t.Fatalf("responses = %#v", responses)
+	}
+	policy := responses[1]["data"].(map[string]any)
+	if policy["mode"] != "allow-list" {
+		t.Fatalf("policy = %#v", policy)
+	}
+	result := responses[2]["data"].(map[string]any)
+	if result["exitCode"] != float64(126) {
+		t.Fatalf("result = %#v", result)
+	}
+	permission := result["permission"].(map[string]any)
+	if permission["permissionDenied"] != true {
+		t.Fatalf("permission = %#v", permission)
+	}
+	if _, err := os.Stat(filepath.Join(root, "side-effect.txt")); !os.IsNotExist(err) {
+		t.Fatalf("command executed, stat err = %v", err)
+	}
+}
+
 func TestRPCSessionStatsAndPersistence(t *testing.T) {
 	root := t.TempDir()
 	sessionFile := filepath.Join(root, "session.jsonl")

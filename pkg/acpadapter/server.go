@@ -791,6 +791,18 @@ func (s *Server) setConfigOption(params setConfigOptionParams) (any, *jsonrpcErr
 		config := session.Session.GetCommandCompression()
 		config.DisabledFilters = commaList(value)
 		err = session.Session.SetCommandCompression(config)
+	case "bash_permission_mode":
+		policy := session.Session.GetBashPermissionPolicy()
+		policy.Mode = value
+		err = session.Session.SetBashPermissionPolicy(policy)
+	case "bash_permission_allow":
+		policy := session.Session.GetBashPermissionPolicy()
+		policy.Allow = commaList(value)
+		err = session.Session.SetBashPermissionPolicy(policy)
+	case "bash_permission_deny":
+		policy := session.Session.GetBashPermissionPolicy()
+		policy.Deny = commaList(value)
+		err = session.Session.SetBashPermissionPolicy(policy)
 	default:
 		return nil, invalidParams(fmt.Errorf("unknown config option %q", params.ConfigID))
 	}
@@ -863,6 +875,7 @@ func acpModeState(session *codingagent.Session) map[string]any {
 
 func acpConfigOptions(session *codingagent.Session) []map[string]any {
 	compression := session.GetCommandCompression()
+	permission := session.GetBashPermissionPolicy()
 	return []map[string]any{
 		selectConfigOption("thinking_level", "Thinking level", session.ThinkingLevel, []string{"off", "low", "medium", "high", "xhigh"}),
 		selectConfigOption("steering_mode", "Steering mode", session.SteeringMode, []string{"one-at-a-time", "all"}),
@@ -870,6 +883,9 @@ func acpConfigOptions(session *codingagent.Session) []map[string]any {
 		selectConfigOption("command_compression", "Command compression", compression.Mode, []string{"off", "auto", "force"}),
 		stringConfigOption("command_compression_enabled_filters", "Command compression enabled filters", strings.Join(compression.EnabledFilters, ",")),
 		stringConfigOption("command_compression_disabled_filters", "Command compression disabled filters", strings.Join(compression.DisabledFilters, ",")),
+		selectConfigOption("bash_permission_mode", "Bash permission mode", permission.Mode, []string{"allow-all", "allow-list"}),
+		stringConfigOption("bash_permission_allow", "Bash permission allow", strings.Join(permission.Allow, ",")),
+		stringConfigOption("bash_permission_deny", "Bash permission deny", strings.Join(permission.Deny, ",")),
 		modelConfigOption(session),
 	}
 }

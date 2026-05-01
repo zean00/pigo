@@ -37,6 +37,7 @@ type SessionInput struct {
 	ShellCommandPrefix string
 	ToolOutputLimit    int
 	CommandCompression CommandOutputCompressionConfig
+	BashPermission     BashPermissionPolicy
 }
 
 type SessionResult struct {
@@ -70,6 +71,11 @@ func RunHeadlessSession(ctx context.Context, root string, input SessionInput) (S
 	session.ToolOutputLimit = input.ToolOutputLimit
 	if input.CommandCompression.Mode != "" || len(input.CommandCompression.EnabledFilters) > 0 || len(input.CommandCompression.DisabledFilters) > 0 || input.CommandCompression.MaxBytes > 0 {
 		session.CommandCompression = input.CommandCompression
+	}
+	if input.BashPermission.Mode != "" || len(input.BashPermission.Allow) > 0 || len(input.BashPermission.Deny) > 0 {
+		if err := session.SetBashPermissionPolicy(input.BashPermission); err != nil {
+			return SessionResult{}, err
+		}
 	}
 	for _, prompt := range input.Prompts {
 		if err := session.Prompt(ctx, prompt); err != nil {
@@ -106,6 +112,7 @@ type BuiltinToolOptions struct {
 	OutputLimit        int
 	ShellCommandPrefix string
 	CommandCompression CommandOutputCompressionConfig
+	BashPermission     BashPermissionPolicy
 }
 
 func BuiltinToolsWithOptions(root string, options BuiltinToolOptions) []agentcore.Tool {
@@ -124,6 +131,13 @@ func BuiltinToolsWithOptions(root string, options BuiltinToolOptions) []agentcor
 				command, _ := call.Arguments["command"].(string)
 				timeoutSeconds, _ := call.Arguments["timeout"].(float64)
 				command = applyShellCommandPrefix(command, options.ShellCommandPrefix)
+				decision := EvaluateBashPermission(command, options.BashPermission)
+				if !decision.Allowed {
+					details := bashPermissionDetails(decision)
+					details["command"] = command
+					details["exitCode"] = 126
+					return agentcore.ToolResult{Text: decision.Reason, Details: details, IsError: true}
+				}
 				output, exitCode, err := RunBashCommand(ctx, root, command, timeoutSeconds)
 				if err != nil {
 					return agentcore.ToolResult{Text: err.Error(), IsError: true}

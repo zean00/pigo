@@ -46,6 +46,12 @@ Compression metadata is attached to bash tool results and direct bash results so
 
 The committed test suite includes deterministic RPC/session coverage and an optional live OpenRouter smoke test. The live test is useful when changing provider/tool-loop behavior because it validates that a real model-triggered bash call still receives compressed output metadata.
 
+## Bash Command Permissions
+
+Before a bash command is executed, `pigo` evaluates the session bash permission policy. The policy supports exact, glob, and regex rules. In `allow-all` mode, commands run unless denied. In `allow-list` mode, commands must match an allow rule and must not match any deny rule.
+
+Deny rules always win. A denied command returns a permission-denied bash/tool result without launching a shell process.
+
 ## Event Mapping
 
 Internal runtime events are normalized before being sent to clients. ACP clients receive `session/update` notifications for:

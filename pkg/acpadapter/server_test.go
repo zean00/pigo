@@ -572,6 +572,24 @@ func TestSessionStateAndSetters(t *testing.T) {
 	if !found {
 		t.Fatalf("config options = %#v", options)
 	}
+
+	setPermission, rpcErr := server.handleRequest(context.Background(), jsonrpcRequest{
+		Method: "session/set_config_option",
+		Params: json.RawMessage(`{"sessionId":` + quote(sessionID) + `,"configId":"bash_permission_mode","value":"allow-list"}`),
+	})
+	if rpcErr != nil {
+		t.Fatalf("set permission option error = %#v", rpcErr)
+	}
+	options = setPermission.(map[string]any)["configOptions"].([]map[string]any)
+	found = false
+	for _, option := range options {
+		if option["id"] == "bash_permission_mode" && option["currentValue"] == "allow-list" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("config options = %#v", options)
+	}
 }
 
 func TestNewSessionAppliesInitialModelSelection(t *testing.T) {

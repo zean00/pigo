@@ -125,3 +125,28 @@ The related options are:
 - `command_compression_disabled_filters`: comma-separated filter denylist.
 
 Bash tool updates include compression metadata in the tool result details.
+
+## Bash Permissions Through ACP
+
+ACP clients can configure bash command permissions with `session/set_config_option`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 6,
+  "method": "session/set_config_option",
+  "params": {
+    "sessionId": "session-id",
+    "configId": "bash_permission_mode",
+    "value": "allow-list"
+  }
+}
+```
+
+The related options are:
+
+- `bash_permission_mode`: `allow-all` or `allow-list`.
+- `bash_permission_allow`: comma-separated `exact:`, `glob:`, or `regex:` rules.
+- `bash_permission_deny`: comma-separated `exact:`, `glob:`, or `regex:` rules.
+
+Deny rules take precedence. Denied commands return an error-style tool result and are not executed.

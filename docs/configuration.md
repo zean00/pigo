@@ -148,6 +148,46 @@ OPENROUTER_API_KEY=... go test ./pkg/codingagent -run TestLiveOpenRouterCommandC
 
 The live OpenRouter test is skipped when `OPENROUTER_API_KEY` is not set. It asks a real model to invoke the bash tool and verifies that the resulting tool output contains compression metadata.
 
+## Bash Command Permissions
+
+`pigo` can restrict which commands may run through the bash tool and direct RPC bash command. The default mode is `allow-all`, which preserves the current behavior unless a deny rule matches.
+
+Environment defaults:
+
+```bash
+export PIGO_BASH_PERMISSION_MODE=allow-all
+export PIGO_BASH_ALLOW='glob:go test*,exact:git status --short'
+export PIGO_BASH_DENY='glob:rm *,regex:^sudo\\b'
+```
+
+Modes:
+
+| Mode | Behavior |
+| --- | --- |
+| `allow-all` | Allow every command unless it matches a deny rule. |
+| `allow-list` | Allow only commands that match an allow rule and do not match a deny rule. |
+
+Rule syntax:
+
+| Prefix | Behavior |
+| --- | --- |
+| `exact:` | Match the complete command string. |
+| `glob:` | Match with shell-style glob patterns. |
+| `regex:` | Match with a Go regular expression. |
+
+Deny rules always win over allow rules. Denied commands are not executed; they return a normal error-style bash/tool result with permission metadata.
+
+ACP sessions expose these config options:
+
+- `bash_permission_mode`
+- `bash_permission_allow`
+- `bash_permission_deny`
+
+The JSONL RPC adapter supports:
+
+- `set_bash_permission_policy`
+- `get_bash_permission_policy`
+
 ## MCP Configuration
 
 MCP config is loaded in this order:

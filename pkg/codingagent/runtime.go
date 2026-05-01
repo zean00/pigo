@@ -41,6 +41,7 @@ type Session struct {
 	ShellCommandPrefix string
 	ToolOutputLimit    int
 	CommandCompression CommandOutputCompressionConfig
+	BashPermission     BashPermissionPolicy
 	Turns              []AssistantTurn
 	turnIndex          int
 	Events             []agentcore.Event
@@ -359,6 +360,7 @@ type BashResult struct {
 	ExitCode    int            `json:"exitCode"`
 	Cancelled   bool           `json:"cancelled"`
 	Compression map[string]any `json:"compression,omitempty"`
+	Permission  map[string]any `json:"permission,omitempty"`
 }
 
 type Stats struct {
@@ -1924,6 +1926,7 @@ func (s *Session) builtinTools() []agentcore.Tool {
 		OutputLimit:        s.ToolOutputLimit,
 		ShellCommandPrefix: s.ShellCommandPrefix,
 		CommandCompression: s.CommandCompression,
+		BashPermission:     s.BashPermission,
 	})
 	extensionTools, _ := s.ExtensionTools()
 	return append(tools, extensionTools...)
@@ -2159,6 +2162,7 @@ func (s *Session) TryNewSessionWithParent(ctx context.Context, parentSession str
 	s.ShellCommandPrefix = ""
 	s.ToolOutputLimit = 0
 	s.CommandCompression = CommandOutputCompressionConfigFromEnv()
+	s.BashPermission = BashPermissionPolicyFromEnv()
 	s.IsStreaming = false
 	s.parentSession = strings.TrimSpace(parentSession)
 	s.seedDefaultModels()
@@ -2532,6 +2536,18 @@ func (s *Session) GetCommandCompression() CommandOutputCompressionConfig {
 	return s.CommandCompression.Normalized()
 }
 
+func (s *Session) SetBashPermissionPolicy(policy BashPermissionPolicy) error {
+	if err := policy.Validate(); err != nil {
+		return err
+	}
+	s.BashPermission = policy.Normalized()
+	return nil
+}
+
+func (s *Session) GetBashPermissionPolicy() BashPermissionPolicy {
+	return s.BashPermission.Normalized()
+}
+
 func (s *Session) AbortRetry() {
 	s.mu.Lock()
 	if s.retryCancel != nil {
@@ -2569,6 +2585,21 @@ func (s *Session) Bash(ctx context.Context, command string) (BashResult, error) 
 		}
 		if len(result.Compression) > 0 {
 			message["compression"] = result.Compression
+		}
+		if err := s.appendEntry(SessionEntry{Type: "message", Message: message}); err != nil {
+			return result, err
+		}
+		return result, nil
+	}
+	decision := EvaluateBashPermission(command, s.BashPermission)
+	if !decision.Allowed {
+		result := deniedBashResult(command, decision)
+		message := agentcore.Message{
+			"role":       "bashExecution",
+			"command":    result.Command,
+			"output":     result.Output,
+			"exitCode":   result.ExitCode,
+			"permission": result.Permission,
 		}
 		if err := s.appendEntry(SessionEntry{Type: "message", Message: message}); err != nil {
 			return result, err

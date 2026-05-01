@@ -115,6 +115,34 @@ func TestRPCBash(t *testing.T) {
 	}
 }
 
+func TestRPCCommandCompressionConfig(t *testing.T) {
+	session := NewSession(t.TempDir(), nil)
+	var out bytes.Buffer
+	server := RPCServer{Session: session}
+	input := strings.NewReader(
+		`{"id":"c1","type":"set_command_compression","mode":"force","enabledFilters":["generic"],"disabledFilters":["go-test"],"maxBytes":120}` + "\n" +
+			`{"id":"c2","type":"get_command_compression"}` + "\n" +
+			`{"id":"b1","type":"bash","command":"for i in $(seq 1 100); do echo line-$i; done"}` + "\n",
+	)
+
+	if err := server.Serve(context.Background(), input, &out); err != nil {
+		t.Fatal(err)
+	}
+	responses := decodeRPCResponses(t, out.String())
+	if responses[0]["success"] != true || responses[1]["success"] != true || responses[2]["success"] != true {
+		t.Fatalf("responses = %#v", responses)
+	}
+	config := responses[1]["data"].(map[string]any)
+	if config["mode"] != "force" || config["maxBytes"] != float64(120) {
+		t.Fatalf("config = %#v", config)
+	}
+	result := responses[2]["data"].(map[string]any)
+	compression := result["compression"].(map[string]any)
+	if compression["compressed"] != true || compression["compressionFilter"] != "generic" {
+		t.Fatalf("compression = %#v", compression)
+	}
+}
+
 func TestRPCSessionStatsAndPersistence(t *testing.T) {
 	root := t.TempDir()
 	sessionFile := filepath.Join(root, "session.jsonl")

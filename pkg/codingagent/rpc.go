@@ -49,6 +49,9 @@ type rpcCommand struct {
 	Flags            []ExtensionFlag      `json:"flags,omitempty"`
 	Value            any                  `json:"value,omitempty"`
 	Status           string               `json:"status,omitempty"`
+	EnabledFilters   []string             `json:"enabledFilters,omitempty"`
+	DisabledFilters  []string             `json:"disabledFilters,omitempty"`
+	MaxBytes         int                  `json:"maxBytes,omitempty"`
 	OAuthCredentials *ai.OAuthCredentials `json:"oauthCredentials,omitempty"`
 	OAuthStorePath   string               `json:"oauthStorePath,omitempty"`
 }
@@ -362,6 +365,28 @@ func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse 
 		}
 		s.Session.SetAutoRetryEnabled(*command.Enabled)
 		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true}
+
+	case "set_command_compression":
+		config := s.Session.GetCommandCompression()
+		if strings.TrimSpace(command.Mode) != "" {
+			config.Mode = command.Mode
+		}
+		if command.EnabledFilters != nil {
+			config.EnabledFilters = command.EnabledFilters
+		}
+		if command.DisabledFilters != nil {
+			config.DisabledFilters = command.DisabledFilters
+		}
+		if command.MaxBytes > 0 {
+			config.MaxBytes = command.MaxBytes
+		}
+		if err := s.Session.SetCommandCompression(config); err != nil {
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+		}
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: s.Session.GetCommandCompression().Metadata()}
+
+	case "get_command_compression":
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: s.Session.GetCommandCompression().Metadata()}
 
 	case "abort_retry":
 		s.Session.AbortRetry()

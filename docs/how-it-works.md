@@ -36,6 +36,14 @@ The coding-agent runtime provides tools for common headless coding tasks:
 
 Workspace paths are resolved against the session root to avoid unintended access outside the workspace.
 
+## Command Output Compression
+
+Bash command output passes through a command-aware compression layer after the process exits. The layer is conservative: it preserves the exit code and cancellation status, and it does not rewrite the command before execution.
+
+The runtime chooses a matching filter for common noisy commands such as `go test`, `git diff`, `git status`, `rg`, `grep`, `ls`, and `find`. If no command-specific filter applies, the generic fallback enforces the configured output size. The existing tool output limit remains the final hard cap.
+
+Compression metadata is attached to bash tool results and direct bash results so ACP/RPC clients can see whether output was compressed and which filter produced it.
+
 ## Event Mapping
 
 Internal runtime events are normalized before being sent to clients. ACP clients receive `session/update` notifications for:

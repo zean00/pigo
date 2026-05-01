@@ -40,6 +40,7 @@ type Session struct {
 	Compactor          CompactorFunc
 	ShellCommandPrefix string
 	ToolOutputLimit    int
+	CommandCompression CommandOutputCompressionConfig
 	Turns              []AssistantTurn
 	turnIndex          int
 	Events             []agentcore.Event
@@ -353,10 +354,11 @@ type State struct {
 }
 
 type BashResult struct {
-	Command   string `json:"command"`
-	Output    string `json:"output"`
-	ExitCode  int    `json:"exitCode"`
-	Cancelled bool   `json:"cancelled"`
+	Command     string         `json:"command"`
+	Output      string         `json:"output"`
+	ExitCode    int            `json:"exitCode"`
+	Cancelled   bool           `json:"cancelled"`
+	Compression map[string]any `json:"compression,omitempty"`
 }
 
 type Stats struct {
@@ -1921,6 +1923,7 @@ func (s *Session) builtinTools() []agentcore.Tool {
 	tools := BuiltinToolsWithOptions(s.Root, BuiltinToolOptions{
 		OutputLimit:        s.ToolOutputLimit,
 		ShellCommandPrefix: s.ShellCommandPrefix,
+		CommandCompression: s.CommandCompression,
 	})
 	extensionTools, _ := s.ExtensionTools()
 	return append(tools, extensionTools...)
@@ -2155,6 +2158,7 @@ func (s *Session) TryNewSessionWithParent(ctx context.Context, parentSession str
 	s.FollowUpMode = "one-at-a-time"
 	s.ShellCommandPrefix = ""
 	s.ToolOutputLimit = 0
+	s.CommandCompression = CommandOutputCompressionConfigFromEnv()
 	s.IsStreaming = false
 	s.parentSession = strings.TrimSpace(parentSession)
 	s.seedDefaultModels()
@@ -2516,6 +2520,18 @@ func (s *Session) SetAutoRetryEnabled(enabled bool) {
 	s.AutoRetry = enabled
 }
 
+func (s *Session) SetCommandCompression(config CommandOutputCompressionConfig) error {
+	if err := config.Validate(); err != nil {
+		return err
+	}
+	s.CommandCompression = config.Normalized()
+	return nil
+}
+
+func (s *Session) GetCommandCompression() CommandOutputCompressionConfig {
+	return s.CommandCompression.Normalized()
+}
+
 func (s *Session) AbortRetry() {
 	s.mu.Lock()
 	if s.retryCancel != nil {
@@ -2540,12 +2556,19 @@ func (s *Session) Bash(ctx context.Context, command string) (BashResult, error) 
 		if result.Command == "" {
 			result.Command = command
 		}
+		compression := s.CommandCompression.Normalized()
+		compressed := CompressCommandOutput(result.Command, result.Output, result.ExitCode, compression)
+		result.Output = compressed.Output
+		result.Compression = compressionDetails(compressed, compression)
 		message := agentcore.Message{
 			"role":      "bashExecution",
 			"command":   result.Command,
 			"output":    result.Output,
 			"exitCode":  result.ExitCode,
 			"cancelled": result.Cancelled,
+		}
+		if len(result.Compression) > 0 {
+			message["compression"] = result.Compression
 		}
 		if err := s.appendEntry(SessionEntry{Type: "message", Message: message}); err != nil {
 			return result, err
@@ -2579,11 +2602,19 @@ func (s *Session) Bash(ctx context.Context, command string) (BashResult, error) 
 		ExitCode:  exitCode,
 		Cancelled: cmdCtx.Err() != nil && exitCode != 0,
 	}
+	compression := s.CommandCompression.Normalized()
+	if compression.MaxBytes <= 0 {
+		compression.MaxBytes = s.ToolOutputLimit
+	}
+	compressed := CompressCommandOutput(command, result.Output, result.ExitCode, compression)
+	result.Output = compressed.Output
+	result.Compression = compressionDetails(compressed, compression)
 	message := agentcore.Message{
-		"role":     "bashExecution",
-		"command":  command,
-		"output":   result.Output,
-		"exitCode": result.ExitCode,
+		"role":        "bashExecution",
+		"command":     command,
+		"output":      result.Output,
+		"exitCode":    result.ExitCode,
+		"compression": result.Compression,
 	}
 	if appendErr := s.appendEntry(SessionEntry{Type: "message", Message: message}); appendErr != nil && err == nil {
 		err = appendErr
@@ -3554,6 +3585,14 @@ func sessionMessageToContent(role string, message agentcore.Message) (any, bool)
 		} else {
 			text += "(no output)"
 		}
+		if compression, ok := message["compression"].(map[string]any); ok {
+			if compressed, _ := compression["compressed"].(bool); compressed {
+				filter, _ := compression["compressionFilter"].(string)
+				original := compressionInt(compression["originalBytes"])
+				current := compressionInt(compression["compressedBytes"])
+				text += fmt.Sprintf("\n\nOutput compressed by %s (%d -> %d bytes).", filter, original, current)
+			}
+		}
 		if exitCode, ok := message["exitCode"].(int); ok && exitCode != 0 {
 			text += fmt.Sprintf("\n\nCommand exited with code %d", exitCode)
 		}
@@ -3579,6 +3618,19 @@ func sessionMessageToContent(role string, message agentcore.Message) (any, bool)
 		return []ai.ContentBlock{{Type: "text", Text: text}}, true
 	default:
 		return nil, false
+	}
+}
+
+func compressionInt(value any) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	default:
+		return 0
 	}
 }
 

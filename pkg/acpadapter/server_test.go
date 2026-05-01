@@ -554,6 +554,24 @@ func TestSessionStateAndSetters(t *testing.T) {
 	if !found {
 		t.Fatalf("config options = %#v", options)
 	}
+
+	setCompression, rpcErr := server.handleRequest(context.Background(), jsonrpcRequest{
+		Method: "session/set_config_option",
+		Params: json.RawMessage(`{"sessionId":` + quote(sessionID) + `,"configId":"command_compression","value":"force"}`),
+	})
+	if rpcErr != nil {
+		t.Fatalf("set compression option error = %#v", rpcErr)
+	}
+	options = setCompression.(map[string]any)["configOptions"].([]map[string]any)
+	found = false
+	for _, option := range options {
+		if option["id"] == "command_compression" && option["currentValue"] == "force" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("config options = %#v", options)
+	}
 }
 
 func TestNewSessionAppliesInitialModelSelection(t *testing.T) {

@@ -94,6 +94,51 @@ err := ai.RegisterProviderConfig(ai.ProviderConfig{
 
 Most local servers ignore the API key, but `RegisterProviderConfig` currently requires a non-empty value when defining models, so use a harmless placeholder such as `local`.
 
+## Command Output Compression
+
+`pigo` can compress noisy bash command output before it is stored in session history or sent back to the model. This is inspired by RTK-style command filtering, but implemented natively inside the headless coding-agent runtime.
+
+Compression never changes the executed command, exit code, or cancellation behavior. It only changes the output text recorded for the agent and client, and it includes metadata such as the filter used, original byte count, compressed byte count, and truncation state.
+
+Environment defaults:
+
+```bash
+export PIGO_COMMAND_COMPRESSION=auto
+export PIGO_COMMAND_COMPRESSION_ENABLE=go-test,git-diff
+export PIGO_COMMAND_COMPRESSION_DISABLE=generic
+export PIGO_COMMAND_COMPRESSION_MAX_BYTES=20000
+```
+
+Modes:
+
+| Mode | Behavior |
+| --- | --- |
+| `off` | Disable command-aware compression and keep only the existing hard output limit. |
+| `auto` | Compress when output is large or when a command-specific filter is useful. |
+| `force` | Run the best matching enabled filter even for smaller output. |
+
+Built-in filters:
+
+| Filter | Commands |
+| --- | --- |
+| `go-test` | `go test ...` |
+| `git-diff` | `git diff ...` |
+| `git-status` | `git status ...` |
+| `grep` | `rg ...`, `grep ...` |
+| `list` | `ls ...`, `find ...` |
+| `generic` | fallback long-output truncation |
+
+ACP sessions expose these config options:
+
+- `command_compression`
+- `command_compression_enabled_filters`
+- `command_compression_disabled_filters`
+
+The JSONL RPC adapter supports:
+
+- `set_command_compression`
+- `get_command_compression`
+
 ## MCP Configuration
 
 MCP config is loaded in this order:

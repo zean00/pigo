@@ -36,6 +36,7 @@ type SessionInput struct {
 	AutoCompaction     bool
 	ShellCommandPrefix string
 	ToolOutputLimit    int
+	CommandCompression CommandOutputCompressionConfig
 }
 
 type SessionResult struct {
@@ -67,6 +68,9 @@ func RunHeadlessSession(ctx context.Context, root string, input SessionInput) (S
 	session.AutoCompaction = input.AutoCompaction
 	session.ShellCommandPrefix = input.ShellCommandPrefix
 	session.ToolOutputLimit = input.ToolOutputLimit
+	if input.CommandCompression.Mode != "" || len(input.CommandCompression.EnabledFilters) > 0 || len(input.CommandCompression.DisabledFilters) > 0 || input.CommandCompression.MaxBytes > 0 {
+		session.CommandCompression = input.CommandCompression
+	}
 	for _, prompt := range input.Prompts {
 		if err := session.Prompt(ctx, prompt); err != nil {
 			return SessionResult{}, err
@@ -101,12 +105,17 @@ func BuiltinTools(root string) []agentcore.Tool {
 type BuiltinToolOptions struct {
 	OutputLimit        int
 	ShellCommandPrefix string
+	CommandCompression CommandOutputCompressionConfig
 }
 
 func BuiltinToolsWithOptions(root string, options BuiltinToolOptions) []agentcore.Tool {
 	outputLimit := options.OutputLimit
 	if outputLimit <= 0 {
 		outputLimit = maxToolOutputBytes
+	}
+	compression := options.CommandCompression.Normalized()
+	if compression.MaxBytes <= 0 {
+		compression.MaxBytes = outputLimit
 	}
 	return []agentcore.Tool{
 		{
@@ -122,8 +131,14 @@ func BuiltinToolsWithOptions(root string, options BuiltinToolOptions) []agentcor
 				if output == "" {
 					output = "(no output)"
 				}
-				output, truncated := truncateToolOutput(output, outputLimit)
-				details := map[string]any{"command": command, "exitCode": exitCode, "truncated": truncated}
+				compressed := CompressCommandOutput(command, output, exitCode, compression)
+				output, truncated := truncateToolOutput(compressed.Output, outputLimit)
+				compressed.Output = output
+				compressed.Truncated = compressed.Truncated || truncated
+				compressed.OutputBytes = len(output)
+				details := compressionDetails(compressed, compression)
+				details["command"] = command
+				details["exitCode"] = exitCode
 				if exitCode != 0 {
 					return agentcore.ToolResult{
 						Text:    fmt.Sprintf("%s\n\nCommand exited with code %d", strings.TrimRight(output, "\n"), exitCode),

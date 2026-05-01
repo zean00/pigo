@@ -779,6 +779,18 @@ func (s *Server) setConfigOption(params setConfigOptionParams) (any, *jsonrpcErr
 		if err == nil {
 			_, err = session.Session.SetModel(model.Provider, model.ModelID)
 		}
+	case "command_compression":
+		config := session.Session.GetCommandCompression()
+		config.Mode = value
+		err = session.Session.SetCommandCompression(config)
+	case "command_compression_enabled_filters":
+		config := session.Session.GetCommandCompression()
+		config.EnabledFilters = commaList(value)
+		err = session.Session.SetCommandCompression(config)
+	case "command_compression_disabled_filters":
+		config := session.Session.GetCommandCompression()
+		config.DisabledFilters = commaList(value)
+		err = session.Session.SetCommandCompression(config)
 	default:
 		return nil, invalidParams(fmt.Errorf("unknown config option %q", params.ConfigID))
 	}
@@ -850,10 +862,14 @@ func acpModeState(session *codingagent.Session) map[string]any {
 }
 
 func acpConfigOptions(session *codingagent.Session) []map[string]any {
+	compression := session.GetCommandCompression()
 	return []map[string]any{
 		selectConfigOption("thinking_level", "Thinking level", session.ThinkingLevel, []string{"off", "low", "medium", "high", "xhigh"}),
 		selectConfigOption("steering_mode", "Steering mode", session.SteeringMode, []string{"one-at-a-time", "all"}),
 		selectConfigOption("follow_up_mode", "Follow-up mode", session.FollowUpMode, []string{"one-at-a-time", "all"}),
+		selectConfigOption("command_compression", "Command compression", compression.Mode, []string{"off", "auto", "force"}),
+		stringConfigOption("command_compression_enabled_filters", "Command compression enabled filters", strings.Join(compression.EnabledFilters, ",")),
+		stringConfigOption("command_compression_disabled_filters", "Command compression disabled filters", strings.Join(compression.DisabledFilters, ",")),
 		modelConfigOption(session),
 	}
 }
@@ -877,6 +893,31 @@ func selectConfigOption(id, name, current string, values []string) map[string]an
 		option["category"] = "mode"
 	}
 	return option
+}
+
+func stringConfigOption(id, name, current string) map[string]any {
+	return map[string]any{
+		"id":           id,
+		"name":         name,
+		"category":     "command_output",
+		"type":         "text",
+		"currentValue": current,
+	}
+}
+
+func commaList(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func modelConfigOption(session *codingagent.Session) map[string]any {

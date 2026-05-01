@@ -72,6 +72,10 @@ go run ./cmd/pigo-auth --provider anthropic --auth-file tmp/auth.json
 
 MCP servers can be attached to ACP sessions. MCP config is read from ACP `mcpServers` first, then from `PI_MCP_CONFIG_JSON`, `PI_MCP_CONFIG`, `.pi/mcp.json`, and `~/.pi/agent/mcp.json`. Supported MCP transports are `stdio`, `http`, and `sse`; tools are exposed as `mcp__<server>__<tool>`.
 
+## Command Output Compression
+
+`pigo` includes an RTK-inspired command-output compression layer for bash command results. Compression is command-aware, configurable through environment variables plus ACP/RPC session settings, and preserves command execution semantics. See [Configuration](docs/configuration.md#command-output-compression).
+
 ## Providers
 
 The provider layer includes OpenAI-compatible, Anthropic-compatible, Mistral, Google, Google Vertex, Google Gemini CLI-style, OpenAI Codex, and Amazon Bedrock transports.

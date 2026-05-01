@@ -44,6 +44,8 @@ The runtime chooses a matching filter for common noisy commands such as `go test
 
 Compression metadata is attached to bash tool results and direct bash results so ACP/RPC clients can see whether output was compressed and which filter produced it.
 
+The committed test suite includes deterministic RPC/session coverage and an optional live OpenRouter smoke test. The live test is useful when changing provider/tool-loop behavior because it validates that a real model-triggered bash call still receives compressed output metadata.
+
 ## Event Mapping
 
 Internal runtime events are normalized before being sent to clients. ACP clients receive `session/update` notifications for:

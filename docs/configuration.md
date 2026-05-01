@@ -139,6 +139,15 @@ The JSONL RPC adapter supports:
 - `set_command_compression`
 - `get_command_compression`
 
+Validation commands:
+
+```bash
+go test ./pkg/codingagent -run TestRPCCommandCompressionConfig
+OPENROUTER_API_KEY=... go test ./pkg/codingagent -run TestLiveOpenRouterCommandCompression -count=1
+```
+
+The live OpenRouter test is skipped when `OPENROUTER_API_KEY` is not set. It asks a real model to invoke the bash tool and verifies that the resulting tool output contains compression metadata.
+
 ## MCP Configuration
 
 MCP config is loaded in this order:

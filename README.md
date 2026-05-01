@@ -76,6 +76,12 @@ MCP servers can be attached to ACP sessions. MCP config is read from ACP `mcpSer
 
 `pigo` includes an RTK-inspired command-output compression layer for bash command results. Compression is command-aware, configurable through environment variables plus ACP/RPC session settings, and preserves command execution semantics. See [Configuration](docs/configuration.md#command-output-compression).
 
+Optional live validation:
+
+```bash
+OPENROUTER_API_KEY=... go test ./pkg/codingagent -run TestLiveOpenRouterCommandCompression -count=1
+```
+
 ## Providers
 
 The provider layer includes OpenAI-compatible, Anthropic-compatible, Mistral, Google, Google Vertex, Google Gemini CLI-style, OpenAI Codex, and Amazon Bedrock transports.

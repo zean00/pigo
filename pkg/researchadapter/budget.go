@@ -46,7 +46,7 @@ func (b *ToolBudget) BeforeToolCall(_ context.Context, input agentcore.BeforeToo
 	if b.usage == nil {
 		b.usage = map[string]int{}
 	}
-	limit := b.Limits[category]
+	limit := b.limit(category)
 	used := b.usage[category]
 	if limit > 0 && used >= limit {
 		return agentcore.BeforeToolCallResult{
@@ -77,5 +77,20 @@ func (b *ToolBudget) category(toolName string) string {
 	if b.Grouping == nil {
 		return ""
 	}
-	return b.Grouping[name]
+	for tool, category := range b.Grouping {
+		if strings.ToLower(strings.TrimSpace(tool)) == name {
+			return strings.ToLower(strings.TrimSpace(category))
+		}
+	}
+	return ""
+}
+
+func (b *ToolBudget) limit(category string) int {
+	category = strings.ToLower(strings.TrimSpace(category))
+	for key, value := range b.Limits {
+		if strings.ToLower(strings.TrimSpace(key)) == category {
+			return value
+		}
+	}
+	return 0
 }

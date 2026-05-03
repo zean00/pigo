@@ -49,3 +49,33 @@ func TestToolBudgetIgnoresUnmappedTools(t *testing.T) {
 		t.Fatalf("result = %#v usage = %#v", result, budget.Usage())
 	}
 }
+
+func TestToolBudgetNormalizesConfiguredNames(t *testing.T) {
+	budget := &ToolBudget{
+		Grouping: map[string]string{" Search ": " Gathering "},
+		Limits:   map[string]int{" Gathering ": 1},
+	}
+	first, err := budget.BeforeToolCall(context.Background(), agentcore.BeforeToolCallContext{
+		ToolCall: ai.ContentBlock{Name: "search"},
+		Args:     map[string]any{"query": "pigo"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Block {
+		t.Fatalf("first result = %#v", first)
+	}
+	second, err := budget.BeforeToolCall(context.Background(), agentcore.BeforeToolCallContext{
+		ToolCall: ai.ContentBlock{Name: "SEARCH"},
+		Args:     map[string]any{"query": "pigo"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.Block {
+		t.Fatalf("second result = %#v", second)
+	}
+	if usage := budget.Usage(); usage["gathering"] != 1 {
+		t.Fatalf("usage = %#v", usage)
+	}
+}

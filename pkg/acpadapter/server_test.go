@@ -590,6 +590,24 @@ func TestSessionStateAndSetters(t *testing.T) {
 	if !found {
 		t.Fatalf("config options = %#v", options)
 	}
+
+	setTools, rpcErr := server.handleRequest(context.Background(), jsonrpcRequest{
+		Method: "session/set_config_option",
+		Params: json.RawMessage(`{"sessionId":` + quote(sessionID) + `,"configId":"builtin_tools_disabled","value":"bash,write"}`),
+	})
+	if rpcErr != nil {
+		t.Fatalf("set built-in tools option error = %#v", rpcErr)
+	}
+	options = setTools.(map[string]any)["configOptions"].([]map[string]any)
+	found = false
+	for _, option := range options {
+		if option["id"] == "builtin_tools_disabled" && option["currentValue"] == "bash,write" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("config options = %#v", options)
+	}
 }
 
 func TestNewSessionAppliesInitialModelSelection(t *testing.T) {

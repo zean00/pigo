@@ -86,6 +86,10 @@ OPENROUTER_API_KEY=... go test ./pkg/codingagent -run TestLiveOpenRouterCommandC
 
 `pigo` can restrict bash command execution with allow and deny lists. Rules support `exact:`, `glob:`, and `regex:` matching, and deny rules take precedence. See [Configuration](docs/configuration.md#bash-command-permissions).
 
+## Built-in Tools
+
+The built-in coding tools are `bash`, `write`, `read`, `edit`, `ls`, `grep`, and `find`. They can be filtered with enabled/disabled tool lists so embedders can expose only the tool surface they want. See [Configuration](docs/configuration.md#built-in-tool-policy).
+
 ## Providers
 
 The provider layer includes OpenAI-compatible, Anthropic-compatible, Mistral, Google, Google Vertex, Google Gemini CLI-style, OpenAI Codex, and Amazon Bedrock transports.

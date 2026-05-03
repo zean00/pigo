@@ -36,6 +36,8 @@ The coding-agent runtime provides tools for common headless coding tasks:
 
 Workspace paths are resolved against the session root to avoid unintended access outside the workspace.
 
+The model-facing built-in tool names are `bash`, `write`, `read`, `edit`, `ls`, `grep`, and `find`. Sessions can filter these built-in tools before the provider request is built. An enabled list exposes only selected built-ins; a disabled list removes tools from the exposed set. Extension tools and MCP tools are appended separately.
+
 ## Command Output Compression
 
 Bash command output passes through a command-aware compression layer after the process exits. The layer is conservative: it preserves the exit code and cancellation status, and it does not rewrite the command before execution.

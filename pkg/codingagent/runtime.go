@@ -42,6 +42,7 @@ type Session struct {
 	ToolOutputLimit    int
 	CommandCompression CommandOutputCompressionConfig
 	BashPermission     BashPermissionPolicy
+	BuiltinToolPolicy  BuiltinToolPolicy
 	Turns              []AssistantTurn
 	turnIndex          int
 	Events             []agentcore.Event
@@ -1927,13 +1928,14 @@ func (s *Session) builtinTools() []agentcore.Tool {
 		ShellCommandPrefix: s.ShellCommandPrefix,
 		CommandCompression: s.CommandCompression,
 		BashPermission:     s.BashPermission,
+		BuiltinToolPolicy:  s.BuiltinToolPolicy,
 	})
 	extensionTools, _ := s.ExtensionTools()
 	return append(tools, extensionTools...)
 }
 
 func (s *Session) toolSpecs() []ai.Tool {
-	specs := BuiltinToolSpecs()
+	specs := BuiltinToolSpecsWithPolicy(s.BuiltinToolPolicy)
 	_, extensionSpecs := s.ExtensionTools()
 	return append(specs, extensionSpecs...)
 }
@@ -2163,6 +2165,7 @@ func (s *Session) TryNewSessionWithParent(ctx context.Context, parentSession str
 	s.ToolOutputLimit = 0
 	s.CommandCompression = CommandOutputCompressionConfigFromEnv()
 	s.BashPermission = BashPermissionPolicyFromEnv()
+	s.BuiltinToolPolicy = BuiltinToolPolicyFromEnv()
 	s.IsStreaming = false
 	s.parentSession = strings.TrimSpace(parentSession)
 	s.seedDefaultModels()
@@ -2546,6 +2549,18 @@ func (s *Session) SetBashPermissionPolicy(policy BashPermissionPolicy) error {
 
 func (s *Session) GetBashPermissionPolicy() BashPermissionPolicy {
 	return s.BashPermission.Normalized()
+}
+
+func (s *Session) SetBuiltinToolPolicy(policy BuiltinToolPolicy) error {
+	if err := policy.Validate(); err != nil {
+		return err
+	}
+	s.BuiltinToolPolicy = policy.Normalized()
+	return nil
+}
+
+func (s *Session) GetBuiltinToolPolicy() BuiltinToolPolicy {
+	return s.BuiltinToolPolicy.Normalized()
 }
 
 func (s *Session) AbortRetry() {

@@ -54,6 +54,9 @@ type rpcCommand struct {
 	MaxBytes         int                  `json:"maxBytes,omitempty"`
 	Allow            []string             `json:"allow,omitempty"`
 	Deny             []string             `json:"deny,omitempty"`
+	Tools            []string             `json:"tools,omitempty"`
+	EnabledTools     []string             `json:"enabledTools,omitempty"`
+	DisabledTools    []string             `json:"disabledTools,omitempty"`
 	OAuthCredentials *ai.OAuthCredentials `json:"oauthCredentials,omitempty"`
 	OAuthStorePath   string               `json:"oauthStorePath,omitempty"`
 }
@@ -408,6 +411,25 @@ func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse 
 
 	case "get_bash_permission_policy":
 		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: s.Session.GetBashPermissionPolicy().Metadata()}
+
+	case "set_builtin_tool_policy":
+		policy := s.Session.GetBuiltinToolPolicy()
+		if command.Tools != nil {
+			policy.Enabled = command.Tools
+		}
+		if command.EnabledTools != nil {
+			policy.Enabled = command.EnabledTools
+		}
+		if command.DisabledTools != nil {
+			policy.Disabled = command.DisabledTools
+		}
+		if err := s.Session.SetBuiltinToolPolicy(policy); err != nil {
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+		}
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: s.Session.GetBuiltinToolPolicy().Metadata()}
+
+	case "get_builtin_tool_policy":
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: s.Session.GetBuiltinToolPolicy().Metadata()}
 
 	case "abort_retry":
 		s.Session.AbortRetry()

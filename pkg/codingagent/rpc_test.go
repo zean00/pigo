@@ -178,6 +178,34 @@ func TestRPCBashPermissionPolicy(t *testing.T) {
 	}
 }
 
+func TestRPCBuiltinToolPolicy(t *testing.T) {
+	session := NewSession(t.TempDir(), nil)
+	var out bytes.Buffer
+	server := RPCServer{Session: session}
+	input := strings.NewReader(
+		`{"id":"p1","type":"set_builtin_tool_policy","enabledTools":["read","grep"],"disabledTools":["grep"]}` + "\n" +
+			`{"id":"p2","type":"get_builtin_tool_policy"}` + "\n",
+	)
+
+	if err := server.Serve(context.Background(), input, &out); err != nil {
+		t.Fatal(err)
+	}
+	responses := decodeRPCResponses(t, out.String())
+	if responses[0]["success"] != true || responses[1]["success"] != true {
+		t.Fatalf("responses = %#v", responses)
+	}
+	policy := responses[1]["data"].(map[string]any)
+	enabled := policy["enabled"].([]any)
+	disabled := policy["disabled"].([]any)
+	if len(enabled) != 2 || enabled[0] != "read" || enabled[1] != "grep" || len(disabled) != 1 || disabled[0] != "grep" {
+		t.Fatalf("policy = %#v", policy)
+	}
+	names := specNames(session.toolSpecs())
+	if len(names) != 1 || names[0] != "read" {
+		t.Fatalf("specs = %#v", names)
+	}
+}
+
 func TestRPCSessionStatsAndPersistence(t *testing.T) {
 	root := t.TempDir()
 	sessionFile := filepath.Join(root, "session.jsonl")

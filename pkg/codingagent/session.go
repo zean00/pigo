@@ -38,6 +38,7 @@ type SessionInput struct {
 	ToolOutputLimit    int
 	CommandCompression CommandOutputCompressionConfig
 	BashPermission     BashPermissionPolicy
+	BuiltinToolPolicy  BuiltinToolPolicy
 }
 
 type SessionResult struct {
@@ -77,6 +78,11 @@ func RunHeadlessSession(ctx context.Context, root string, input SessionInput) (S
 			return SessionResult{}, err
 		}
 	}
+	if len(input.BuiltinToolPolicy.Enabled) > 0 || len(input.BuiltinToolPolicy.Disabled) > 0 {
+		if err := session.SetBuiltinToolPolicy(input.BuiltinToolPolicy); err != nil {
+			return SessionResult{}, err
+		}
+	}
 	for _, prompt := range input.Prompts {
 		if err := session.Prompt(ctx, prompt); err != nil {
 			return SessionResult{}, err
@@ -113,6 +119,7 @@ type BuiltinToolOptions struct {
 	ShellCommandPrefix string
 	CommandCompression CommandOutputCompressionConfig
 	BashPermission     BashPermissionPolicy
+	BuiltinToolPolicy  BuiltinToolPolicy
 }
 
 func BuiltinToolsWithOptions(root string, options BuiltinToolOptions) []agentcore.Tool {
@@ -124,7 +131,7 @@ func BuiltinToolsWithOptions(root string, options BuiltinToolOptions) []agentcor
 	if compression.MaxBytes <= 0 {
 		compression.MaxBytes = outputLimit
 	}
-	return []agentcore.Tool{
+	tools := []agentcore.Tool{
 		{
 			Name: "bash",
 			Execute: func(ctx context.Context, call ai.ContentBlock) agentcore.ToolResult {
@@ -277,6 +284,7 @@ func BuiltinToolsWithOptions(root string, options BuiltinToolOptions) []agentcor
 			},
 		},
 	}
+	return filterBuiltinTools(tools, func(tool agentcore.Tool) string { return tool.Name }, options.BuiltinToolPolicy)
 }
 
 func applyShellCommandPrefix(command, prefix string) string {
@@ -355,7 +363,11 @@ func truncateToolOutput(text string, limit int) (string, bool) {
 }
 
 func BuiltinToolSpecs() []ai.Tool {
-	return []ai.Tool{
+	return BuiltinToolSpecsWithPolicy(BuiltinToolPolicy{})
+}
+
+func BuiltinToolSpecsWithPolicy(policy BuiltinToolPolicy) []ai.Tool {
+	specs := []ai.Tool{
 		{
 			Name:        "bash",
 			Description: "Execute a shell command",
@@ -439,6 +451,7 @@ func BuiltinToolSpecs() []ai.Tool {
 			},
 		},
 	}
+	return filterBuiltinTools(specs, func(tool ai.Tool) string { return tool.Name }, policy)
 }
 
 func RunBashCommand(ctx context.Context, root, command string, timeoutSeconds float64) (string, int, error) {

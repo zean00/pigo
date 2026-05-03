@@ -188,6 +188,47 @@ The JSONL RPC adapter supports:
 - `set_bash_permission_policy`
 - `get_bash_permission_policy`
 
+## Built-in Tool Policy
+
+The model-facing built-in tools are:
+
+- `bash`
+- `write`
+- `read`
+- `edit`
+- `ls`
+- `grep`
+- `find`
+
+By default all built-in tools are exposed. You can limit that surface with an enabled list, a disabled list, or both. Disabled tools always win.
+
+Environment defaults:
+
+```bash
+export PIGO_BUILTIN_TOOLS='read,grep,ls'
+export PIGO_DISABLED_BUILTIN_TOOLS='bash'
+```
+
+Behavior:
+
+| Setting | Behavior |
+| --- | --- |
+| No lists | Expose every built-in tool. |
+| `PIGO_BUILTIN_TOOLS` | Expose only the listed built-in tools. |
+| `PIGO_DISABLED_BUILTIN_TOOLS` | Remove the listed built-in tools from the exposed set. |
+
+ACP sessions expose these config options:
+
+- `builtin_tools_enabled`
+- `builtin_tools_disabled`
+
+The JSONL RPC adapter supports:
+
+- `set_builtin_tool_policy`
+- `get_builtin_tool_policy`
+
+This policy controls built-in model tools. Extension tools and MCP tools are attached separately and are not filtered by this policy.
+
 ## MCP Configuration
 
 MCP config is loaded in this order:

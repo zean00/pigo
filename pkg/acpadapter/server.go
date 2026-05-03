@@ -803,6 +803,14 @@ func (s *Server) setConfigOption(params setConfigOptionParams) (any, *jsonrpcErr
 		policy := session.Session.GetBashPermissionPolicy()
 		policy.Deny = commaList(value)
 		err = session.Session.SetBashPermissionPolicy(policy)
+	case "builtin_tools_enabled":
+		policy := session.Session.GetBuiltinToolPolicy()
+		policy.Enabled = commaList(value)
+		err = session.Session.SetBuiltinToolPolicy(policy)
+	case "builtin_tools_disabled":
+		policy := session.Session.GetBuiltinToolPolicy()
+		policy.Disabled = commaList(value)
+		err = session.Session.SetBuiltinToolPolicy(policy)
 	default:
 		return nil, invalidParams(fmt.Errorf("unknown config option %q", params.ConfigID))
 	}
@@ -876,6 +884,7 @@ func acpModeState(session *codingagent.Session) map[string]any {
 func acpConfigOptions(session *codingagent.Session) []map[string]any {
 	compression := session.GetCommandCompression()
 	permission := session.GetBashPermissionPolicy()
+	toolPolicy := session.GetBuiltinToolPolicy()
 	return []map[string]any{
 		selectConfigOption("thinking_level", "Thinking level", session.ThinkingLevel, []string{"off", "low", "medium", "high", "xhigh"}),
 		selectConfigOption("steering_mode", "Steering mode", session.SteeringMode, []string{"one-at-a-time", "all"}),
@@ -886,6 +895,8 @@ func acpConfigOptions(session *codingagent.Session) []map[string]any {
 		selectConfigOption("bash_permission_mode", "Bash permission mode", permission.Mode, []string{"allow-all", "allow-list"}),
 		stringConfigOption("bash_permission_allow", "Bash permission allow", strings.Join(permission.Allow, ",")),
 		stringConfigOption("bash_permission_deny", "Bash permission deny", strings.Join(permission.Deny, ",")),
+		stringConfigOption("builtin_tools_enabled", "Built-in tools enabled", strings.Join(toolPolicy.Enabled, ",")),
+		stringConfigOption("builtin_tools_disabled", "Built-in tools disabled", strings.Join(toolPolicy.Disabled, ",")),
 		modelConfigOption(session),
 	}
 }

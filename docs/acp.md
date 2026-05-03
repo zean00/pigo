@@ -150,3 +150,27 @@ The related options are:
 - `bash_permission_deny`: comma-separated `exact:`, `glob:`, or `regex:` rules.
 
 Deny rules take precedence. Denied commands return an error-style tool result and are not executed.
+
+## Built-in Tools Through ACP
+
+ACP clients can configure which built-in model tools are exposed with `session/set_config_option`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "session/set_config_option",
+  "params": {
+    "sessionId": "session-id",
+    "configId": "builtin_tools_disabled",
+    "value": "bash,write"
+  }
+}
+```
+
+The related options are:
+
+- `builtin_tools_enabled`: comma-separated list of built-in tools to expose.
+- `builtin_tools_disabled`: comma-separated list of built-in tools to remove.
+
+Available built-in tools are `bash`, `write`, `read`, `edit`, `ls`, `grep`, and `find`. Disabled tools take precedence over enabled tools. MCP tools and extension tools are configured separately.

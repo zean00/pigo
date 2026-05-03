@@ -174,3 +174,28 @@ The related options are:
 - `builtin_tools_disabled`: comma-separated list of built-in tools to remove.
 
 Available built-in tools are `bash`, `write`, `read`, `edit`, `ls`, `grep`, and `find`. Disabled tools take precedence over enabled tools. MCP tools and extension tools are configured separately.
+
+## Research Tools Through ACP
+
+ACP clients can opt in to internet research tools with `session/set_config_option`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "method": "session/set_config_option",
+  "params": {
+    "sessionId": "session-id",
+    "configId": "research_tools",
+    "value": "search,scrape,security_search"
+  }
+}
+```
+
+The related options are:
+
+- `research_tools`: comma-separated list of `search`, `scrape`, and `security_search`.
+- `research_searxng_url`: external SearXNG base URL used by `search`.
+- `research_nvd_api_key`: optional NVD API key used by `security_search`.
+
+Research tools are disabled by default. The `scrape` and `security_search` tools do not require SearXNG, but `search` returns a configuration error until a SearXNG URL is configured.

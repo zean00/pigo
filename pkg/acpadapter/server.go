@@ -811,6 +811,18 @@ func (s *Server) setConfigOption(params setConfigOptionParams) (any, *jsonrpcErr
 		policy := session.Session.GetBuiltinToolPolicy()
 		policy.Disabled = commaList(value)
 		err = session.Session.SetBuiltinToolPolicy(policy)
+	case "research_tools":
+		config := session.Session.GetResearchConfig()
+		config.Tools = commaList(value)
+		err = session.Session.SetResearchConfig(config)
+	case "research_searxng_url":
+		config := session.Session.GetResearchConfig()
+		config.SearXNGURL = value
+		err = session.Session.SetResearchConfig(config)
+	case "research_nvd_api_key":
+		config := session.Session.GetResearchConfig()
+		config.NVDAPIKey = value
+		err = session.Session.SetResearchConfig(config)
 	default:
 		return nil, invalidParams(fmt.Errorf("unknown config option %q", params.ConfigID))
 	}
@@ -885,6 +897,7 @@ func acpConfigOptions(session *codingagent.Session) []map[string]any {
 	compression := session.GetCommandCompression()
 	permission := session.GetBashPermissionPolicy()
 	toolPolicy := session.GetBuiltinToolPolicy()
+	researchConfig := session.GetResearchConfig()
 	return []map[string]any{
 		selectConfigOption("thinking_level", "Thinking level", session.ThinkingLevel, []string{"off", "low", "medium", "high", "xhigh"}),
 		selectConfigOption("steering_mode", "Steering mode", session.SteeringMode, []string{"one-at-a-time", "all"}),
@@ -897,8 +910,18 @@ func acpConfigOptions(session *codingagent.Session) []map[string]any {
 		stringConfigOption("bash_permission_deny", "Bash permission deny", strings.Join(permission.Deny, ",")),
 		stringConfigOption("builtin_tools_enabled", "Built-in tools enabled", strings.Join(toolPolicy.Enabled, ",")),
 		stringConfigOption("builtin_tools_disabled", "Built-in tools disabled", strings.Join(toolPolicy.Disabled, ",")),
+		stringConfigOption("research_tools", "Research tools", strings.Join(researchConfig.Tools, ",")),
+		stringConfigOption("research_searxng_url", "Research SearXNG URL", researchConfig.SearXNGURL),
+		stringConfigOption("research_nvd_api_key", "Research NVD API key", maskSecret(researchConfig.NVDAPIKey)),
 		modelConfigOption(session),
 	}
+}
+
+func maskSecret(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	return "<configured>"
 }
 
 func selectConfigOption(id, name, current string, values []string) map[string]any {

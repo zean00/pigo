@@ -608,6 +608,63 @@ func TestSessionStateAndSetters(t *testing.T) {
 	if !found {
 		t.Fatalf("config options = %#v", options)
 	}
+
+	setResearch, rpcErr := server.handleRequest(context.Background(), jsonrpcRequest{
+		Method: "session/set_config_option",
+		Params: json.RawMessage(`{"sessionId":` + quote(sessionID) + `,"configId":"research_tools","value":"search,scrape"}`),
+	})
+	if rpcErr != nil {
+		t.Fatalf("set research tools option error = %#v", rpcErr)
+	}
+	options = setResearch.(map[string]any)["configOptions"].([]map[string]any)
+	found = false
+	for _, option := range options {
+		if option["id"] == "research_tools" && option["currentValue"] == "search,scrape" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("config options = %#v", options)
+	}
+
+	setResearchURL, rpcErr := server.handleRequest(context.Background(), jsonrpcRequest{
+		Method: "session/set_config_option",
+		Params: json.RawMessage(`{"sessionId":` + quote(sessionID) + `,"configId":"research_searxng_url","value":"http://search.test"}`),
+	})
+	if rpcErr != nil {
+		t.Fatalf("set research url option error = %#v", rpcErr)
+	}
+	options = setResearchURL.(map[string]any)["configOptions"].([]map[string]any)
+	found = false
+	for _, option := range options {
+		if option["id"] == "research_searxng_url" && option["currentValue"] == "http://search.test" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("config options = %#v", options)
+	}
+
+	setResearchKey, rpcErr := server.handleRequest(context.Background(), jsonrpcRequest{
+		Method: "session/set_config_option",
+		Params: json.RawMessage(`{"sessionId":` + quote(sessionID) + `,"configId":"research_nvd_api_key","value":"secret"}`),
+	})
+	if rpcErr != nil {
+		t.Fatalf("set research nvd key option error = %#v", rpcErr)
+	}
+	options = setResearchKey.(map[string]any)["configOptions"].([]map[string]any)
+	found = false
+	for _, option := range options {
+		if option["id"] == "research_nvd_api_key" && option["currentValue"] == "<configured>" {
+			found = true
+		}
+		if option["id"] == "research_nvd_api_key" && option["currentValue"] == "secret" {
+			t.Fatalf("raw secret leaked in config options: %#v", option)
+		}
+	}
+	if !found {
+		t.Fatalf("config options = %#v", options)
+	}
 }
 
 func TestNewSessionAppliesInitialModelSelection(t *testing.T) {

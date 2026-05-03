@@ -19,6 +19,7 @@ import (
 
 	"github.com/badlogic/pigo/pkg/agentcore"
 	"github.com/badlogic/pigo/pkg/ai"
+	"github.com/badlogic/pigo/pkg/researchadapter"
 )
 
 var ErrSessionOperationCancelled = errors.New("session operation cancelled")
@@ -43,6 +44,7 @@ type Session struct {
 	CommandCompression CommandOutputCompressionConfig
 	BashPermission     BashPermissionPolicy
 	BuiltinToolPolicy  BuiltinToolPolicy
+	ResearchConfig     researchadapter.Config
 	Turns              []AssistantTurn
 	turnIndex          int
 	Events             []agentcore.Event
@@ -1930,12 +1932,16 @@ func (s *Session) builtinTools() []agentcore.Tool {
 		BashPermission:     s.BashPermission,
 		BuiltinToolPolicy:  s.BuiltinToolPolicy,
 	})
+	researchTools, _ := researchadapter.Tools(s.ResearchConfig)
+	tools = append(tools, researchTools...)
 	extensionTools, _ := s.ExtensionTools()
 	return append(tools, extensionTools...)
 }
 
 func (s *Session) toolSpecs() []ai.Tool {
 	specs := BuiltinToolSpecsWithPolicy(s.BuiltinToolPolicy)
+	_, researchSpecs := researchadapter.Tools(s.ResearchConfig)
+	specs = append(specs, researchSpecs...)
 	_, extensionSpecs := s.ExtensionTools()
 	return append(specs, extensionSpecs...)
 }
@@ -2166,6 +2172,7 @@ func (s *Session) TryNewSessionWithParent(ctx context.Context, parentSession str
 	s.CommandCompression = CommandOutputCompressionConfigFromEnv()
 	s.BashPermission = BashPermissionPolicyFromEnv()
 	s.BuiltinToolPolicy = BuiltinToolPolicyFromEnv()
+	s.ResearchConfig = researchadapter.ConfigFromEnv()
 	s.IsStreaming = false
 	s.parentSession = strings.TrimSpace(parentSession)
 	s.seedDefaultModels()
@@ -2561,6 +2568,18 @@ func (s *Session) SetBuiltinToolPolicy(policy BuiltinToolPolicy) error {
 
 func (s *Session) GetBuiltinToolPolicy() BuiltinToolPolicy {
 	return s.BuiltinToolPolicy.Normalized()
+}
+
+func (s *Session) SetResearchConfig(config researchadapter.Config) error {
+	if err := config.Validate(); err != nil {
+		return err
+	}
+	s.ResearchConfig = config.Normalized()
+	return nil
+}
+
+func (s *Session) GetResearchConfig() researchadapter.Config {
+	return s.ResearchConfig.Normalized()
 }
 
 func (s *Session) AbortRetry() {

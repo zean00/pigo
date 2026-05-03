@@ -38,6 +38,8 @@ Workspace paths are resolved against the session root to avoid unintended access
 
 The model-facing built-in tool names are `bash`, `write`, `read`, `edit`, `ls`, `grep`, and `find`. Sessions can filter these built-in tools before the provider request is built. An enabled list exposes only selected built-ins; a disabled list removes tools from the exposed set. Extension tools and MCP tools are appended separately.
 
+Optional research tools are also appended separately when enabled. `search` talks to an external SearXNG instance, `scrape` fetches and extracts readable URL text, and `security_search` queries public vulnerability sources. They are opt-in so ordinary headless coding sessions do not gain network research tools unexpectedly.
+
 ## Command Output Compression
 
 Bash command output passes through a command-aware compression layer after the process exits. The layer is conservative: it preserves the exit code and cancellation status, and it does not rewrite the command before execution.

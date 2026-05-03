@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/badlogic/pigo/pkg/ai"
+	"github.com/badlogic/pigo/pkg/researchadapter"
 )
 
 type RPCServer struct {
@@ -57,6 +58,9 @@ type rpcCommand struct {
 	Tools            []string             `json:"tools,omitempty"`
 	EnabledTools     []string             `json:"enabledTools,omitempty"`
 	DisabledTools    []string             `json:"disabledTools,omitempty"`
+	ResearchTools    []string             `json:"researchTools,omitempty"`
+	SearXNGURL       string               `json:"searxngUrl,omitempty"`
+	NVDAPIKey        string               `json:"nvdApiKey,omitempty"`
 	OAuthCredentials *ai.OAuthCredentials `json:"oauthCredentials,omitempty"`
 	OAuthStorePath   string               `json:"oauthStorePath,omitempty"`
 }
@@ -430,6 +434,31 @@ func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse 
 
 	case "get_builtin_tool_policy":
 		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: s.Session.GetBuiltinToolPolicy().Metadata()}
+
+	case "set_research_tools":
+		config := s.Session.GetResearchConfig()
+		if command.Tools != nil {
+			config.Tools = command.Tools
+		}
+		if command.ResearchTools != nil {
+			config.Tools = command.ResearchTools
+		}
+		if strings.TrimSpace(command.SearXNGURL) != "" {
+			config.SearXNGURL = command.SearXNGURL
+		}
+		if strings.TrimSpace(command.NVDAPIKey) != "" {
+			config.NVDAPIKey = command.NVDAPIKey
+		}
+		if err := s.Session.SetResearchConfig(config); err != nil {
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+		}
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: s.Session.GetResearchConfig().Metadata()}
+
+	case "get_research_tools":
+		config := s.Session.GetResearchConfig()
+		data := config.Metadata()
+		data["available"] = researchadapter.ToolNames()
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: data}
 
 	case "abort_retry":
 		s.Session.AbortRetry()

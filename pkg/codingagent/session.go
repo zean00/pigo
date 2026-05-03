@@ -17,6 +17,7 @@ import (
 
 	"github.com/badlogic/pigo/pkg/agentcore"
 	"github.com/badlogic/pigo/pkg/ai"
+	"github.com/badlogic/pigo/pkg/researchadapter"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -39,6 +40,7 @@ type SessionInput struct {
 	CommandCompression CommandOutputCompressionConfig
 	BashPermission     BashPermissionPolicy
 	BuiltinToolPolicy  BuiltinToolPolicy
+	ResearchConfig     researchadapter.Config
 }
 
 type SessionResult struct {
@@ -80,6 +82,11 @@ func RunHeadlessSession(ctx context.Context, root string, input SessionInput) (S
 	}
 	if len(input.BuiltinToolPolicy.Enabled) > 0 || len(input.BuiltinToolPolicy.Disabled) > 0 {
 		if err := session.SetBuiltinToolPolicy(input.BuiltinToolPolicy); err != nil {
+			return SessionResult{}, err
+		}
+	}
+	if len(input.ResearchConfig.Tools) > 0 || input.ResearchConfig.SearXNGURL != "" {
+		if err := session.SetResearchConfig(input.ResearchConfig); err != nil {
 			return SessionResult{}, err
 		}
 	}

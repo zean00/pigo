@@ -6,6 +6,7 @@ import (
 
 	"github.com/badlogic/pigo/pkg/agentcore"
 	"github.com/badlogic/pigo/pkg/ai"
+	"github.com/badlogic/pigo/pkg/researchadapter"
 )
 
 func TestBuiltinToolsCanBeDisabled(t *testing.T) {
@@ -61,6 +62,29 @@ func TestBuiltinToolPolicyFromEnv(t *testing.T) {
 	policy := BuiltinToolPolicyFromEnv()
 	if !policy.ToolEnabled("read") || policy.ToolEnabled("grep") || policy.ToolEnabled("bash") {
 		t.Fatalf("policy = %#v", policy)
+	}
+}
+
+func TestSessionResearchToolsAreOptIn(t *testing.T) {
+	session := NewSession(t.TempDir(), nil)
+	if containsString(specNames(session.toolSpecs()), "search") {
+		t.Fatalf("research tool exposed by default: %#v", specNames(session.toolSpecs()))
+	}
+	if err := session.SetResearchConfig(researchadapter.Config{Tools: []string{"search", "scrape"}}); err != nil {
+		t.Fatal(err)
+	}
+	names := specNames(session.toolSpecs())
+	if !containsString(names, "search") || !containsString(names, "scrape") || containsString(names, "security_search") {
+		t.Fatalf("specs = %#v", names)
+	}
+}
+
+func TestRunHeadlessSessionRejectsInvalidResearchTool(t *testing.T) {
+	_, err := RunHeadlessSession(context.Background(), t.TempDir(), SessionInput{
+		ResearchConfig: researchadapter.Config{Tools: []string{"unknown"}},
+	})
+	if err == nil {
+		t.Fatal("expected invalid research tool error")
 	}
 }
 

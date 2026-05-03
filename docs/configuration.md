@@ -229,6 +229,39 @@ The JSONL RPC adapter supports:
 
 This policy controls built-in model tools. Extension tools and MCP tools are attached separately and are not filtered by this policy.
 
+## Research Tools
+
+`pigo` can expose optional internet research tools. They are disabled by default and must be explicitly enabled:
+
+```bash
+export PIGO_RESEARCH_TOOLS='search,scrape,security_search'
+export PIGO_SEARXNG_URL='http://localhost:8080'
+export PIGO_NVD_API_KEY='optional-nvd-api-key'
+```
+
+Available research tools:
+
+| Tool | Behavior |
+| --- | --- |
+| `search` | Query an external SearXNG instance and return titles, URLs, and snippets. |
+| `scrape` | Fetch HTTP(S) URLs and extract compact readable text. |
+| `security_search` | Search public vulnerability sources such as OSV, NVD, and CISA KEV. |
+
+`PIGO_SEARXNG_URL` falls back to `SEARXNG_URL`. The first implementation uses an external SearXNG URL only; it does not manage a Docker SearXNG container.
+
+`PIGO_NVD_API_KEY` falls back to `NVD_API_KEY`. It is optional, but helps avoid anonymous NVD API rate limits. ACP config state reports only whether a key is configured, not the key value.
+
+ACP sessions expose these config options:
+
+- `research_tools`
+- `research_searxng_url`
+- `research_nvd_api_key`
+
+The JSONL RPC adapter supports:
+
+- `set_research_tools`
+- `get_research_tools`
+
 ## MCP Configuration
 
 MCP config is loaded in this order:

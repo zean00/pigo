@@ -90,6 +90,10 @@ OPENROUTER_API_KEY=... go test ./pkg/codingagent -run TestLiveOpenRouterCommandC
 
 The built-in coding tools are `bash`, `write`, `read`, `edit`, `ls`, `grep`, and `find`. They can be filtered with enabled/disabled tool lists so embedders can expose only the tool surface they want. See [Configuration](docs/configuration.md#built-in-tool-policy).
 
+## Research Tools
+
+Optional internet research tools can be exposed with `PIGO_RESEARCH_TOOLS=search,scrape,security_search`. They are disabled by default; `search` uses an external SearXNG instance from `PIGO_SEARXNG_URL` or `SEARXNG_URL`. See [Configuration](docs/configuration.md#research-tools).
+
 ## Providers
 
 The provider layer includes OpenAI-compatible, Anthropic-compatible, Mistral, Google, Google Vertex, Google Gemini CLI-style, OpenAI Codex, and Amazon Bedrock transports.

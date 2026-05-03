@@ -206,6 +206,35 @@ func TestRPCBuiltinToolPolicy(t *testing.T) {
 	}
 }
 
+func TestRPCResearchToolsConfig(t *testing.T) {
+	session := NewSession(t.TempDir(), nil)
+	var out bytes.Buffer
+	server := RPCServer{Session: session}
+	input := strings.NewReader(
+		`{"id":"r1","type":"set_research_tools","researchTools":["search","scrape"],"searxngUrl":"http://search.test","nvdApiKey":"secret"}` + "\n" +
+			`{"id":"r2","type":"get_research_tools"}` + "\n",
+	)
+
+	if err := server.Serve(context.Background(), input, &out); err != nil {
+		t.Fatal(err)
+	}
+	responses := decodeRPCResponses(t, out.String())
+	if responses[0]["success"] != true || responses[1]["success"] != true {
+		t.Fatalf("responses = %#v", responses)
+	}
+	config := responses[1]["data"].(map[string]any)
+	if config["searxngUrl"] != "http://search.test" {
+		t.Fatalf("config = %#v", config)
+	}
+	if config["nvdApiKey"] != true {
+		t.Fatalf("config = %#v", config)
+	}
+	names := specNames(session.toolSpecs())
+	if !containsString(names, "search") || !containsString(names, "scrape") {
+		t.Fatalf("specs = %#v", names)
+	}
+}
+
 func TestRPCSessionStatsAndPersistence(t *testing.T) {
 	root := t.TempDir()
 	sessionFile := filepath.Join(root, "session.jsonl")

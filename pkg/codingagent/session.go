@@ -266,12 +266,15 @@ func BuiltinToolsWithOptions(root string, options BuiltinToolOptions) []agentcor
 				if path == "" {
 					path = "."
 				}
-				text, err := GrepWorkspace(root, path, pattern)
+				result, err := GrepWorkspaceWithDetails(root, path, pattern)
 				if err != nil {
 					return agentcore.ToolResult{Text: err.Error(), IsError: true}
 				}
+				text := result.Text()
 				text, truncated := truncateToolOutput(text, outputLimit)
-				return agentcore.ToolResult{Text: text, Details: map[string]any{"path": path, "pattern": pattern, "truncated": truncated}}
+				details := result.Metadata()
+				details["truncated"] = truncated
+				return agentcore.ToolResult{Text: text, Details: details}
 			},
 		},
 		{
@@ -991,19 +994,62 @@ func ResolveWorkspacePath(root, name string) (string, error) {
 	return path, nil
 }
 
+type GrepMatch struct {
+	Path string `json:"path"`
+	Line int    `json:"line"`
+	Text string `json:"text"`
+}
+
+type GrepWorkspaceResult struct {
+	Root          string      `json:"root"`
+	Path          string      `json:"path"`
+	Pattern       string      `json:"pattern"`
+	FilesSearched int         `json:"filesSearched"`
+	FilesMatched  int         `json:"filesMatched"`
+	Matches       []GrepMatch `json:"matches"`
+}
+
+func (r GrepWorkspaceResult) Text() string {
+	lines := make([]string, 0, len(r.Matches))
+	for _, match := range r.Matches {
+		lines = append(lines, fmt.Sprintf("%s:%d: %s", match.Path, match.Line, match.Text))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (r GrepWorkspaceResult) Metadata() map[string]any {
+	return map[string]any{
+		"path":          r.Path,
+		"pattern":       r.Pattern,
+		"filesSearched": r.FilesSearched,
+		"filesMatched":  r.FilesMatched,
+		"matchCount":    len(r.Matches),
+		"matches":       append([]GrepMatch(nil), r.Matches...),
+	}
+}
+
 func GrepWorkspace(root, path, pattern string) (string, error) {
+	result, err := GrepWorkspaceWithDetails(root, path, pattern)
+	if err != nil {
+		return "", err
+	}
+	return result.Text(), nil
+}
+
+func GrepWorkspaceWithDetails(root, path, pattern string) (GrepWorkspaceResult, error) {
 	if pattern == "" {
-		return "", fmt.Errorf("grep pattern is empty")
+		return GrepWorkspaceResult{}, fmt.Errorf("grep pattern is empty")
 	}
 	absolutePath, err := ResolveWorkspacePath(root, path)
 	if err != nil {
-		return "", err
+		return GrepWorkspaceResult{}, err
 	}
 	rootAbs, err := filepath.Abs(root)
 	if err != nil {
-		return "", err
+		return GrepWorkspaceResult{}, err
 	}
-	matches := []string{}
+	result := GrepWorkspaceResult{Root: rootAbs, Path: path, Pattern: pattern}
+	matchedFiles := map[string]bool{}
 	err = filepath.WalkDir(absolutePath, func(current string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -1024,21 +1070,29 @@ func GrepWorkspace(root, path, pattern string) (string, error) {
 		if isLikelyBinary(data) {
 			return nil
 		}
+		result.FilesSearched++
 		relative, err := filepath.Rel(rootAbs, current)
 		if err != nil {
 			return err
 		}
+		relative = filepath.ToSlash(relative)
 		for lineIndex, line := range strings.Split(string(data), "\n") {
 			if strings.Contains(line, pattern) {
-				matches = append(matches, fmt.Sprintf("%s:%d: %s", filepath.ToSlash(relative), lineIndex+1, line))
+				matchedFiles[relative] = true
+				result.Matches = append(result.Matches, GrepMatch{
+					Path: relative,
+					Line: lineIndex + 1,
+					Text: line,
+				})
 			}
 		}
 		return nil
 	})
 	if err != nil {
-		return "", err
+		return GrepWorkspaceResult{}, err
 	}
-	return strings.Join(matches, "\n"), nil
+	result.FilesMatched = len(matchedFiles)
+	return result, nil
 }
 
 func FindWorkspace(root, path, pattern string) (string, error) {

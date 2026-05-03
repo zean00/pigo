@@ -40,6 +40,8 @@ The model-facing built-in tool names are `bash`, `write`, `read`, `edit`, `ls`, 
 
 Optional research tools are also appended separately when enabled. `search` talks to an external SearXNG instance, `scrape` fetches and extracts readable URL text, and `security_search` queries public vulnerability sources. They are opt-in so ordinary headless coding sessions do not gain network research tools unexpectedly.
 
+There is no separate research-specific grep tool. The built-in `grep` is the canonical local search tool and returns structured match metadata that future research orchestration can count under its gathering budget.
+
 ## Command Output Compression
 
 Bash command output passes through a command-aware compression layer after the process exits. The layer is conservative: it preserves the exit code and cancellation status, and it does not rewrite the command before execution.

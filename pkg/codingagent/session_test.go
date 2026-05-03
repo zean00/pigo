@@ -98,6 +98,33 @@ func TestBuiltinReadRejectsBinaryFiles(t *testing.T) {
 	}
 }
 
+func TestBuiltinGrepReturnsResearchFriendlyMetadata(t *testing.T) {
+	root := t.TempDir()
+	if err := WriteWorkspaceFile(root, "src/main.go", "package main\nconst needle = true\n"); err != nil {
+		t.Fatal(err)
+	}
+	var grepTool agentcore.Tool
+	for _, tool := range BuiltinTools(root) {
+		if tool.Name == "grep" {
+			grepTool = tool
+			break
+		}
+	}
+	result := grepTool.Execute(context.Background(), ai.ContentBlock{
+		Name:      "grep",
+		Arguments: map[string]any{"path": ".", "pattern": "needle"},
+	})
+	if result.IsError || !strings.Contains(result.Text, "src/main.go:2: const needle = true") {
+		t.Fatalf("result = %#v", result)
+	}
+	if result.Details["matchCount"] != 1 || result.Details["filesMatched"] != 1 || result.Details["filesSearched"] != 1 {
+		t.Fatalf("details = %#v", result.Details)
+	}
+	if matches, ok := result.Details["matches"].([]GrepMatch); !ok || len(matches) != 1 || matches[0].Path != "src/main.go" {
+		t.Fatalf("matches = %#v", result.Details["matches"])
+	}
+}
+
 func TestWorkspaceSearchSkipsIgnoredDirectoriesAndBinaryFiles(t *testing.T) {
 	root := t.TempDir()
 	if err := WriteWorkspaceFile(root, "src/main.go", "package main\nconst needle = true\n"); err != nil {
@@ -115,6 +142,13 @@ func TestWorkspaceSearchSkipsIgnoredDirectoriesAndBinaryFiles(t *testing.T) {
 	}
 	if strings.Contains(grep, "node_modules") || strings.Contains(grep, "blob.bin") || !strings.Contains(grep, "src/main.go") {
 		t.Fatalf("grep output = %q", grep)
+	}
+	grepDetails, err := GrepWorkspaceWithDetails(root, ".", "needle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grepDetails.FilesSearched != 1 || grepDetails.FilesMatched != 1 || len(grepDetails.Matches) != 1 {
+		t.Fatalf("grep details = %#v", grepDetails)
 	}
 	find, err := FindWorkspace(root, ".", "*")
 	if err != nil {

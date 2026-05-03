@@ -229,6 +229,8 @@ The JSONL RPC adapter supports:
 
 This policy controls built-in model tools. Extension tools and MCP tools are attached separately and are not filtered by this policy.
 
+The built-in `grep` tool is also the local search primitive used for future research orchestration. `pigo` does not define a duplicate research-specific grep tool.
+
 ## Research Tools
 
 `pigo` can expose optional internet research tools. They are disabled by default and must be explicitly enabled:

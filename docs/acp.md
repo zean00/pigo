@@ -194,7 +194,7 @@ ACP clients can opt in to internet research tools with `session/set_config_optio
 
 The related options are:
 
-- `research_tools`: comma-separated list of `search`, `scrape`, and `security_search`.
+- `research_tools`: comma-separated list of `research`, `search`, `scrape`, and `security_search`.
 - `research_searxng_url`: external SearXNG base URL used by `search`.
 - `research_nvd_api_key`: optional NVD API key used by `security_search`.
 

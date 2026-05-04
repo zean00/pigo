@@ -1932,7 +1932,12 @@ func (s *Session) builtinTools() []agentcore.Tool {
 		BashPermission:     s.BashPermission,
 		BuiltinToolPolicy:  s.BuiltinToolPolicy,
 	})
-	researchTools, _ := researchadapter.Tools(s.ResearchConfig)
+	researchConfig := s.ResearchConfig
+	researchConfig.Host = sessionResearchHost{session: s}
+	researchConfig.EventSink = func(event agentcore.Event) {
+		s.Events = append(s.Events, event)
+	}
+	researchTools, _ := researchadapter.Tools(researchConfig)
 	tools = append(tools, researchTools...)
 	extensionTools, _ := s.ExtensionTools()
 	return append(tools, extensionTools...)
@@ -1940,10 +1945,38 @@ func (s *Session) builtinTools() []agentcore.Tool {
 
 func (s *Session) toolSpecs() []ai.Tool {
 	specs := BuiltinToolSpecsWithPolicy(s.BuiltinToolPolicy)
-	_, researchSpecs := researchadapter.Tools(s.ResearchConfig)
+	researchConfig := s.ResearchConfig
+	researchConfig.Host = sessionResearchHost{session: s}
+	_, researchSpecs := researchadapter.Tools(researchConfig)
 	specs = append(specs, researchSpecs...)
 	_, extensionSpecs := s.ExtensionTools()
 	return append(specs, extensionSpecs...)
+}
+
+type sessionResearchHost struct {
+	session *Session
+}
+
+func (h sessionResearchHost) Root() string {
+	return h.session.Root
+}
+
+func (h sessionResearchHost) Model() (string, string) {
+	return h.session.Provider, h.session.ModelID
+}
+
+func (h sessionResearchHost) APIKey(ctx context.Context, provider string) string {
+	return h.session.resolveProviderAPIKey(ctx, provider)
+}
+
+func (h sessionResearchHost) WorkspaceTools() ([]agentcore.Tool, []ai.Tool) {
+	policy := BuiltinToolPolicy{Enabled: []string{"read", "grep"}}
+	tools := BuiltinToolsWithOptions(h.session.Root, BuiltinToolOptions{
+		OutputLimit:       h.session.ToolOutputLimit,
+		BuiltinToolPolicy: policy,
+	})
+	specs := BuiltinToolSpecsWithPolicy(policy)
+	return tools, specs
 }
 
 func (s *Session) attachmentContentBlock(attachment PromptAttachment) (any, error) {

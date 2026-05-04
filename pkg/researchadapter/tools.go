@@ -35,6 +35,10 @@ func Tools(config Config) ([]agentcore.Tool, []ai.Tool) {
 	config = config.Normalized()
 	tools := []agentcore.Tool{}
 	specs := []ai.Tool{}
+	if config.ToolEnabled("research") {
+		tools = append(tools, researchTool(config))
+		specs = append(specs, researchSpec())
+	}
 	if config.ToolEnabled("search") {
 		tools = append(tools, searchTool(config))
 		specs = append(specs, searchSpec())

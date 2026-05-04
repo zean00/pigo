@@ -38,7 +38,7 @@ Workspace paths are resolved against the session root to avoid unintended access
 
 The model-facing built-in tool names are `bash`, `write`, `read`, `edit`, `ls`, `grep`, and `find`. Sessions can filter these built-in tools before the provider request is built. An enabled list exposes only selected built-ins; a disabled list removes tools from the exposed set. Extension tools and MCP tools are appended separately.
 
-Optional research tools are also appended separately when enabled. `search` talks to an external SearXNG instance, `scrape` fetches and extracts readable URL text, and `security_search` queries public vulnerability sources. They are opt-in so ordinary headless coding sessions do not gain network research tools unexpectedly.
+Optional research tools are also appended separately when enabled. `research` runs an isolated quick-mode sub-agent, `search` talks to an external SearXNG instance, `scrape` fetches and extracts readable URL text, and `security_search` queries public vulnerability sources. They are opt-in so ordinary headless coding sessions do not gain network research tools unexpectedly.
 
 There is no separate research-specific grep tool. The built-in `grep` is the canonical local search tool and returns structured match metadata that future research orchestration can count under its gathering budget.
 

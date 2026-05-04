@@ -1,20 +1,34 @@
 package researchadapter
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/badlogic/pigo/pkg/agentcore"
+	"github.com/badlogic/pigo/pkg/ai"
 )
 
-var toolNames = []string{"search", "scrape", "security_search"}
+var toolNames = []string{"research", "search", "scrape", "security_search"}
 
 type Config struct {
-	Tools      []string     `json:"tools,omitempty"`
-	SearXNGURL string       `json:"searxngUrl,omitempty"`
-	NVDAPIKey  string       `json:"-"`
-	HTTPClient *http.Client `json:"-"`
+	Tools      []string              `json:"tools,omitempty"`
+	SearXNGURL string                `json:"searxngUrl,omitempty"`
+	NVDAPIKey  string                `json:"-"`
+	HTTPClient *http.Client          `json:"-"`
+	Host       Host                  `json:"-"`
+	EventSink  func(agentcore.Event) `json:"-"`
+	Now        func() time.Time      `json:"-"`
+}
+
+type Host interface {
+	Root() string
+	Model() (provider string, model string)
+	APIKey(ctx context.Context, provider string) string
+	WorkspaceTools() ([]agentcore.Tool, []ai.Tool)
 }
 
 func ToolNames() []string {

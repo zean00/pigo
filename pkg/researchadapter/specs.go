@@ -2,6 +2,23 @@ package researchadapter
 
 import "github.com/badlogic/pigo/pkg/ai"
 
+func researchSpec() ai.Tool {
+	return ai.Tool{
+		Name:        "research",
+		Description: "Run an isolated quick research sub-agent and return a synthesized Markdown report.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"query": map[string]any{"type": "string"},
+				"depth": map[string]any{"type": "number", "minimum": 0, "maximum": 0},
+				"model": map[string]any{"type": "string"},
+			},
+			"required":             []string{"query"},
+			"additionalProperties": false,
+		},
+	}
+}
+
 func searchSpec() ai.Tool {
 	return ai.Tool{
 		Name:        "search",

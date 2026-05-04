@@ -245,6 +245,7 @@ Available research tools:
 
 | Tool | Behavior |
 | --- | --- |
+| `research` | Run an isolated quick research sub-agent and return a Markdown report. |
 | `search` | Query an external SearXNG instance and return titles, URLs, and snippets. |
 | `scrape` | Fetch HTTP(S) URLs and extract compact readable text. |
 | `security_search` | Search public vulnerability sources such as OSV, NVD, and CISA KEV. |
@@ -263,6 +264,14 @@ The JSONL RPC adapter supports:
 
 - `set_research_tools`
 - `get_research_tools`
+
+Local SearXNG smoke validation can be run with Docker:
+
+```bash
+scripts/test-searxng.sh
+```
+
+The script starts `searxng/searxng`, waits for JSON search readiness, runs the live `search` smoke test, and removes the container.
 
 ## MCP Configuration
 

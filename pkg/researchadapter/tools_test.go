@@ -80,6 +80,14 @@ func TestScrapeToolRequiresObscuraURL(t *testing.T) {
 	}
 }
 
+func TestScrapeToolRejectsUnknownEngine(t *testing.T) {
+	tools, _ := Tools(Config{Tools: []string{"scrape"}})
+	result := tools[0].Execute(context.Background(), ai.ContentBlock{Arguments: map[string]any{"url": "https://example.test", "engine": "unknown"}})
+	if !result.IsError || !strings.Contains(result.Text, "unsupported scrape engine") {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
 func TestScrapeToolUsesObscuraCDP(t *testing.T) {
 	server := httptest.NewServer(websocket.Handler(func(conn *websocket.Conn) {
 		for {

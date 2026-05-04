@@ -48,7 +48,7 @@ func scrapeSpec() ai.Tool {
 				"urls":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": maxScrapeURLs},
 				"engine":    map[string]any{"type": "string", "enum": []string{"http", "obscura"}},
 				"render":    map[string]any{"type": "boolean"},
-				"waitUntil": map[string]any{"type": "string", "enum": []string{"load", "domcontentloaded", "networkidle0"}},
+				"waitUntil": map[string]any{"type": "string", "enum": []string{"load", "domcontentloaded"}},
 				"timeout":   map[string]any{"type": "number", "minimum": 1, "maximum": 120},
 			},
 			"additionalProperties": false,

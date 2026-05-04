@@ -25,4 +25,4 @@ RUN set -eux; \
 EXPOSE 9222
 
 ENTRYPOINT ["/usr/local/bin/obscura"]
-CMD ["serve", "--port", "9222", "--stealth", "--obey-robots"]
+CMD ["serve", "--port", "9222", "--stealth"]

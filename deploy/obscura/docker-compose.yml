@@ -8,17 +8,15 @@ services:
     command:
       - serve
       - --port
-      - "9222"
+      - "${OBSCURA_PORT:-9222}"
       - --stealth
-      - --obey-robots
       - --workers
       - "${OBSCURA_WORKERS:-1}"
-    ports:
-      - "${OBSCURA_HOST:-127.0.0.1}:${OBSCURA_PORT:-9222}:9222"
+    network_mode: host
     restart: unless-stopped
     shm_size: "512mb"
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9222/json/version"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:${OBSCURA_PORT:-9222}/json/version"]
       interval: 10s
       timeout: 5s
       retries: 12

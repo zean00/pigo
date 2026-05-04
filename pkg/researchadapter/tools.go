@@ -182,7 +182,10 @@ func scrapeTool(config Config) agentcore.Tool {
 		if len(urls) > maxScrapeURLs {
 			return agentcore.ToolResult{Text: fmt.Sprintf("scrape accepts at most %d URLs per call", maxScrapeURLs), IsError: true}
 		}
-		engine := scrapeEngine(call.Arguments)
+		engine, err := scrapeEngine(call.Arguments)
+		if err != nil {
+			return agentcore.ToolResult{Text: err.Error(), IsError: true}
+		}
 		if engine == "obscura" && strings.TrimSpace(config.ObscuraURL) == "" {
 			return agentcore.ToolResult{Text: "scrape engine obscura requires PIGO_OBSCURA_URL or OBSCURA_URL", IsError: true}
 		}
@@ -276,15 +279,19 @@ func scrapeOne(ctx context.Context, config Config, rawURL string, options scrape
 	}
 }
 
-func scrapeEngine(args map[string]any) string {
+func scrapeEngine(args map[string]any) (string, error) {
 	engine := strings.ToLower(strings.TrimSpace(stringArg(args["engine"], "")))
-	if engine == "obscura" {
-		return "obscura"
+	switch engine {
+	case "", "http":
+	case "obscura":
+		return "obscura", nil
+	default:
+		return "", fmt.Errorf("unsupported scrape engine %q", engine)
 	}
 	if value, ok := args["render"].(bool); ok && value {
-		return "obscura"
+		return "obscura", nil
 	}
-	return "http"
+	return "http", nil
 }
 
 func securityTool(config Config) agentcore.Tool {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -34,7 +35,7 @@ func scrapeOneObscura(ctx context.Context, config Config, rawURL string, options
 	if err != nil {
 		return scrapeResult{URL: rawURL, Engine: "obscura", Error: err.Error()}
 	}
-	client, err := newObscuraClient(wsURL, timeout)
+	client, err := newObscuraClient(ctx, wsURL, timeout)
 	if err != nil {
 		return scrapeResult{URL: rawURL, Engine: "obscura", Error: err.Error()}
 	}
@@ -89,9 +90,13 @@ func obscuraWebSocketURL(ctx context.Context, config Config) (string, error) {
 	return parsed.String(), nil
 }
 
-func newObscuraClient(wsURL string, timeout time.Duration) (*obscuraClient, error) {
-	origin := "http://localhost"
-	conn, err := websocket.Dial(wsURL, "", origin)
+func newObscuraClient(ctx context.Context, wsURL string, timeout time.Duration) (*obscuraClient, error) {
+	config, err := websocket.NewConfig(wsURL, "http://localhost")
+	if err != nil {
+		return nil, err
+	}
+	config.Dialer = &net.Dialer{Timeout: timeout}
+	conn, err := config.DialContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +194,11 @@ func (c *obscuraClient) command(ctx context.Context, sessionID, method string, p
 	if params != nil {
 		request["params"] = params
 	}
-	if err := c.conn.SetDeadline(time.Now().Add(c.timeout)); err != nil {
+	deadline := time.Now().Add(c.timeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	if err := c.conn.SetDeadline(deadline); err != nil {
 		return nil, err
 	}
 	if err := websocket.JSON.Send(c.conn, request); err != nil {

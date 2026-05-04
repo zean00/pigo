@@ -265,6 +265,8 @@ docker compose up -d --build
 export PIGO_OBSCURA_URL=http://localhost:9222
 ```
 
+The template uses host networking because the current Obscura `serve` command binds to `127.0.0.1` inside the container.
+
 `PIGO_NVD_API_KEY` falls back to `NVD_API_KEY`. It is optional, but helps avoid anonymous NVD API rate limits. ACP config state reports only whether a key is configured, not the key value.
 
 ACP sessions expose these config options:

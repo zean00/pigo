@@ -829,6 +829,21 @@ func (s *Session) RuntimeEvents() []agentcore.Event {
 	return out
 }
 
+func (s *Session) appendRuntimeEvent(event agentcore.Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Events = append(s.Events, event)
+}
+
+func (s *Session) appendRuntimeEvents(events []agentcore.Event) {
+	if len(events) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Events = append(s.Events, events...)
+}
+
 func copySlashCommands(commands []SlashCommandInfo) []SlashCommandInfo {
 	if len(commands) == 0 {
 		return nil
@@ -1391,7 +1406,7 @@ func (s *Session) applyPromptStreamEvent(state *promptStreamState, event agentco
 		if !ok {
 			break
 		}
-		s.Events = append(s.Events, event)
+		s.appendRuntimeEvent(event)
 		state.activeMessage = cloneAgentcoreMessage(message)
 		state.activeMessageIdx = len(state.messages)
 		state.messages = append(state.messages, cloneAgentcoreMessage(message))
@@ -1404,7 +1419,7 @@ func (s *Session) applyPromptStreamEvent(state *promptStreamState, event agentco
 		if !ok {
 			break
 		}
-		s.Events = append(s.Events, event)
+		s.appendRuntimeEvent(event)
 		state.activeMessage = cloneAgentcoreMessage(message)
 		state.messages[state.activeMessageIdx] = cloneAgentcoreMessage(message)
 		return
@@ -1419,16 +1434,16 @@ func (s *Session) applyPromptStreamEvent(state *promptStreamState, event agentco
 		}
 		state.activeMessage = nil
 		state.activeMessageIdx = -1
-		s.Events = append(s.Events, event)
+		s.appendRuntimeEvent(event)
 		return
 	}
 
 	if eventType == "agent_start" || eventType == "turn_start" || eventType == "turn_end" ||
 		eventType == "tool_execution_start" || eventType == "tool_execution_update" || eventType == "tool_execution_end" {
-		s.Events = append(s.Events, event)
+		s.appendRuntimeEvent(event)
 		return
 	}
-	s.Events = append(s.Events, event)
+	s.appendRuntimeEvent(event)
 }
 
 func (s *Session) emitSessionEvent(eventType string, data map[string]any) {
@@ -1439,7 +1454,7 @@ func (s *Session) emitSessionEvent(eventType string, data map[string]any) {
 	for key, value := range data {
 		event[key] = value
 	}
-	s.Events = append(s.Events, event)
+	s.appendRuntimeEvent(event)
 }
 
 func (s *Session) EmitSessionStart(reason, previousSessionFile string) {
@@ -1818,7 +1833,7 @@ func (s *Session) promptWithSource(ctx context.Context, prompt string, attachmen
 	}
 
 	if usedScriptedTurns {
-		s.Events = append(s.Events, loop.Events...)
+		s.appendRuntimeEvents(loop.Events)
 		for _, message := range loop.Messages {
 			if err := s.appendEntry(SessionEntry{Type: "message", Message: message}); err != nil {
 				return err
@@ -1935,7 +1950,7 @@ func (s *Session) builtinTools() []agentcore.Tool {
 	researchConfig := s.ResearchConfig
 	researchConfig.Host = sessionResearchHost{session: s}
 	researchConfig.EventSink = func(event agentcore.Event) {
-		s.Events = append(s.Events, event)
+		s.appendRuntimeEvent(event)
 	}
 	researchTools, _ := researchadapter.Tools(researchConfig)
 	tools = append(tools, researchTools...)

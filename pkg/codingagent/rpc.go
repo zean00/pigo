@@ -39,31 +39,38 @@ type rpcCommand struct {
 	Summary            string `json:"summary,omitempty"`
 	Path               string `json:"path,omitempty"`
 	// "name" is used by set_session_name.
-	SessionPath      string               `json:"sessionPath,omitempty"`
-	EntryID          string               `json:"entryId,omitempty"`
-	OutputPath       string               `json:"outputPath,omitempty"`
-	AgentDir         string               `json:"agentDir,omitempty"`
-	PromptPaths      []string             `json:"promptPaths,omitempty"`
-	SkillPaths       []string             `json:"skillPaths,omitempty"`
-	IncludeDefaults  *bool                `json:"includeDefaults,omitempty"`
-	Commands         []SlashCommandInfo   `json:"commands,omitempty"`
-	Flags            []ExtensionFlag      `json:"flags,omitempty"`
-	Value            any                  `json:"value,omitempty"`
-	Status           string               `json:"status,omitempty"`
-	EnabledFilters   []string             `json:"enabledFilters,omitempty"`
-	DisabledFilters  []string             `json:"disabledFilters,omitempty"`
-	MaxBytes         int                  `json:"maxBytes,omitempty"`
-	Allow            []string             `json:"allow,omitempty"`
-	Deny             []string             `json:"deny,omitempty"`
-	Tools            []string             `json:"tools,omitempty"`
-	EnabledTools     []string             `json:"enabledTools,omitempty"`
-	DisabledTools    []string             `json:"disabledTools,omitempty"`
-	ResearchTools    []string             `json:"researchTools,omitempty"`
-	SearXNGURL       string               `json:"searxngUrl,omitempty"`
-	ObscuraURL       string               `json:"obscuraUrl,omitempty"`
-	NVDAPIKey        string               `json:"nvdApiKey,omitempty"`
-	OAuthCredentials *ai.OAuthCredentials `json:"oauthCredentials,omitempty"`
-	OAuthStorePath   string               `json:"oauthStorePath,omitempty"`
+	SessionPath         string               `json:"sessionPath,omitempty"`
+	EntryID             string               `json:"entryId,omitempty"`
+	OutputPath          string               `json:"outputPath,omitempty"`
+	AgentDir            string               `json:"agentDir,omitempty"`
+	PromptPaths         []string             `json:"promptPaths,omitempty"`
+	SkillPaths          []string             `json:"skillPaths,omitempty"`
+	IncludeDefaults     *bool                `json:"includeDefaults,omitempty"`
+	Commands            []SlashCommandInfo   `json:"commands,omitempty"`
+	Flags               []ExtensionFlag      `json:"flags,omitempty"`
+	Value               any                  `json:"value,omitempty"`
+	Status              string               `json:"status,omitempty"`
+	EnabledFilters      []string             `json:"enabledFilters,omitempty"`
+	DisabledFilters     []string             `json:"disabledFilters,omitempty"`
+	MaxBytes            int                  `json:"maxBytes,omitempty"`
+	Limit               int                  `json:"limit,omitempty"`
+	MaxInputTokens      *int                 `json:"maxInputTokens,omitempty"`
+	MaxOutputTokens     *int                 `json:"maxOutputTokens,omitempty"`
+	MaxCacheReadTokens  *int                 `json:"maxCacheReadTokens,omitempty"`
+	MaxCacheWriteTokens *int                 `json:"maxCacheWriteTokens,omitempty"`
+	MaxTotalTokens      *int                 `json:"maxTotalTokens,omitempty"`
+	MaxCost             *float64             `json:"maxCost,omitempty"`
+	Allow               []string             `json:"allow,omitempty"`
+	Deny                []string             `json:"deny,omitempty"`
+	Tools               []string             `json:"tools,omitempty"`
+	EnabledTools        []string             `json:"enabledTools,omitempty"`
+	DisabledTools       []string             `json:"disabledTools,omitempty"`
+	ResearchTools       []string             `json:"researchTools,omitempty"`
+	SearXNGURL          string               `json:"searxngUrl,omitempty"`
+	ObscuraURL          string               `json:"obscuraUrl,omitempty"`
+	NVDAPIKey           string               `json:"nvdApiKey,omitempty"`
+	OAuthCredentials    *ai.OAuthCredentials `json:"oauthCredentials,omitempty"`
+	OAuthStorePath      string               `json:"oauthStorePath,omitempty"`
 }
 
 type rpcResponse struct {
@@ -487,6 +494,43 @@ func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse 
 
 	case "get_session_stats":
 		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: s.Session.Stats()}
+
+	case "set_usage_quota":
+		config := s.Session.GetUsageQuota()
+		if strings.TrimSpace(command.Mode) != "" {
+			config.Mode = command.Mode
+		}
+		if command.MaxInputTokens != nil {
+			config.MaxInputTokens = *command.MaxInputTokens
+		}
+		if command.MaxOutputTokens != nil {
+			config.MaxOutputTokens = *command.MaxOutputTokens
+		}
+		if command.MaxCacheReadTokens != nil {
+			config.MaxCacheReadTokens = *command.MaxCacheReadTokens
+		}
+		if command.MaxCacheWriteTokens != nil {
+			config.MaxCacheWriteTokens = *command.MaxCacheWriteTokens
+		}
+		if command.MaxTotalTokens != nil {
+			config.MaxTotalTokens = *command.MaxTotalTokens
+		}
+		if command.MaxCost != nil {
+			config.MaxCost = *command.MaxCost
+		}
+		if err := s.Session.SetUsageQuota(config); err != nil {
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+		}
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: s.Session.GetUsageQuota().Metadata()}
+
+	case "get_usage_quota":
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: s.Session.UsageQuotaStatus(ai.Usage{})}
+
+	case "get_usage_ledger":
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: map[string]any{
+			"entries": s.Session.UsageLedgerEntries(command.Limit),
+			"quota":   s.Session.UsageQuotaStatus(ai.Usage{}),
+		}}
 
 	case "export_html":
 		path, err := s.Session.ExportToHTML(command.OutputPath)

@@ -3,6 +3,7 @@ package codingagent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -448,6 +449,94 @@ func TestSessionProviderLoopForwardsInterleavedToolExecution(t *testing.T) {
 
 	if err := session.Prompt(context.Background(), "hello"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSessionUsageLedgerRecordsUsageAndCost(t *testing.T) {
+	const providerName = "usage-ledger-provider"
+	ai.RegisterModel(ai.Model{
+		Provider: providerName,
+		ID:       "priced",
+		API:      "x-test",
+		Cost:     ai.ModelCost{Input: 2, Output: 4},
+	})
+	defer ai.ClearProviderModels(providerName)
+	ai.RegisterProvider(providerName, providerFunc(func(_ context.Context, _ ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error) {
+		return ai.NormalizedResult{
+			Role:       "assistant",
+			StopReason: "stop",
+			Text:       "ok",
+			Content:    []any{map[string]any{"type": "text", "text": "ok"}},
+			Usage:      &ai.Usage{Input: 1000, Output: 500, TotalTokens: 1500},
+		}, nil, nil
+	}))
+
+	session := NewSession(t.TempDir(), nil)
+	session.Store = NewSessionStore(filepath.Join(t.TempDir(), "session.jsonl"))
+	if _, err := session.SetModel(providerName, "priced"); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Prompt(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+
+	stats := session.Stats()
+	if stats.Tokens.Total != 1500 || stats.Cost != 0.004 {
+		t.Fatalf("stats = %#v", stats)
+	}
+	entries := session.UsageLedgerEntries(10)
+	if len(entries) != 1 || !entries[0].PricingKnown || entries[0].Usage.Cost.Total != 0.004 {
+		t.Fatalf("ledger = %#v", entries)
+	}
+	stored, err := session.Store.ReadEntries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, entry := range stored {
+		if entry.Type == "usage_ledger" && entry.UsageLedger != nil {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("stored entries = %#v", stored)
+	}
+}
+
+func TestSessionUsageQuotaBlocksNextProviderRound(t *testing.T) {
+	const providerName = "usage-quota-provider"
+	calls := 0
+	ai.RegisterProvider(providerName, providerFunc(func(_ context.Context, _ ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error) {
+		calls++
+		if calls == 1 {
+			return ai.NormalizedResult{
+				Role:       "assistant",
+				StopReason: "toolUse",
+				Content: []any{
+					map[string]any{"type": "toolCall", "id": "tc-1", "name": "echo", "arguments": map[string]any{}},
+				},
+				Usage: &ai.Usage{Input: 4, Output: 4, TotalTokens: 8},
+			}, nil, nil
+		}
+		return ai.NormalizedResult{Role: "assistant", StopReason: "stop", Text: "done", Content: []any{map[string]any{"type": "text", "text": "done"}}}, nil, nil
+	}))
+
+	session := NewSession(t.TempDir(), nil)
+	if _, err := session.SetModel(providerName, "test-model"); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.SetUsageQuota(UsageQuotaConfig{Mode: UsageQuotaEnforce, MaxTotalTokens: 5}); err != nil {
+		t.Fatal(err)
+	}
+	err := session.Prompt(context.Background(), "hello")
+	if !errors.Is(err, ErrUsageQuotaExceeded) {
+		t.Fatalf("err = %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("provider calls = %d", calls)
+	}
+	if len(session.UsageLedgerEntries(10)) != 1 {
+		t.Fatalf("ledger = %#v", session.UsageLedgerEntries(10))
 	}
 }
 

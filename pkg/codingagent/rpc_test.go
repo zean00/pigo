@@ -274,6 +274,39 @@ func TestRPCSessionStatsAndPersistence(t *testing.T) {
 	}
 }
 
+func TestRPCUsageQuotaAndLedger(t *testing.T) {
+	session := NewSession(t.TempDir(), nil)
+	session.UsageLedger = []UsageLedgerEntry{{
+		Timestamp:    "2024-01-01T00:00:00Z",
+		MessageID:    "m1",
+		Provider:     "openai",
+		ModelID:      "gpt",
+		Usage:        ai.Usage{Input: 1, Output: 2, TotalTokens: 3},
+		PricingKnown: true,
+	}}
+	var out bytes.Buffer
+	server := RPCServer{Session: session}
+	input := strings.NewReader(
+		`{"id":"q1","type":"set_usage_quota","mode":"enforce","maxTotalTokens":10,"maxCost":0.5}` + "\n" +
+			`{"id":"q2","type":"get_usage_quota"}` + "\n" +
+			`{"id":"l1","type":"get_usage_ledger","limit":1}` + "\n",
+	)
+
+	if err := server.Serve(context.Background(), input, &out); err != nil {
+		t.Fatal(err)
+	}
+	responses := decodeRPCResponses(t, out.String())
+	quota := responses[1]["data"].(map[string]any)
+	if quota["mode"] != "enforce" || quota["enabled"] != true {
+		t.Fatalf("quota = %#v", quota)
+	}
+	ledger := responses[2]["data"].(map[string]any)
+	entries := ledger["entries"].([]any)
+	if len(entries) != 1 {
+		t.Fatalf("ledger = %#v", ledger)
+	}
+}
+
 func TestRPCSetSessionNameAndThinkingLevel(t *testing.T) {
 	session := NewSession(t.TempDir(), nil)
 	var out bytes.Buffer

@@ -650,6 +650,42 @@ func TestSessionStateAndSetters(t *testing.T) {
 		t.Fatalf("config options = %#v", options)
 	}
 
+	setUsageQuota, rpcErr := server.handleRequest(context.Background(), jsonrpcRequest{
+		Method: "session/set_config_option",
+		Params: json.RawMessage(`{"sessionId":` + quote(sessionID) + `,"configId":"usage_quota","value":"enforce"}`),
+	})
+	if rpcErr != nil {
+		t.Fatalf("set usage quota option error = %#v", rpcErr)
+	}
+	options = setUsageQuota.(map[string]any)["configOptions"].([]map[string]any)
+	found = false
+	for _, option := range options {
+		if option["id"] == "usage_quota" && option["currentValue"] == "enforce" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("config options = %#v", options)
+	}
+
+	setUsageLimit, rpcErr := server.handleRequest(context.Background(), jsonrpcRequest{
+		Method: "session/set_config_option",
+		Params: json.RawMessage(`{"sessionId":` + quote(sessionID) + `,"configId":"usage_max_total_tokens","value":"100"}`),
+	})
+	if rpcErr != nil {
+		t.Fatalf("set usage limit option error = %#v", rpcErr)
+	}
+	options = setUsageLimit.(map[string]any)["configOptions"].([]map[string]any)
+	found = false
+	for _, option := range options {
+		if option["id"] == "usage_max_total_tokens" && option["currentValue"] == "100" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("config options = %#v", options)
+	}
+
 	setResearch, rpcErr := server.handleRequest(context.Background(), jsonrpcRequest{
 		Method: "session/set_config_option",
 		Params: json.RawMessage(`{"sessionId":` + quote(sessionID) + `,"configId":"research_tools","value":"search,scrape"}`),

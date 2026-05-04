@@ -37,6 +37,8 @@ type SessionEntry struct {
 	TokensBefore     int                  `json:"tokensBefore,omitempty"`
 	OAuthProvider    string               `json:"oauthProvider,omitempty"`
 	OAuthCredentials *ai.OAuthCredentials `json:"-"`
+	UsageLedger      *UsageLedgerEntry    `json:"usageLedger,omitempty"`
+	UsageQuota       *UsageQuotaConfig    `json:"usageQuota,omitempty"`
 }
 
 type SessionStore struct {

@@ -120,6 +120,35 @@ ACP clients can choose the tool execution mode with `session/set_config_option`:
 
 Supported values are `parallel`, `sequential`, and `interleaved`. Interleaved mode executes one tool call, returns that result to the model, and lets the model reason before choosing the next tool.
 
+## Usage Quotas Through ACP
+
+ACP clients can enable per-session usage quotas with `session/set_config_option`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "method": "session/set_config_option",
+  "params": {
+    "sessionId": "session-id",
+    "configId": "usage_quota",
+    "value": "enforce"
+  }
+}
+```
+
+The related options are:
+
+- `usage_quota`: `off` or `enforce`.
+- `usage_max_input_tokens`
+- `usage_max_output_tokens`
+- `usage_max_cache_read_tokens`
+- `usage_max_cache_write_tokens`
+- `usage_max_total_tokens`
+- `usage_max_cost`
+
+Quota checks run before provider calls. If a provider response exceeds a limit, pigo records the response usage and blocks the next provider call.
+
 ## Command Compression Through ACP
 
 ACP clients can configure command-output compression with `session/set_config_option`:

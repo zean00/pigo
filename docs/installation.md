@@ -58,6 +58,12 @@ Use a session file:
 printf '{"id":"stats1","type":"get_session_stats"}\n' | go run ./cmd/pigo-rpc --session-file tmp/session.jsonl
 ```
 
+Enable a per-session usage quota:
+
+```bash
+printf '{"id":"q1","type":"set_usage_quota","mode":"enforce","maxTotalTokens":100000}\n' | go run ./cmd/pigo-rpc --session-file tmp/session.jsonl
+```
+
 Use an OAuth credential store:
 
 ```bash

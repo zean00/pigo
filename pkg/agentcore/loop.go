@@ -539,6 +539,13 @@ func applyUsage(message Message, usage *ai.Usage) {
 		"cacheRead":   usage.CacheRead,
 		"cacheWrite":  usage.CacheWrite,
 		"totalTokens": usage.TotalTokens,
+		"cost": map[string]any{
+			"input":      usage.Cost.Input,
+			"output":     usage.Cost.Output,
+			"cacheRead":  usage.Cost.CacheRead,
+			"cacheWrite": usage.Cost.CacheWrite,
+			"total":      usage.Cost.Total,
+		},
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -829,6 +830,37 @@ func (s *Server) setConfigOption(params setConfigOptionParams) (any, *jsonrpcErr
 		config := session.Session.GetResearchConfig()
 		config.NVDAPIKey = value
 		err = session.Session.SetResearchConfig(config)
+	case "usage_quota":
+		config := session.Session.GetUsageQuota()
+		config.Mode = value
+		err = session.Session.SetUsageQuota(config)
+	case "usage_max_input_tokens", "usage_max_output_tokens", "usage_max_cache_read_tokens", "usage_max_cache_write_tokens", "usage_max_total_tokens":
+		var parsed int
+		parsed, err = strconv.Atoi(value)
+		if err == nil {
+			config := session.Session.GetUsageQuota()
+			switch strings.TrimSpace(params.ConfigID) {
+			case "usage_max_input_tokens":
+				config.MaxInputTokens = parsed
+			case "usage_max_output_tokens":
+				config.MaxOutputTokens = parsed
+			case "usage_max_cache_read_tokens":
+				config.MaxCacheReadTokens = parsed
+			case "usage_max_cache_write_tokens":
+				config.MaxCacheWriteTokens = parsed
+			case "usage_max_total_tokens":
+				config.MaxTotalTokens = parsed
+			}
+			err = session.Session.SetUsageQuota(config)
+		}
+	case "usage_max_cost":
+		var parsed float64
+		parsed, err = strconv.ParseFloat(value, 64)
+		if err == nil {
+			config := session.Session.GetUsageQuota()
+			config.MaxCost = parsed
+			err = session.Session.SetUsageQuota(config)
+		}
 	default:
 		return nil, invalidParams(fmt.Errorf("unknown config option %q", params.ConfigID))
 	}
@@ -904,6 +936,7 @@ func acpConfigOptions(session *codingagent.Session) []map[string]any {
 	permission := session.GetBashPermissionPolicy()
 	toolPolicy := session.GetBuiltinToolPolicy()
 	researchConfig := session.GetResearchConfig()
+	usageQuota := session.GetUsageQuota()
 	return []map[string]any{
 		selectConfigOption("thinking_level", "Thinking level", session.ThinkingLevel, []string{"off", "low", "medium", "high", "xhigh"}),
 		selectConfigOption("steering_mode", "Steering mode", session.SteeringMode, []string{"one-at-a-time", "all"}),
@@ -921,6 +954,13 @@ func acpConfigOptions(session *codingagent.Session) []map[string]any {
 		stringConfigOption("research_searxng_url", "Research SearXNG URL", researchConfig.SearXNGURL),
 		stringConfigOption("research_obscura_url", "Research Obscura URL", researchConfig.ObscuraURL),
 		stringConfigOption("research_nvd_api_key", "Research NVD API key", maskSecret(researchConfig.NVDAPIKey)),
+		selectConfigOption("usage_quota", "Usage quota", usageQuota.Mode, []string{"off", "enforce"}),
+		stringConfigOption("usage_max_input_tokens", "Usage max input tokens", fmt.Sprint(usageQuota.MaxInputTokens)),
+		stringConfigOption("usage_max_output_tokens", "Usage max output tokens", fmt.Sprint(usageQuota.MaxOutputTokens)),
+		stringConfigOption("usage_max_cache_read_tokens", "Usage max cache read tokens", fmt.Sprint(usageQuota.MaxCacheReadTokens)),
+		stringConfigOption("usage_max_cache_write_tokens", "Usage max cache write tokens", fmt.Sprint(usageQuota.MaxCacheWriteTokens)),
+		stringConfigOption("usage_max_total_tokens", "Usage max total tokens", fmt.Sprint(usageQuota.MaxTotalTokens)),
+		stringConfigOption("usage_max_cost", "Usage max cost", fmt.Sprintf("%g", usageQuota.MaxCost)),
 		modelConfigOption(session),
 	}
 }
@@ -949,15 +989,21 @@ func selectConfigOption(id, name, current string, values []string) map[string]an
 		option["category"] = "thought_level"
 	case "steering_mode", "follow_up_mode", "tool_execution":
 		option["category"] = "mode"
+	case "usage_quota":
+		option["category"] = "usage"
 	}
 	return option
 }
 
 func stringConfigOption(id, name, current string) map[string]any {
+	category := "command_output"
+	if strings.HasPrefix(id, "usage_") {
+		category = "usage"
+	}
 	return map[string]any{
 		"id":           id,
 		"name":         name,
-		"category":     "command_output",
+		"category":     category,
 		"type":         "text",
 		"currentValue": current,
 	}

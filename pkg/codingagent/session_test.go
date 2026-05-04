@@ -301,6 +301,50 @@ func TestSessionBranchAndTree(t *testing.T) {
 	}
 }
 
+func TestUsageQuotaUsesLedgerAfterBranching(t *testing.T) {
+	session := NewSession(t.TempDir(), nil)
+
+	appendNode := func(id, parentID, role, text string) {
+		if err := session.appendEntry(SessionEntry{
+			ID:       id,
+			Type:     "message",
+			ParentID: parentID,
+			Message: map[string]any{
+				"role": role,
+				"text": text,
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	appendNode("u1", "", "user", "first")
+	appendNode("a1", "u1", "assistant", "answer")
+	firstUsage := UsageLedgerEntry{Usage: ai.Usage{Input: 10, TotalTokens: 10}, PricingKnown: true}
+	if err := session.appendMetadataEntry(SessionEntry{Type: "usage_ledger", UsageLedger: &firstUsage}); err != nil {
+		t.Fatal(err)
+	}
+	appendNode("u2", "a1", "user", "second")
+	appendNode("a2", "u2", "assistant", "answer two")
+	secondUsage := UsageLedgerEntry{Usage: ai.Usage{Input: 10, TotalTokens: 10}, PricingKnown: true}
+	if err := session.appendMetadataEntry(SessionEntry{Type: "usage_ledger", UsageLedger: &secondUsage}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := session.SetUsageQuota(UsageQuotaConfig{Mode: UsageQuotaEnforce, MaxTotalTokens: 15}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Branch("a1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Messages) != 2 {
+		t.Fatalf("messages = %#v", session.Messages)
+	}
+	if err := session.CheckUsageQuota(ai.Usage{}); !errors.Is(err, ErrUsageQuotaExceeded) {
+		t.Fatalf("quota error = %v", err)
+	}
+}
+
 func TestExportToJSONLLinearizesCurrentBranch(t *testing.T) {
 	root := t.TempDir()
 	session := NewSession(root, nil)
@@ -492,6 +536,45 @@ func TestSessionCompactionEventsAndContextUsage(t *testing.T) {
 	}
 	if !seenBefore || !seenAfter {
 		t.Fatalf("compaction events = %#v", session.Events)
+	}
+}
+
+func TestUsageLedgerMetadataDoesNotAffectTreeAndReloads(t *testing.T) {
+	session := NewSession(t.TempDir(), nil)
+	if err := session.appendEntry(SessionEntry{Type: "message", Message: agentcore.Message{"role": "user", "text": "hi"}}); err != nil {
+		t.Fatal(err)
+	}
+	assistant := agentcore.Message{
+		"role": "assistant",
+		"text": "ok",
+		"usage": map[string]any{
+			"input":       1,
+			"output":      2,
+			"totalTokens": 3,
+			"cost":        map[string]any{"total": 0.01},
+		},
+	}
+	if err := session.appendEntry(SessionEntry{Type: "message", Message: assistant}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.appendUsageLedgerForMessage(assistant, session.leafID); err != nil {
+		t.Fatal(err)
+	}
+	if nodes := session.Tree(); len(nodes) != 1 || len(nodes[0].Children) != 1 {
+		t.Fatalf("tree = %#v", nodes)
+	}
+	path := filepath.Join(t.TempDir(), "export.jsonl")
+	if _, err := session.ExportToJSONL(path); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := NewSessionStore(path).ReadEntries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloaded := NewSession(t.TempDir(), nil)
+	reloaded.loadSession(entries)
+	if len(reloaded.Messages) != 2 || len(reloaded.UsageLedgerEntries(10)) != 1 {
+		t.Fatalf("messages=%#v ledger=%#v", reloaded.Messages, reloaded.UsageLedgerEntries(10))
 	}
 }
 

@@ -41,6 +41,7 @@ type SessionInput struct {
 	CommandCompression CommandOutputCompressionConfig
 	BashPermission     BashPermissionPolicy
 	BuiltinToolPolicy  BuiltinToolPolicy
+	UsageQuota         UsageQuotaConfig
 	ResearchConfig     researchadapter.Config
 }
 
@@ -88,6 +89,11 @@ func RunHeadlessSession(ctx context.Context, root string, input SessionInput) (S
 	}
 	if len(input.BuiltinToolPolicy.Enabled) > 0 || len(input.BuiltinToolPolicy.Disabled) > 0 {
 		if err := session.SetBuiltinToolPolicy(input.BuiltinToolPolicy); err != nil {
+			return SessionResult{}, err
+		}
+	}
+	if input.UsageQuota.Mode != "" || input.UsageQuota.MaxInputTokens > 0 || input.UsageQuota.MaxOutputTokens > 0 || input.UsageQuota.MaxCacheReadTokens > 0 || input.UsageQuota.MaxCacheWriteTokens > 0 || input.UsageQuota.MaxTotalTokens > 0 || input.UsageQuota.MaxCost > 0 {
+		if err := session.SetUsageQuota(input.UsageQuota); err != nil {
 			return SessionResult{}, err
 		}
 	}

@@ -32,6 +32,8 @@ type Session struct {
 	ModelID            string
 	ToolExecution      agentcore.ToolExecutionMode
 	Store              *SessionStore
+	UsageQuota         UsageQuotaConfig
+	UsageLedger        []UsageLedgerEntry
 	SteeringMode       string
 	FollowUpMode       string
 	AutoCompaction     bool
@@ -315,6 +317,7 @@ type promptStreamState struct {
 	messages         []agentcore.Message
 	activeMessageIdx int
 	activeMessage    agentcore.Message
+	usage            ai.Usage
 }
 
 type ForkMessage struct {
@@ -383,8 +386,9 @@ type Stats struct {
 		CacheWrite int `json:"cacheWrite"`
 		Total      int `json:"total"`
 	} `json:"tokens"`
-	Cost         float64 `json:"cost"`
-	ContextUsage any     `json:"contextUsage,omitempty"`
+	Cost         float64          `json:"cost"`
+	Quota        UsageQuotaStatus `json:"quota"`
+	ContextUsage any              `json:"contextUsage,omitempty"`
 }
 
 type ContextUsage struct {
@@ -1429,7 +1433,13 @@ func (s *Session) applyPromptStreamEvent(state *promptStreamState, event agentco
 		if state.activeMessageIdx >= 0 && state.activeMessageIdx < len(state.messages) {
 			message, ok := event["message"].(agentcore.Message)
 			if ok {
+				s.enrichMessageUsageCost(message)
 				state.messages[state.activeMessageIdx] = cloneAgentcoreMessage(message)
+				if role, _ := message["role"].(string); role == "assistant" {
+					if usage, ok := usageFromMessage(message); ok {
+						state.usage = addUsage(state.usage, usage)
+					}
+				}
 			} else {
 				state.messages[state.activeMessageIdx] = state.activeMessage
 			}
@@ -1764,6 +1774,10 @@ func (s *Session) promptWithSource(ctx context.Context, prompt string, attachmen
 			s.mu.Unlock()
 			return fmt.Errorf("no scripted turns and no model configured")
 		}
+		if err := s.CheckUsageQuota(ai.Usage{}); err != nil {
+			cancel()
+			return err
+		}
 		chatOptions := ai.ChatOptions{}
 		if effort := strings.TrimSpace(s.ThinkingLevel); effort != "" && effort != "off" {
 			chatOptions.ReasoningEffort = effort
@@ -1794,15 +1808,26 @@ func (s *Session) promptWithSource(ctx context.Context, prompt string, attachmen
 			GetAPIKey: func(provider string) string {
 				return s.resolveProviderAPIKey(opCtx, provider)
 			},
-			TransformContextFunc: s.transformContextWithHooks,
-			BeforeToolCall:       s.applyToolCallHooks,
-			AfterToolCall:        s.applyToolResultHooks,
+			TransformContextFunc: func(ctx context.Context, messages []ai.Message) ([]ai.Message, error) {
+				if err := s.CheckUsageQuota(streamState.usage); err != nil {
+					return nil, err
+				}
+				return s.transformContextWithHooks(ctx, messages)
+			},
+			BeforeToolCall: s.applyToolCallHooks,
+			AfterToolCall:  s.applyToolResultHooks,
 			EventSink: func(event agentcore.Event) {
 				s.applyPromptStreamEvent(&streamState, event)
 			},
 		})
 	}
 	if err != nil {
+		if errors.Is(err, ErrUsageQuotaExceeded) && !usedScriptedTurns {
+			if persistErr := s.persistProviderLoopMessages(loop.Messages); persistErr != nil {
+				return persistErr
+			}
+			return err
+		}
 		shouldRetry := s.AutoRetry && !retrying && opCtx.Err() == nil
 		cancel()
 		if shouldRetry {
@@ -1845,22 +1870,33 @@ func (s *Session) promptWithSource(ctx context.Context, prompt string, attachmen
 		return s.triggerAutoCompaction(context.Background())
 	}
 
-	for _, message := range loop.Messages {
-		if message == nil || len(message) == 0 {
-			continue
-		}
-		if _, ok := message["role"]; !ok {
-			continue
-		}
-		if err := s.appendEntry(SessionEntry{Type: "message", Message: message}); err != nil {
-			return err
-		}
+	if err := s.persistProviderLoopMessages(loop.Messages); err != nil {
+		return err
 	}
 
 	streamState.activeMessageIdx = -1
 	streamState.activeMessage = nil
 
 	return s.triggerAutoCompaction(context.Background())
+}
+
+func (s *Session) persistProviderLoopMessages(messages []agentcore.Message) error {
+	for _, message := range messages {
+		if message == nil || len(message) == 0 {
+			continue
+		}
+		if _, ok := message["role"]; !ok {
+			continue
+		}
+		s.enrichMessageUsageCost(message)
+		if err := s.appendEntry(SessionEntry{Type: "message", Message: message}); err != nil {
+			return err
+		}
+		if err := s.appendUsageLedgerForMessage(message, s.leafID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Session) promptMessages(prompt string, attachments []PromptAttachment) ([]ai.Message, error) {
@@ -2218,6 +2254,8 @@ func (s *Session) TryNewSessionWithParent(ctx context.Context, parentSession str
 	s.Provider = ""
 	s.ModelID = ""
 	s.ToolExecution = ToolExecutionModeFromEnv()
+	s.UsageQuota = UsageQuotaConfigFromEnv()
+	s.UsageLedger = nil
 	s.SteeringMode = "one-at-a-time"
 	s.FollowUpMode = "one-at-a-time"
 	s.ShellCommandPrefix = ""
@@ -2330,6 +2368,142 @@ func (s *Session) SetToolExecutionMode(mode string) error {
 	}
 	s.ToolExecution = normalized
 	return nil
+}
+
+func (s *Session) SetUsageQuota(config UsageQuotaConfig) error {
+	if err := config.Validate(); err != nil {
+		return err
+	}
+	config = config.Normalized()
+	s.UsageQuota = config
+	return s.appendMetadataEntry(SessionEntry{Type: "usage_quota", UsageQuota: &config})
+}
+
+func (s *Session) GetUsageQuota() UsageQuotaConfig {
+	return s.UsageQuota.Normalized()
+}
+
+func (s *Session) UsageQuotaStatus(extra ai.Usage) UsageQuotaStatus {
+	usage := s.ledgerUsage()
+	usage = addUsage(usage, extra)
+	return s.usageQuotaStatusForUsage(usage)
+}
+
+func (s *Session) usageQuotaStatusForUsage(usage ai.Usage) UsageQuotaStatus {
+	config := s.GetUsageQuota()
+	status := UsageQuotaStatus{
+		Mode:       config.Mode,
+		Enabled:    config.Mode == UsageQuotaEnforce,
+		Limits:     config,
+		Usage:      usage,
+		EntryCount: len(s.UsageLedger),
+	}
+	if config.MaxInputTokens > 0 && usage.Input > config.MaxInputTokens {
+		status.Exceeded = append(status.Exceeded, "input")
+	}
+	if config.MaxOutputTokens > 0 && usage.Output > config.MaxOutputTokens {
+		status.Exceeded = append(status.Exceeded, "output")
+	}
+	if config.MaxCacheReadTokens > 0 && usage.CacheRead > config.MaxCacheReadTokens {
+		status.Exceeded = append(status.Exceeded, "cacheRead")
+	}
+	if config.MaxCacheWriteTokens > 0 && usage.CacheWrite > config.MaxCacheWriteTokens {
+		status.Exceeded = append(status.Exceeded, "cacheWrite")
+	}
+	if config.MaxTotalTokens > 0 && usage.TotalTokens > config.MaxTotalTokens {
+		status.Exceeded = append(status.Exceeded, "total")
+	}
+	if config.MaxCost > 0 {
+		if usage.Cost.Total > config.MaxCost {
+			status.Exceeded = append(status.Exceeded, "cost")
+		}
+		for _, entry := range s.UsageLedger {
+			if !entry.PricingKnown {
+				status.Warnings = append(status.Warnings, "cost quota cannot include usage from entries with unknown model pricing")
+				break
+			}
+		}
+	}
+	return status
+}
+
+func (s *Session) ledgerUsage() ai.Usage {
+	usage := ai.Usage{}
+	for _, entry := range s.UsageLedger {
+		usage = addUsage(usage, entry.Usage)
+	}
+	return usage
+}
+
+func (s *Session) CheckUsageQuota(extra ai.Usage) error {
+	status := s.UsageQuotaStatus(extra)
+	if !status.Enabled || len(status.Exceeded) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%w: %s", ErrUsageQuotaExceeded, strings.Join(status.Exceeded, ","))
+}
+
+func (s *Session) UsageLedgerEntries(limit int) []UsageLedgerEntry {
+	if limit <= 0 || limit > len(s.UsageLedger) {
+		limit = len(s.UsageLedger)
+	}
+	start := len(s.UsageLedger) - limit
+	out := make([]UsageLedgerEntry, limit)
+	copy(out, s.UsageLedger[start:])
+	return out
+}
+
+func (s *Session) appendUsageLedgerForMessage(message agentcore.Message, messageID string) error {
+	role, _ := message["role"].(string)
+	if role != "assistant" {
+		return nil
+	}
+	usage, ok := usageFromMessage(message)
+	if !ok {
+		return nil
+	}
+	pricingKnown := false
+	if model, ok := ai.GetModel(s.Provider, s.ModelID); ok {
+		pricingKnown = modelPricingKnown(model)
+		if pricingKnown && usage.Cost.Total == 0 {
+			usage = ai.CalculateCost(model, usage)
+		}
+	}
+	entry := UsageLedgerEntry{
+		Timestamp:    nowRFC3339Nano(),
+		MessageID:    messageID,
+		Provider:     s.Provider,
+		ModelID:      s.ModelID,
+		Usage:        usage,
+		PricingKnown: pricingKnown,
+	}
+	return s.appendMetadataEntry(SessionEntry{Type: "usage_ledger", UsageLedger: &entry})
+}
+
+func (s *Session) enrichMessageUsageCost(message agentcore.Message) {
+	usage, ok := usageFromMessage(message)
+	if !ok || usage.Cost.Total != 0 {
+		return
+	}
+	model, ok := ai.GetModel(s.Provider, s.ModelID)
+	if !ok || !modelPricingKnown(model) {
+		return
+	}
+	usage = ai.CalculateCost(model, usage)
+	message["usage"] = map[string]any{
+		"input":       usage.Input,
+		"output":      usage.Output,
+		"cacheRead":   usage.CacheRead,
+		"cacheWrite":  usage.CacheWrite,
+		"totalTokens": usage.TotalTokens,
+		"cost": map[string]any{
+			"input":      usage.Cost.Input,
+			"output":     usage.Cost.Output,
+			"cacheRead":  usage.Cost.CacheRead,
+			"cacheWrite": usage.Cost.CacheWrite,
+			"total":      usage.Cost.Total,
+		},
+	}
 }
 
 func (s *Session) SetThinkingLevel(level string) error {
@@ -2816,8 +2990,10 @@ func (s *Session) ExportToJSONL(outputPath string) (string, error) {
 	branch := s.resolveBranchEntries(s.leafID)
 	linear := linearizeSessionEntries(branch)
 	labels := s.labelEntriesForBranch(branch)
+	metadata := s.usageMetadataEntries()
 	exportEntries := append([]SessionEntry{header}, linear...)
 	exportEntries = append(exportEntries, labels...)
+	exportEntries = append(exportEntries, metadata...)
 	return outputPath, writeSessionEntries(outputPath, exportEntries)
 }
 
@@ -3030,7 +3206,7 @@ func (s *Session) Tree() []SessionTreeNode {
 	roots := []*SessionTreeNode{}
 
 	for _, entry := range s.entries {
-		if entry.Type == "session" || entry.Type == "label" {
+		if entry.Type == "session" || entry.Type == "label" || entry.Type == "usage_ledger" || entry.Type == "usage_quota" {
 			continue
 		}
 		node := &SessionTreeNode{
@@ -3056,7 +3232,7 @@ func (s *Session) Tree() []SessionTreeNode {
 	}
 
 	for _, entry := range s.entries {
-		if entry.Type == "session" || entry.Type == "label" {
+		if entry.Type == "session" || entry.Type == "label" || entry.Type == "usage_ledger" || entry.Type == "usage_quota" {
 			continue
 		}
 		node := nodeMap[entry.ID]
@@ -3153,6 +3329,7 @@ func (s *Session) Stats() Stats {
 	if s.Store != nil {
 		stats.SessionFile = s.Store.Path
 	}
+	usage := ai.Usage{}
 	for _, message := range s.Messages {
 		role, _ := message["role"].(string)
 		switch role {
@@ -3168,17 +3345,21 @@ func (s *Session) Stats() Stats {
 					}
 				}
 			}
-			if usage, ok := message["usage"].(map[string]any); ok {
-				stats.Tokens.Input += asInt(usage["input"])
-				stats.Tokens.Output += asInt(usage["output"])
-				stats.Tokens.CacheRead += asInt(usage["cacheRead"])
-				stats.Tokens.CacheWrite += asInt(usage["cacheWrite"])
-				stats.Tokens.Total += asInt(usage["totalTokens"])
+			if _, ok := message["usage"].(map[string]any); ok {
+				messageUsage, _ := usageFromMessage(message)
+				usage = addUsage(usage, messageUsage)
 			}
 		case "toolResult":
 			stats.ToolResults++
 		}
 	}
+	stats.Tokens.Input = usage.Input
+	stats.Tokens.Output = usage.Output
+	stats.Tokens.CacheRead = usage.CacheRead
+	stats.Tokens.CacheWrite = usage.CacheWrite
+	stats.Tokens.Total = usage.TotalTokens
+	stats.Cost = usage.Cost.Total
+	stats.Quota = s.usageQuotaStatusForUsage(usage)
 	stats.ContextUsage = s.ContextUsage()
 	return stats
 }
@@ -3335,6 +3516,14 @@ func (s *Session) applyEntry(entry SessionEntry) {
 			}
 			s.OAuthCredentials[entry.OAuthProvider] = *entry.OAuthCredentials
 		}
+	case "usage_ledger":
+		if entry.UsageLedger != nil {
+			s.UsageLedger = append(s.UsageLedger, *entry.UsageLedger)
+		}
+	case "usage_quota":
+		if entry.UsageQuota != nil {
+			s.UsageQuota = entry.UsageQuota.Normalized()
+		}
 	}
 }
 
@@ -3357,6 +3546,8 @@ func (s *Session) loadSession(entries []SessionEntry) {
 	s.Provider = ""
 	s.ModelID = ""
 	s.ToolExecution = ToolExecutionModeFromEnv()
+	s.UsageQuota = UsageQuotaConfigFromEnv()
+	s.UsageLedger = nil
 	s.parentSession = ""
 
 	if len(entries) == 0 {
@@ -3380,7 +3571,7 @@ func (s *Session) loadSession(entries []SessionEntry) {
 	}
 
 	for i := len(s.entries) - 1; i >= 0; i-- {
-		if s.entries[i].Type == "session" || s.entries[i].Type == "label" {
+		if s.entries[i].Type == "session" || s.entries[i].Type == "label" || s.entries[i].Type == "usage_ledger" || s.entries[i].Type == "usage_quota" {
 			continue
 		}
 		s.leafID = s.entries[i].ID
@@ -3403,6 +3594,8 @@ func (s *Session) rebuildStateFromLeaf(leafID string) {
 	s.Provider = ""
 	s.ModelID = ""
 	s.ToolExecution = ToolExecutionModeFromEnv()
+	s.UsageQuota = UsageQuotaConfigFromEnv()
+	s.UsageLedger = nil
 
 	branch := s.resolveBranchEntries(leafID)
 	for _, entry := range branch {
@@ -3413,10 +3606,12 @@ func (s *Session) rebuildStateFromLeaf(leafID string) {
 		branchIDs[entry.ID] = struct{}{}
 	}
 	for _, entry := range s.entries {
-		if entry.Type != "label" {
-			continue
-		}
-		if _, ok := branchIDs[entry.TargetID]; ok {
+		switch entry.Type {
+		case "label":
+			if _, ok := branchIDs[entry.TargetID]; ok {
+				s.applyEntry(entry)
+			}
+		case "usage_ledger", "usage_quota":
 			s.applyEntry(entry)
 		}
 	}
@@ -3573,6 +3768,19 @@ func (s *Session) labelEntriesForBranch(branch []SessionEntry) []SessionEntry {
 		return labels[i].TargetID < labels[j].TargetID
 	})
 	return labels
+}
+
+func (s *Session) usageMetadataEntries() []SessionEntry {
+	entries := make([]SessionEntry, 0)
+	for _, entry := range s.entries {
+		if entry.Type != "usage_ledger" && entry.Type != "usage_quota" {
+			continue
+		}
+		copied := entry
+		copied.ParentID = ""
+		entries = append(entries, copied)
+	}
+	return entries
 }
 
 func appendModelIfMissing(models []ModelInfo, model ModelInfo) []ModelInfo {
@@ -3882,6 +4090,21 @@ func asInt(value any) int {
 		return int(typed)
 	case float64:
 		return int(typed)
+	default:
+		return 0
+	}
+}
+
+func asFloat(value any) float64 {
+	switch typed := value.(type) {
+	case float64:
+		return typed
+	case float32:
+		return float64(typed)
+	case int:
+		return float64(typed)
+	case int64:
+		return float64(typed)
 	default:
 		return 0
 	}

@@ -168,6 +168,34 @@ PIGO_TOOL_EXECUTION=interleaved
 
 ACP clients can set `tool_execution` through `session/set_config_option`.
 
+## Usage Ledger And Quotas
+
+`pigo` records provider-reported usage on assistant messages and can persist per-call usage ledger entries in the session JSONL log. The ledger is per session and includes provider, model, token usage, estimated cost, and whether model pricing was known.
+
+Usage quotas are optional and disabled by default. When enabled, pigo checks the quota before every provider call. If a response exceeds a quota, that response is recorded and the next provider call is blocked.
+
+Environment defaults:
+
+```bash
+export PIGO_USAGE_QUOTA=off
+export PIGO_USAGE_MAX_TOTAL_TOKENS=100000
+export PIGO_USAGE_MAX_COST=1.50
+```
+
+Supported quota variables:
+
+- `PIGO_USAGE_QUOTA`: `off` or `enforce`.
+- `PIGO_USAGE_MAX_INPUT_TOKENS`
+- `PIGO_USAGE_MAX_OUTPUT_TOKENS`
+- `PIGO_USAGE_MAX_CACHE_READ_TOKENS`
+- `PIGO_USAGE_MAX_CACHE_WRITE_TOKENS`
+- `PIGO_USAGE_MAX_TOTAL_TOKENS`
+- `PIGO_USAGE_MAX_COST`
+
+JSONL RPC supports `set_usage_quota`, `get_usage_quota`, and `get_usage_ledger`. ACP clients can set the same quota fields with `session/set_config_option`.
+
+Cost quotas use model catalog pricing when available. If pricing is unknown, token quotas still work and quota status reports a warning instead of blocking solely on cost.
+
 ## Bash Command Permissions
 
 `pigo` can restrict which commands may run through the bash tool and direct RPC bash command. The default mode is `allow-all`, which preserves the current behavior unless a deny rule matches.

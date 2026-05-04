@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -315,6 +316,28 @@ func TestACPUpdatesIgnoreStreamingTextEndContent(t *testing.T) {
 	})
 	if len(updates) != 0 {
 		t.Fatalf("text_end updates = %#v", updates)
+	}
+}
+
+func TestACPUpdatesMapResearchProgress(t *testing.T) {
+	updates := acpUpdates(agentcore.Event{
+		"type":       "research_progress",
+		"phase":      "completed",
+		"toolCallId": "research-1",
+		"query":      "pigo research",
+		"mode":       "quick",
+	})
+	if len(updates) != 1 {
+		t.Fatalf("updates = %#v", updates)
+	}
+	update := updates[0]
+	if update["sessionUpdate"] != "tool_call_update" || update["toolCallId"] != "research-1" || update["status"] != "completed" {
+		t.Fatalf("update = %#v", update)
+	}
+	content := update["content"].([]map[string]any)
+	text := content[0]["content"].(map[string]any)["text"]
+	if !strings.Contains(fmt.Sprint(text), "pigo research") {
+		t.Fatalf("content = %#v", content)
 	}
 }
 

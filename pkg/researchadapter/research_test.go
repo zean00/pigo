@@ -51,7 +51,7 @@ func TestResearchToolQuickModeUsesIsolatedSafeTools(t *testing.T) {
 		Host:      testResearchHost{root: t.TempDir()},
 		EventSink: func(event agentcore.Event) { events = append(events, event) },
 	})
-	result := tools[0].Execute(context.Background(), ai.ContentBlock{Arguments: map[string]any{"query": "test topic"}})
+	result := tools[0].Execute(context.Background(), ai.ContentBlock{ID: "research-1", Arguments: map[string]any{"query": "test topic"}})
 	if result.IsError || !strings.Contains(result.Text, "report with sources") {
 		t.Fatalf("result = %#v", result)
 	}
@@ -60,6 +60,9 @@ func TestResearchToolQuickModeUsesIsolatedSafeTools(t *testing.T) {
 	}
 	if len(events) == 0 {
 		t.Fatal("expected research progress events")
+	}
+	if events[0]["toolCallId"] != "research-1" {
+		t.Fatalf("events = %#v", events)
 	}
 }
 

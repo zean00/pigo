@@ -114,13 +114,13 @@ func TestSessionResearchToolRunsWithSafeSubAgentTools(t *testing.T) {
 	if researchTool.Name == "" {
 		t.Fatal("research tool not exposed")
 	}
-	result := researchTool.Execute(context.Background(), ai.ContentBlock{Arguments: map[string]any{"query": "session research"}})
+	result := researchTool.Execute(context.Background(), ai.ContentBlock{ID: "research-call-1", Arguments: map[string]any{"query": "session research"}})
 	if result.IsError || !strings.Contains(result.Text, "session research report") {
 		t.Fatalf("result = %#v", result)
 	}
 	hasProgress := false
 	for _, event := range session.Events {
-		if event["type"] == "research_progress" {
+		if event["type"] == "research_progress" && event["toolCallId"] == "research-call-1" {
 			hasProgress = true
 			break
 		}

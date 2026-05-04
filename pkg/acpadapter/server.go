@@ -1644,8 +1644,53 @@ func acpUpdates(event agentcore.Event) []map[string]any {
 			"content":       toolContent(event["result"]),
 			"locations":     toolLocations(event["args"], result),
 		}}
+	case "research_progress":
+		toolCallID := strings.TrimSpace(fmt.Sprint(event["toolCallId"]))
+		if toolCallID == "" || toolCallID == "<nil>" {
+			return nil
+		}
+		status := "in_progress"
+		switch strings.TrimSpace(fmt.Sprint(event["phase"])) {
+		case "started":
+			status = "pending"
+		case "completed":
+			status = "completed"
+		case "failed":
+			status = "failed"
+		}
+		return []map[string]any{{
+			"sessionUpdate": "tool_call_update",
+			"toolCallId":    toolCallID,
+			"status":        status,
+			"rawOutput":     event,
+			"content": []map[string]any{{
+				"type":    "content",
+				"content": map[string]any{"type": "text", "text": researchProgressText(event)},
+			}},
+		}}
 	}
 	return nil
+}
+
+func researchProgressText(event agentcore.Event) string {
+	phase := strings.TrimSpace(fmt.Sprint(event["phase"]))
+	if phase == "" || phase == "<nil>" {
+		phase = "event"
+	}
+	query := strings.TrimSpace(fmt.Sprint(event["query"]))
+	if query == "<nil>" {
+		query = ""
+	}
+	if errText := strings.TrimSpace(fmt.Sprint(event["error"])); errText != "" && errText != "<nil>" {
+		if query != "" {
+			return fmt.Sprintf("research %s for %q: %s", phase, query, errText)
+		}
+		return fmt.Sprintf("research %s: %s", phase, errText)
+	}
+	if query != "" {
+		return fmt.Sprintf("research %s for %q", phase, query)
+	}
+	return "research " + phase
 }
 
 func acpHistoryUpdates(message agentcore.Message) []map[string]any {

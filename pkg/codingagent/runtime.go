@@ -30,6 +30,7 @@ type Session struct {
 	ThinkingLevel      string
 	Provider           string
 	ModelID            string
+	ToolExecution      agentcore.ToolExecutionMode
 	Store              *SessionStore
 	SteeringMode       string
 	FollowUpMode       string
@@ -348,6 +349,7 @@ type State struct {
 	ThinkingLevel  string `json:"thinkingLevel"`
 	Provider       string `json:"provider"`
 	ModelID        string `json:"modelId"`
+	ToolExecution  string `json:"toolExecution"`
 	SteeringMode   string `json:"steeringMode"`
 	FollowUpMode   string `json:"followUpMode"`
 	AutoCompaction bool   `json:"autoCompactionEnabled"`
@@ -1788,6 +1790,7 @@ func (s *Session) promptWithSource(ctx context.Context, prompt string, attachmen
 			Model:          s.ModelID,
 			ToolSpecs:      s.toolSpecs(),
 			Options:        chatOptions,
+			ToolExecution:  s.ToolExecution,
 			GetAPIKey: func(provider string) string {
 				return s.resolveProviderAPIKey(opCtx, provider)
 			},
@@ -2152,6 +2155,7 @@ func (s *Session) State() State {
 		ThinkingLevel:     s.ThinkingLevel,
 		Provider:          s.Provider,
 		ModelID:           s.ModelID,
+		ToolExecution:     string(s.ToolExecution),
 		SteeringMode:      s.SteeringMode,
 		FollowUpMode:      s.FollowUpMode,
 		AutoCompaction:    s.AutoCompaction,
@@ -2213,6 +2217,7 @@ func (s *Session) TryNewSessionWithParent(ctx context.Context, parentSession str
 	s.ThinkingLevel = "off"
 	s.Provider = ""
 	s.ModelID = ""
+	s.ToolExecution = ToolExecutionModeFromEnv()
 	s.SteeringMode = "one-at-a-time"
 	s.FollowUpMode = "one-at-a-time"
 	s.ShellCommandPrefix = ""
@@ -2292,6 +2297,38 @@ func (s *Session) SetFollowUpMode(mode string) error {
 		return fmt.Errorf("invalid follow-up mode: %s", mode)
 	}
 	s.FollowUpMode = mode
+	return nil
+}
+
+func ToolExecutionModeFromEnv() agentcore.ToolExecutionMode {
+	mode, err := NormalizeToolExecutionMode(os.Getenv("PIGO_TOOL_EXECUTION"))
+	if err != nil {
+		return agentcore.ToolExecutionParallel
+	}
+	return mode
+}
+
+func NormalizeToolExecutionMode(mode string) (agentcore.ToolExecutionMode, error) {
+	switch strings.TrimSpace(strings.ToLower(mode)) {
+	case "":
+		return agentcore.ToolExecutionParallel, nil
+	case string(agentcore.ToolExecutionParallel):
+		return agentcore.ToolExecutionParallel, nil
+	case string(agentcore.ToolExecutionSequential):
+		return agentcore.ToolExecutionSequential, nil
+	case string(agentcore.ToolExecutionInterleaved):
+		return agentcore.ToolExecutionInterleaved, nil
+	default:
+		return "", fmt.Errorf("invalid tool execution mode: %s", mode)
+	}
+}
+
+func (s *Session) SetToolExecutionMode(mode string) error {
+	normalized, err := NormalizeToolExecutionMode(mode)
+	if err != nil {
+		return err
+	}
+	s.ToolExecution = normalized
 	return nil
 }
 
@@ -3319,6 +3356,7 @@ func (s *Session) loadSession(entries []SessionEntry) {
 	s.ThinkingLevel = "off"
 	s.Provider = ""
 	s.ModelID = ""
+	s.ToolExecution = ToolExecutionModeFromEnv()
 	s.parentSession = ""
 
 	if len(entries) == 0 {
@@ -3364,6 +3402,7 @@ func (s *Session) rebuildStateFromLeaf(leafID string) {
 	s.ThinkingLevel = "off"
 	s.Provider = ""
 	s.ModelID = ""
+	s.ToolExecution = ToolExecutionModeFromEnv()
 
 	branch := s.resolveBranchEntries(leafID)
 	for _, entry := range branch {

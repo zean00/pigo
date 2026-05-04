@@ -42,6 +42,16 @@ Optional research tools are also appended separately when enabled. `research` ru
 
 There is no separate research-specific grep tool. The built-in `grep` is the canonical local search tool and returns structured match metadata that future research orchestration can count under its gathering budget.
 
+## Tool Execution Modes
+
+The agent loop supports three tool execution modes:
+
+- `parallel`: execute all tool calls returned by one assistant turn concurrently and return the full batch of results to the model. This is the default.
+- `sequential`: execute all tool calls returned by one assistant turn in order, then return the full batch of results to the model.
+- `interleaved`: execute at most one tool call from each assistant turn, append that result, then call the model again so it can reason before choosing the next tool.
+
+Interleaved mode also asks OpenAI-compatible providers to disable provider-side parallel tool calls when that request option is supported. If a provider still returns or streams multiple tool calls in one turn, `pigo` exposes only the first call in assistant message events and conversation history, then lets the model request additional calls on later rounds.
+
 ## Command Output Compression
 
 Bash command output passes through a command-aware compression layer after the process exits. The layer is conservative: it preserves the exit code and cancellation status, and it does not rewrite the command before execution.

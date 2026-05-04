@@ -809,3 +809,165 @@ func TestRunProviderLoopParallelToolResultMessagesStayInSourceOrder(t *testing.T
 		t.Fatalf("result messages = %#v", result.Messages)
 	}
 }
+
+func TestRunProviderLoopInterleavedExecutesOneToolPerProviderRound(t *testing.T) {
+	providerName := "agentcore-provider-loop-interleaved"
+	provider := &scriptedProvider{responses: []ai.NormalizedResult{
+		{
+			Role:       "assistant",
+			StopReason: "toolUse",
+			Content: []any{
+				map[string]any{"type": "thinking", "thinking": "need first result"},
+				map[string]any{"type": "toolCall", "id": "first", "name": "echo", "arguments": map[string]any{"value": "one"}},
+				map[string]any{"type": "toolCall", "id": "second", "name": "echo", "arguments": map[string]any{"value": "two"}},
+			},
+		},
+		{
+			Role:       "assistant",
+			StopReason: "toolUse",
+			Content: []any{
+				map[string]any{"type": "thinking", "thinking": "use first result before second"},
+				map[string]any{"type": "toolCall", "id": "second", "name": "echo", "arguments": map[string]any{"value": "two"}},
+			},
+		},
+		{
+			Role:       "assistant",
+			StopReason: "stop",
+			Text:       "done",
+			Content:    []any{map[string]any{"type": "text", "text": "done"}},
+		},
+	}}
+	ai.RegisterProvider(providerName, provider)
+
+	var executed []string
+	result, err := RunProviderLoop(context.Background(), ProviderLoopInput{
+		Prompts:       []string{"go"},
+		Provider:      providerName,
+		Model:         "test",
+		ToolExecution: ToolExecutionInterleaved,
+		ToolSpecs: []ai.Tool{{
+			Name:        "echo",
+			Description: "echo value",
+			Parameters:  map[string]any{"type": "object", "properties": map[string]any{"value": map[string]any{"type": "string"}}},
+		}},
+		Tools: []Tool{{
+			Name: "echo",
+			Execute: func(_ context.Context, call ai.ContentBlock) ToolResult {
+				executed = append(executed, call.ID)
+				return ToolResult{Text: fmt.Sprint(call.Arguments["value"])}
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(executed) != "[first second]" {
+		t.Fatalf("executed tools = %#v", executed)
+	}
+	if len(provider.requests) != 3 {
+		t.Fatalf("provider calls = %d, want 3", len(provider.requests))
+	}
+	if provider.requests[0].Options.ParallelToolCalls == nil || *provider.requests[0].Options.ParallelToolCalls {
+		t.Fatalf("parallel tool calls option = %#v", provider.requests[0].Options.ParallelToolCalls)
+	}
+	secondRequestMessages := provider.requests[1].Messages
+	if got := secondRequestMessages[len(secondRequestMessages)-1].ToolCallID; got != "first" {
+		t.Fatalf("second provider request last tool result = %q, want first", got)
+	}
+	assistantBeforeResult := secondRequestMessages[len(secondRequestMessages)-2]
+	assistantBlocks := ai.ParseContentBlocks(assistantBeforeResult.Content)
+	var toolIDs []string
+	for _, block := range assistantBlocks {
+		if block.Type == "toolCall" {
+			toolIDs = append(toolIDs, block.ID)
+		}
+	}
+	if fmt.Sprint(toolIDs) != "[first]" {
+		t.Fatalf("assistant tool calls kept in interleaved history = %#v", toolIDs)
+	}
+	if result.Messages[2]["toolCallId"] != "first" || result.Messages[4]["toolCallId"] != "second" {
+		t.Fatalf("tool result messages = %#v", result.Messages)
+	}
+}
+
+func TestRunProviderLoopInterleavedFiltersStreamedExtraToolCalls(t *testing.T) {
+	providerName := "agentcore-provider-loop-interleaved-stream"
+	firstBlocks := []ai.ContentBlock{
+		{Type: "thinking", Thinking: "need first result"},
+		{Type: "toolCall", ID: "first", Name: "echo", Arguments: map[string]any{"value": "one"}},
+		{Type: "toolCall", ID: "second", Name: "echo", Arguments: map[string]any{"value": "two"}},
+	}
+	provider := &scriptedProvider{responses: []ai.NormalizedResult{
+		{
+			Role:       "assistant",
+			StopReason: "toolUse",
+			Content:    ai.NormalizedContent(firstBlocks),
+		},
+		{
+			Role:       "assistant",
+			StopReason: "stop",
+			Text:       "done",
+			Content:    []any{map[string]any{"type": "text", "text": "done"}},
+		},
+	}}
+	ai.RegisterProvider(providerName, scriptedProviderFunc(func(ctx context.Context, req ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error) {
+		result, _, err := provider.Complete(ctx, req)
+		if err != nil {
+			return result, nil, err
+		}
+		if provider.calls == 1 {
+			return result, ai.AssistantEvents(firstBlocks, result.StopReason), nil
+		}
+		return result, ai.AssistantEvents([]ai.ContentBlock{{Type: "text", Text: "done"}}, result.StopReason), nil
+	}))
+
+	var updateToolIDs []string
+	var updateEventToolIDs []string
+	_, err := RunProviderLoop(context.Background(), ProviderLoopInput{
+		Prompts:       []string{"go"},
+		Provider:      providerName,
+		Model:         "test",
+		ToolExecution: ToolExecutionInterleaved,
+		Options:       ai.ChatOptions{Stream: true},
+		ToolSpecs: []ai.Tool{{
+			Name:        "echo",
+			Description: "echo value",
+			Parameters:  map[string]any{"type": "object", "properties": map[string]any{"value": map[string]any{"type": "string"}}},
+		}},
+		Tools: []Tool{{
+			Name: "echo",
+			Execute: func(_ context.Context, call ai.ContentBlock) ToolResult {
+				return ToolResult{Text: fmt.Sprint(call.Arguments["value"])}
+			},
+		}},
+		EventSink: func(event Event) {
+			if event["type"] != "message_update" {
+				return
+			}
+			message, _ := event["message"].(Message)
+			for _, block := range ai.ParseContentBlocks(message["content"]) {
+				if block.Type == "toolCall" {
+					updateToolIDs = append(updateToolIDs, block.ID)
+				}
+			}
+			assistantEvent, _ := event["assistantMessageEvent"].(map[string]any)
+			toolCall, _ := assistantEvent["toolCall"].(map[string]any)
+			if id, _ := toolCall["id"].(string); id != "" {
+				updateEventToolIDs = append(updateEventToolIDs, id)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range updateToolIDs {
+		if id == "second" {
+			t.Fatalf("streamed message_update exposed dropped tool call: %#v", updateToolIDs)
+		}
+	}
+	for _, id := range updateEventToolIDs {
+		if id == "second" {
+			t.Fatalf("streamed assistant event exposed dropped tool call: %#v", updateEventToolIDs)
+		}
+	}
+}

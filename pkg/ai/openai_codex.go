@@ -36,7 +36,7 @@ type openAICodexRequest struct {
 	Text           map[string]any   `json:"text,omitempty"`
 	Include        []string         `json:"include,omitempty"`
 	PromptCacheKey string           `json:"prompt_cache_key,omitempty"`
-	ParallelTools  bool             `json:"parallel_tool_calls,omitempty"`
+	ParallelTools  *bool            `json:"parallel_tool_calls,omitempty"`
 }
 
 func OpenAICodexProvider() ChatProvider {
@@ -82,7 +82,11 @@ func (provider *openAICodexProvider) Complete(ctx context.Context, req Completio
 		ToolChoice:    "auto",
 		Temperature:   req.Options.Temperature,
 		Instructions:  extractSystemPrompt(req.Messages),
-		ParallelTools: len(req.Tools) > 0,
+		ParallelTools: req.Options.ParallelToolCalls,
+	}
+	if payload.ParallelTools == nil && len(req.Tools) > 0 {
+		enabled := true
+		payload.ParallelTools = &enabled
 	}
 	if req.Options.Stream {
 		payload.Store = false

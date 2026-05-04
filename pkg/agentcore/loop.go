@@ -15,8 +15,9 @@ type Event map[string]any
 type ToolExecutionMode string
 
 const (
-	ToolExecutionSequential ToolExecutionMode = "sequential"
-	ToolExecutionParallel   ToolExecutionMode = "parallel"
+	ToolExecutionSequential  ToolExecutionMode = "sequential"
+	ToolExecutionParallel    ToolExecutionMode = "parallel"
+	ToolExecutionInterleaved ToolExecutionMode = "interleaved"
 )
 
 type ToolResult struct {
@@ -268,37 +269,44 @@ func RunProviderLoop(ctx context.Context, input ProviderLoopInput) (LoopResult, 
 				apiKey = resolved
 			}
 		}
+		executionMode := toolExecutionMode(input)
+		options := ai.ChatOptions{
+			Temperature:       input.Options.Temperature,
+			MaxTokens:         input.Options.MaxTokens,
+			Stream:            input.Options.Stream,
+			Transport:         input.Options.Transport,
+			APIKey:            apiKey,
+			BaseURL:           input.Options.BaseURL,
+			HTTPClient:        input.Options.HTTPClient,
+			Timeout:           input.Options.Timeout,
+			Headers:           input.Options.Headers,
+			ToolChoice:        input.Options.ToolChoice,
+			SessionID:         input.Options.SessionID,
+			CacheRetention:    input.Options.CacheRetention,
+			ReasoningEffort:   input.Options.ReasoningEffort,
+			ThinkingBudgets:   input.Options.ThinkingBudgets,
+			ReasoningSummary:  input.Options.ReasoningSummary,
+			ServiceTier:       input.Options.ServiceTier,
+			TextVerbosity:     input.Options.TextVerbosity,
+			Metadata:          input.Options.Metadata,
+			OnPayload:         input.Options.OnPayload,
+			OnResponse:        input.Options.OnResponse,
+			MaxRetries:        input.Options.MaxRetries,
+			MaxRetryDelay:     input.Options.MaxRetryDelay,
+			ParallelToolCalls: input.Options.ParallelToolCalls,
+		}
+		if executionMode == ToolExecutionInterleaved && len(input.ToolSpecs) > 0 {
+			disabled := false
+			options.ParallelToolCalls = &disabled
+		}
 		request := ai.CompletionRequest{
 			Provider: input.Provider,
 			Model:    input.Model,
 			Messages: requestMessages,
 			Tools:    input.ToolSpecs,
-			Options: ai.ChatOptions{
-				Temperature:      input.Options.Temperature,
-				MaxTokens:        input.Options.MaxTokens,
-				Stream:           input.Options.Stream,
-				Transport:        input.Options.Transport,
-				APIKey:           apiKey,
-				BaseURL:          input.Options.BaseURL,
-				HTTPClient:       input.Options.HTTPClient,
-				Timeout:          input.Options.Timeout,
-				Headers:          input.Options.Headers,
-				ToolChoice:       input.Options.ToolChoice,
-				SessionID:        input.Options.SessionID,
-				CacheRetention:   input.Options.CacheRetention,
-				ReasoningEffort:  input.Options.ReasoningEffort,
-				ThinkingBudgets:  input.Options.ThinkingBudgets,
-				ReasoningSummary: input.Options.ReasoningSummary,
-				ServiceTier:      input.Options.ServiceTier,
-				TextVerbosity:    input.Options.TextVerbosity,
-				Metadata:         input.Options.Metadata,
-				OnPayload:        input.Options.OnPayload,
-				OnResponse:       input.Options.OnResponse,
-				MaxRetries:       input.Options.MaxRetries,
-				MaxRetryDelay:    input.Options.MaxRetryDelay,
-			},
+			Options:  options,
 		}
-		resultMessage, assistant, blocks, err := runProviderAssistantTurn(ctx, input.EventSink, request, input.StreamFn, &result)
+		resultMessage, assistant, blocks, err := runProviderAssistantTurn(ctx, input.EventSink, request, input.StreamFn, executionMode == ToolExecutionInterleaved, &result)
 		if err != nil {
 			return result, err
 		}
@@ -378,7 +386,7 @@ func RunProviderLoop(ctx context.Context, input ProviderLoopInput) (LoopResult, 
 	return result, nil
 }
 
-func runProviderAssistantTurn(ctx context.Context, sink func(Event), request ai.CompletionRequest, streamFn func(context.Context, ai.CompletionRequest) *ai.EventStream, result *LoopResult) (ai.NormalizedResult, Message, []ai.ContentBlock, error) {
+func runProviderAssistantTurn(ctx context.Context, sink func(Event), request ai.CompletionRequest, streamFn func(context.Context, ai.CompletionRequest) *ai.EventStream, interleaved bool, result *LoopResult) (ai.NormalizedResult, Message, []ai.ContentBlock, error) {
 	streamFunction := ai.Stream
 	if streamFn != nil {
 		streamFunction = streamFn
@@ -399,9 +407,16 @@ func runProviderAssistantTurn(ctx context.Context, sink func(Event), request ai.
 				})
 			}
 			if applyNormalizedEvent(&partialBlocks, event) {
+				if interleaved && !interleavedEventVisible(partialBlocks, event) {
+					continue
+				}
+				visibleBlocks := partialBlocks
+				if interleaved {
+					visibleBlocks = interleavedAssistantBlocks(partialBlocks)
+				}
 				emit(result, sink, Event{
 					"type":                  "message_update",
-					"message":               AssistantMessage(partialBlocks, "stop"),
+					"message":               AssistantMessage(visibleBlocks, "stop"),
 					"assistantEventType":    firstAssistantUpdateEventType(event),
 					"assistantMessageEvent": buildAssistantMessageEvent(event),
 				})
@@ -412,6 +427,9 @@ func runProviderAssistantTurn(ctx context.Context, sink func(Event), request ai.
 			return resultMessage, nil, nil, err
 		}
 		blocks := ai.ParseContentBlocks(resultMessage.Content)
+		if interleaved {
+			blocks = interleavedAssistantBlocks(blocks)
+		}
 		assistant := assistantMessageFromNormalized(resultMessage, blocks)
 		applyUsage(assistant, resultMessage.Usage)
 		if !started {
@@ -432,6 +450,9 @@ func runProviderAssistantTurn(ctx context.Context, sink func(Event), request ai.
 		return resultMessage, nil, nil, err
 	}
 	blocks := ai.ParseContentBlocks(resultMessage.Content)
+	if interleaved {
+		blocks = interleavedAssistantBlocks(blocks)
+	}
 	assistant := assistantMessageFromNormalized(resultMessage, blocks)
 	applyUsage(assistant, resultMessage.Usage)
 	updateEventType := firstAssistantUpdate(blocks)
@@ -671,15 +692,62 @@ func executeTool(ctx context.Context, tools []Tool, call ai.ContentBlock) ToolRe
 }
 
 func toolExecutionMode(input ProviderLoopInput) ToolExecutionMode {
+	if input.ToolExecution == ToolExecutionInterleaved {
+		return ToolExecutionInterleaved
+	}
 	if input.ToolExecution == ToolExecutionSequential {
 		return ToolExecutionSequential
 	}
 	for _, tool := range input.Tools {
+		if tool.ExecutionMode == ToolExecutionInterleaved {
+			return ToolExecutionInterleaved
+		}
 		if tool.ExecutionMode == ToolExecutionSequential {
 			return ToolExecutionSequential
 		}
 	}
 	return ToolExecutionParallel
+}
+
+func interleavedAssistantBlocks(blocks []ai.ContentBlock) []ai.ContentBlock {
+	firstToolCall := -1
+	for idx, block := range blocks {
+		if block.Type == "toolCall" {
+			firstToolCall = idx
+			break
+		}
+	}
+	if firstToolCall < 0 {
+		return blocks
+	}
+	out := make([]ai.ContentBlock, 0, firstToolCall+1)
+	for idx, block := range blocks {
+		if block.Type == "toolCall" && idx != firstToolCall {
+			continue
+		}
+		out = append(out, block)
+	}
+	return out
+}
+
+func interleavedEventVisible(blocks []ai.ContentBlock, event ai.NormalizedEvent) bool {
+	switch event.Type {
+	case "toolcall_start", "toolcall_delta", "toolcall_end":
+	default:
+		return true
+	}
+	if event.ContentIdx < 0 || event.ContentIdx >= len(blocks) {
+		return true
+	}
+	if blocks[event.ContentIdx].Type != "toolCall" {
+		return true
+	}
+	for idx := 0; idx < event.ContentIdx && idx < len(blocks); idx++ {
+		if blocks[idx].Type == "toolCall" {
+			return false
+		}
+	}
+	return true
 }
 
 func executeToolBatch(ctx context.Context, input ProviderLoopInput, assistant Message, conversation []ai.Message, blocks []ai.ContentBlock, result *LoopResult) ([]executedToolCall, bool, error) {
@@ -692,6 +760,11 @@ func executeToolBatch(ctx context.Context, input ProviderLoopInput, assistant Me
 	}
 	if len(calls) == 0 {
 		return nil, false, nil
+	}
+
+	mode := toolExecutionMode(input)
+	if mode == ToolExecutionInterleaved && len(calls) > 1 {
+		calls = calls[:1]
 	}
 
 	for idx := range calls {
@@ -753,8 +826,7 @@ func executeToolBatch(ctx context.Context, input ProviderLoopInput, assistant Me
 		}
 	}
 
-	mode := toolExecutionMode(input)
-	if mode == ToolExecutionSequential {
+	if mode == ToolExecutionInterleaved || mode == ToolExecutionSequential {
 		for idx := range calls {
 			if calls[idx].blocked {
 				calls[idx].executed = true

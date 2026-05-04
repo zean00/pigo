@@ -773,6 +773,8 @@ func (s *Server) setConfigOption(params setConfigOptionParams) (any, *jsonrpcErr
 		err = session.Session.SetSteeringMode(value)
 	case "follow_up_mode":
 		err = session.Session.SetFollowUpMode(value)
+	case "tool_execution":
+		err = session.Session.SetToolExecutionMode(value)
 	case "model":
 		var model codingagent.ModelInfo
 		model, err = findACPModel(session.Session, value)
@@ -906,6 +908,7 @@ func acpConfigOptions(session *codingagent.Session) []map[string]any {
 		selectConfigOption("thinking_level", "Thinking level", session.ThinkingLevel, []string{"off", "low", "medium", "high", "xhigh"}),
 		selectConfigOption("steering_mode", "Steering mode", session.SteeringMode, []string{"one-at-a-time", "all"}),
 		selectConfigOption("follow_up_mode", "Follow-up mode", session.FollowUpMode, []string{"one-at-a-time", "all"}),
+		selectConfigOption("tool_execution", "Tool execution", string(session.ToolExecution), []string{"parallel", "sequential", "interleaved"}),
 		selectConfigOption("command_compression", "Command compression", compression.Mode, []string{"off", "auto", "force"}),
 		stringConfigOption("command_compression_enabled_filters", "Command compression enabled filters", strings.Join(compression.EnabledFilters, ",")),
 		stringConfigOption("command_compression_disabled_filters", "Command compression disabled filters", strings.Join(compression.DisabledFilters, ",")),
@@ -944,7 +947,7 @@ func selectConfigOption(id, name, current string, values []string) map[string]an
 	switch id {
 	case "thinking_level":
 		option["category"] = "thought_level"
-	case "steering_mode", "follow_up_mode":
+	case "steering_mode", "follow_up_mode", "tool_execution":
 		option["category"] = "mode"
 	}
 	return option

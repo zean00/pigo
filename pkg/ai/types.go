@@ -83,6 +83,8 @@ type ChatOptions struct {
 	Headers map[string]string
 	// ToolChoice controls OpenAI-style tool call behavior.
 	ToolChoice string
+	// ParallelToolCalls controls provider-side parallel tool-call generation when supported.
+	ParallelToolCalls *bool
 	// SessionID enables provider session affinity and prompt-cache grouping where supported.
 	SessionID string
 	// CacheRetention controls provider prompt-cache behavior where supported.

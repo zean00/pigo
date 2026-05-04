@@ -632,6 +632,24 @@ func TestSessionStateAndSetters(t *testing.T) {
 		t.Fatalf("config options = %#v", options)
 	}
 
+	setToolExecution, rpcErr := server.handleRequest(context.Background(), jsonrpcRequest{
+		Method: "session/set_config_option",
+		Params: json.RawMessage(`{"sessionId":` + quote(sessionID) + `,"configId":"tool_execution","value":"interleaved"}`),
+	})
+	if rpcErr != nil {
+		t.Fatalf("set tool execution option error = %#v", rpcErr)
+	}
+	options = setToolExecution.(map[string]any)["configOptions"].([]map[string]any)
+	found = false
+	for _, option := range options {
+		if option["id"] == "tool_execution" && option["currentValue"] == "interleaved" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("config options = %#v", options)
+	}
+
 	setResearch, rpcErr := server.handleRequest(context.Background(), jsonrpcRequest{
 		Method: "session/set_config_option",
 		Params: json.RawMessage(`{"sessionId":` + quote(sessionID) + `,"configId":"research_tools","value":"search,scrape"}`),

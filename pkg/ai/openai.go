@@ -27,6 +27,7 @@ type openAIRequest struct {
 	Temperature          *float64         `json:"temperature,omitempty"`
 	Tools                []openAIChatTool `json:"tools,omitempty"`
 	ToolChoice           string           `json:"tool_choice,omitempty"`
+	ParallelToolCalls    *bool            `json:"parallel_tool_calls,omitempty"`
 	Stream               bool             `json:"stream,omitempty"`
 	PromptCacheKey       string           `json:"prompt_cache_key,omitempty"`
 	PromptCacheRetention string           `json:"prompt_cache_retention,omitempty"`
@@ -105,6 +106,7 @@ type openAIResponsesRequest struct {
 	Input                []any            `json:"input"`
 	Tools                []openAIChatTool `json:"tools,omitempty"`
 	ToolChoice           string           `json:"tool_choice,omitempty"`
+	ParallelToolCalls    *bool            `json:"parallel_tool_calls,omitempty"`
 	MaxOutputTokens      int              `json:"max_output_tokens,omitempty"`
 	Temperature          *float64         `json:"temperature,omitempty"`
 	Stream               bool             `json:"stream,omitempty"`
@@ -766,6 +768,7 @@ func toOpenAIResponsesRequest(req CompletionRequest, model Model) openAIResponse
 		if payload.ToolChoice == "" {
 			payload.ToolChoice = "auto"
 		}
+		payload.ParallelToolCalls = req.Options.ParallelToolCalls
 		for _, tool := range req.Tools {
 			parameters := tool.Parameters
 			if parameters == nil {
@@ -1756,6 +1759,9 @@ func buildOpenAIChatCompletionsRequest(req CompletionRequest, model Model) map[s
 			toolChoice = "auto"
 		}
 		payload["tool_choice"] = toolChoice
+		if req.Options.ParallelToolCalls != nil {
+			payload["parallel_tool_calls"] = *req.Options.ParallelToolCalls
+		}
 		if compat.ZAIToolStream {
 			payload["tool_stream"] = true
 		}

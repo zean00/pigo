@@ -33,6 +33,7 @@ type SessionInput struct {
 	Provider           string
 	ModelID            string
 	ThinkingLevel      string
+	ToolExecution      agentcore.ToolExecutionMode
 	AutoRetry          bool
 	AutoCompaction     bool
 	ShellCommandPrefix string
@@ -65,6 +66,11 @@ func RunHeadlessSession(ctx context.Context, root string, input SessionInput) (S
 	}
 	if input.ThinkingLevel != "" {
 		if err := session.SetThinkingLevel(input.ThinkingLevel); err != nil {
+			return SessionResult{}, err
+		}
+	}
+	if input.ToolExecution != "" {
+		if err := session.SetToolExecutionMode(string(input.ToolExecution)); err != nil {
 			return SessionResult{}, err
 		}
 	}

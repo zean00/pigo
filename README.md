@@ -90,6 +90,8 @@ OPENROUTER_API_KEY=... go test ./pkg/codingagent -run TestLiveOpenRouterCommandC
 
 The built-in coding tools are `bash`, `write`, `read`, `edit`, `ls`, `grep`, and `find`. They can be filtered with enabled/disabled tool lists so embedders can expose only the tool surface they want. See [Configuration](docs/configuration.md#built-in-tool-policy).
 
+Tool execution can run in `parallel`, `sequential`, or `interleaved` mode. Interleaved mode returns one tool result to the model at a time so reasoning can continue between tool calls. See [Configuration](docs/configuration.md#tool-execution).
+
 ## Research Tools
 
 Optional internet research tools can be exposed with `PIGO_RESEARCH_TOOLS=research,search,scrape,security_search`. They are disabled by default; `search` uses an external SearXNG instance from `PIGO_SEARXNG_URL` or `SEARXNG_URL`, and rendered `scrape` can use a Docker-hosted Obscura CDP server from `PIGO_OBSCURA_URL` or `OBSCURA_URL`. See [Configuration](docs/configuration.md#research-tools).

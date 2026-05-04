@@ -148,6 +148,26 @@ OPENROUTER_API_KEY=... go test ./pkg/codingagent -run TestLiveOpenRouterCommandC
 
 The live OpenRouter test is skipped when `OPENROUTER_API_KEY` is not set. It asks a real model to invoke the bash tool and verifies that the resulting tool output contains compression metadata.
 
+## Tool Execution
+
+`pigo` can control how model-requested tool calls are executed:
+
+| Mode | Behavior |
+| --- | --- |
+| `parallel` | Execute one assistant turn's tool calls concurrently and return the full batch. This is the default. |
+| `sequential` | Execute one assistant turn's tool calls in source order and return the full batch. |
+| `interleaved` | Execute one tool call, return its result, then let the model reason again before the next tool. |
+
+When `interleaved` is active, streaming assistant updates also expose only the first tool call from a provider turn. This keeps event consumers aligned with the final assistant message and the tool execution events that follow.
+
+Set the default for new sessions with:
+
+```bash
+PIGO_TOOL_EXECUTION=interleaved
+```
+
+ACP clients can set `tool_execution` through `session/set_config_option`.
+
 ## Bash Command Permissions
 
 `pigo` can restrict which commands may run through the bash tool and direct RPC bash command. The default mode is `allow-all`, which preserves the current behavior unless a deny rule matches.

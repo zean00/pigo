@@ -424,6 +424,33 @@ func TestSessionProviderLoopForwardsThinkingLevel(t *testing.T) {
 	}
 }
 
+func TestSessionProviderLoopForwardsInterleavedToolExecution(t *testing.T) {
+	const providerName = "interleaved-tool-execution-provider"
+	ai.RegisterProvider(providerName, providerFunc(func(_ context.Context, req ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error) {
+		if req.Options.ParallelToolCalls == nil || *req.Options.ParallelToolCalls {
+			t.Fatalf("parallel tool calls = %#v", req.Options.ParallelToolCalls)
+		}
+		return ai.NormalizedResult{
+			Role:       "assistant",
+			StopReason: "stop",
+			Text:       "ok",
+			Content:    []any{map[string]any{"type": "text", "text": "ok"}},
+		}, nil, nil
+	}))
+
+	session := NewSession(t.TempDir(), nil)
+	if err := session.SetToolExecutionMode("interleaved"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.SetModel(providerName, "test-model"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := session.Prompt(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSessionProviderLoopInjectsSkillContext(t *testing.T) {
 	const providerName = "skill-context-provider"
 	var captured []ai.Message

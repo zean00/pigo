@@ -101,6 +101,25 @@ The active provider/tool context is canceled where supported, and the runtime em
 
 ACP clients can pass `mcpServers` when creating, loading, resuming, or forking a session. Those servers are added to the session MCP registry and exposed as model tools.
 
+## Tool Execution Through ACP
+
+ACP clients can choose the tool execution mode with `session/set_config_option`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "method": "session/set_config_option",
+  "params": {
+    "sessionId": "session-id",
+    "configId": "tool_execution",
+    "value": "interleaved"
+  }
+}
+```
+
+Supported values are `parallel`, `sequential`, and `interleaved`. Interleaved mode executes one tool call, returns that result to the model, and lets the model reason before choosing the next tool.
+
 ## Command Compression Through ACP
 
 ACP clients can configure command-output compression with `session/set_config_option`:

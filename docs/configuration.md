@@ -238,6 +238,7 @@ The built-in `grep` tool is also the local search primitive used for future rese
 ```bash
 export PIGO_RESEARCH_TOOLS='research,search,scrape,security_search'
 export PIGO_SEARXNG_URL='http://localhost:8080'
+export PIGO_OBSCURA_URL='http://localhost:9222'
 export PIGO_NVD_API_KEY='optional-nvd-api-key'
 ```
 
@@ -247,12 +248,14 @@ Available research tools:
 | --- | --- |
 | `research` | Run an isolated quick research sub-agent and return a Markdown report. |
 | `search` | Query an external SearXNG instance and return titles, URLs, and snippets. |
-| `scrape` | Fetch HTTP(S) URLs and extract compact readable text. |
+| `scrape` | Fetch HTTP(S) URLs and extract compact readable text. It can use static HTTP or Obscura-rendered scraping. |
 | `security_search` | Search public vulnerability sources such as OSV, NVD, and CISA KEV. |
 
 The `research` tool accepts `query`, optional `depth` (currently only `0` quick mode), and optional `model`. A bare `model` value keeps the parent session provider; `provider/model` switches the quick research sub-agent to that provider and model.
 
 `PIGO_SEARXNG_URL` falls back to `SEARXNG_URL`. Production sessions use an external SearXNG URL; local validation can start a disposable Docker SearXNG container with the smoke script below.
+
+`PIGO_OBSCURA_URL` falls back to `OBSCURA_URL`. Point it at a Docker-hosted Obscura CDP server, for example `http://localhost:9222` from `obscura serve --port 9222`. The `scrape` tool uses it when called with `engine: "obscura"` or `render: true`.
 
 `PIGO_NVD_API_KEY` falls back to `NVD_API_KEY`. It is optional, but helps avoid anonymous NVD API rate limits. ACP config state reports only whether a key is configured, not the key value.
 
@@ -260,6 +263,7 @@ ACP sessions expose these config options:
 
 - `research_tools`
 - `research_searxng_url`
+- `research_obscura_url`
 - `research_nvd_api_key`
 
 The JSONL RPC adapter supports:

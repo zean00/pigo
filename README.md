@@ -92,7 +92,7 @@ The built-in coding tools are `bash`, `write`, `read`, `edit`, `ls`, `grep`, and
 
 ## Research Tools
 
-Optional internet research tools can be exposed with `PIGO_RESEARCH_TOOLS=research,search,scrape,security_search`. They are disabled by default; `search` uses an external SearXNG instance from `PIGO_SEARXNG_URL` or `SEARXNG_URL`. See [Configuration](docs/configuration.md#research-tools).
+Optional internet research tools can be exposed with `PIGO_RESEARCH_TOOLS=research,search,scrape,security_search`. They are disabled by default; `search` uses an external SearXNG instance from `PIGO_SEARXNG_URL` or `SEARXNG_URL`, and rendered `scrape` can use a Docker-hosted Obscura CDP server from `PIGO_OBSCURA_URL` or `OBSCURA_URL`. See [Configuration](docs/configuration.md#research-tools).
 
 ## Providers
 

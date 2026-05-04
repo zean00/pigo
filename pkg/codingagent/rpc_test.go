@@ -211,7 +211,7 @@ func TestRPCResearchToolsConfig(t *testing.T) {
 	var out bytes.Buffer
 	server := RPCServer{Session: session}
 	input := strings.NewReader(
-		`{"id":"r1","type":"set_research_tools","researchTools":["search","scrape"],"searxngUrl":"http://search.test","nvdApiKey":"secret"}` + "\n" +
+		`{"id":"r1","type":"set_research_tools","researchTools":["search","scrape"],"searxngUrl":"http://search.test","obscuraUrl":"http://obscura.test","nvdApiKey":"secret"}` + "\n" +
 			`{"id":"r2","type":"get_research_tools"}` + "\n",
 	)
 
@@ -224,6 +224,9 @@ func TestRPCResearchToolsConfig(t *testing.T) {
 	}
 	config := responses[1]["data"].(map[string]any)
 	if config["searxngUrl"] != "http://search.test" {
+		t.Fatalf("config = %#v", config)
+	}
+	if config["obscuraUrl"] != "http://obscura.test" {
 		t.Fatalf("config = %#v", config)
 	}
 	if config["nvdApiKey"] != true {

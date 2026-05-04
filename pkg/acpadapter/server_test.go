@@ -668,6 +668,24 @@ func TestSessionStateAndSetters(t *testing.T) {
 		t.Fatalf("config options = %#v", options)
 	}
 
+	setObscuraURL, rpcErr := server.handleRequest(context.Background(), jsonrpcRequest{
+		Method: "session/set_config_option",
+		Params: json.RawMessage(`{"sessionId":` + quote(sessionID) + `,"configId":"research_obscura_url","value":"http://obscura.test"}`),
+	})
+	if rpcErr != nil {
+		t.Fatalf("set research obscura url option error = %#v", rpcErr)
+	}
+	options = setObscuraURL.(map[string]any)["configOptions"].([]map[string]any)
+	found = false
+	for _, option := range options {
+		if option["id"] == "research_obscura_url" && option["currentValue"] == "http://obscura.test" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("config options = %#v", options)
+	}
+
 	setResearchKey, rpcErr := server.handleRequest(context.Background(), jsonrpcRequest{
 		Method: "session/set_config_option",
 		Params: json.RawMessage(`{"sessionId":` + quote(sessionID) + `,"configId":"research_nvd_api_key","value":"secret"}`),

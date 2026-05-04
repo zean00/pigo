@@ -85,7 +85,7 @@ func RunHeadlessSession(ctx context.Context, root string, input SessionInput) (S
 			return SessionResult{}, err
 		}
 	}
-	if len(input.ResearchConfig.Tools) > 0 || input.ResearchConfig.SearXNGURL != "" {
+	if len(input.ResearchConfig.Tools) > 0 || input.ResearchConfig.SearXNGURL != "" || input.ResearchConfig.ObscuraURL != "" {
 		if err := session.SetResearchConfig(input.ResearchConfig); err != nil {
 			return SessionResult{}, err
 		}

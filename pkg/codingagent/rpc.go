@@ -60,6 +60,7 @@ type rpcCommand struct {
 	DisabledTools    []string             `json:"disabledTools,omitempty"`
 	ResearchTools    []string             `json:"researchTools,omitempty"`
 	SearXNGURL       string               `json:"searxngUrl,omitempty"`
+	ObscuraURL       string               `json:"obscuraUrl,omitempty"`
 	NVDAPIKey        string               `json:"nvdApiKey,omitempty"`
 	OAuthCredentials *ai.OAuthCredentials `json:"oauthCredentials,omitempty"`
 	OAuthStorePath   string               `json:"oauthStorePath,omitempty"`
@@ -445,6 +446,9 @@ func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse 
 		}
 		if strings.TrimSpace(command.SearXNGURL) != "" {
 			config.SearXNGURL = command.SearXNGURL
+		}
+		if strings.TrimSpace(command.ObscuraURL) != "" {
+			config.ObscuraURL = command.ObscuraURL
 		}
 		if strings.TrimSpace(command.NVDAPIKey) != "" {
 			config.NVDAPIKey = command.NVDAPIKey

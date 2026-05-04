@@ -182,10 +182,19 @@ func scrapeTool(config Config) agentcore.Tool {
 		if len(urls) > maxScrapeURLs {
 			return agentcore.ToolResult{Text: fmt.Sprintf("scrape accepts at most %d URLs per call", maxScrapeURLs), IsError: true}
 		}
+		engine := scrapeEngine(call.Arguments)
+		if engine == "obscura" && strings.TrimSpace(config.ObscuraURL) == "" {
+			return agentcore.ToolResult{Text: "scrape engine obscura requires PIGO_OBSCURA_URL or OBSCURA_URL", IsError: true}
+		}
+		options := scrapeOptions{
+			Engine:         engine,
+			WaitUntil:      stringArg(call.Arguments["waitUntil"], "load"),
+			TimeoutSeconds: intArg(call.Arguments["timeout"], 30),
+		}
 		start := time.Now()
 		results := make([]scrapeResult, 0, len(urls))
 		for _, rawURL := range urls {
-			result := scrapeOne(ctx, config, rawURL)
+			result := scrapeOne(ctx, config, rawURL, options)
 			results = append(results, result)
 		}
 		text := formatScrapeResults(results)
@@ -198,16 +207,24 @@ func scrapeTool(config Config) agentcore.Tool {
 		}
 		return agentcore.ToolResult{Text: text, Details: map[string]any{
 			"urls":       urls,
+			"engine":     engine,
 			"results":    results,
 			"durationMs": time.Since(start).Milliseconds(),
 		}, IsError: allFailed}
 	}}
 }
 
+type scrapeOptions struct {
+	Engine         string
+	WaitUntil      string
+	TimeoutSeconds int
+}
+
 type scrapeResult struct {
 	URL         string `json:"url"`
 	Title       string `json:"title,omitempty"`
 	Text        string `json:"text,omitempty"`
+	Engine      string `json:"engine,omitempty"`
 	ContentType string `json:"contentType,omitempty"`
 	Status      int    `json:"status,omitempty"`
 	Bytes       int    `json:"bytes,omitempty"`
@@ -215,7 +232,10 @@ type scrapeResult struct {
 	Error       string `json:"error,omitempty"`
 }
 
-func scrapeOne(ctx context.Context, config Config, rawURL string) scrapeResult {
+func scrapeOne(ctx context.Context, config Config, rawURL string, options scrapeOptions) scrapeResult {
+	if options.Engine == "obscura" {
+		return scrapeOneObscura(ctx, config, rawURL, options)
+	}
 	parsed, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return scrapeResult{URL: rawURL, Error: "invalid URL"}
@@ -248,11 +268,23 @@ func scrapeOne(ctx context.Context, config Config, rawURL string) scrapeResult {
 		URL:         parsed.String(),
 		Title:       title,
 		Text:        text,
+		Engine:      "http",
 		ContentType: contentType,
 		Status:      resp.StatusCode,
 		Bytes:       len(data),
 		Truncated:   truncatedInput || truncatedOutput,
 	}
+}
+
+func scrapeEngine(args map[string]any) string {
+	engine := strings.ToLower(strings.TrimSpace(stringArg(args["engine"], "")))
+	if engine == "obscura" {
+		return "obscura"
+	}
+	if value, ok := args["render"].(bool); ok && value {
+		return "obscura"
+	}
+	return "http"
 }
 
 func securityTool(config Config) agentcore.Tool {
@@ -636,6 +668,16 @@ func intArg(value any, fallback int) int {
 		n, err := typed.Int64()
 		if err == nil {
 			return int(n)
+		}
+	}
+	return fallback
+}
+
+func stringArg(value any, fallback string) string {
+	if text, ok := value.(string); ok {
+		text = strings.TrimSpace(text)
+		if text != "" {
+			return text
 		}
 	}
 	return fallback

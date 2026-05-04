@@ -196,6 +196,7 @@ The related options are:
 
 - `research_tools`: comma-separated list of `research`, `search`, `scrape`, and `security_search`.
 - `research_searxng_url`: external SearXNG base URL used by `search`.
+- `research_obscura_url`: Obscura CDP server URL used by `scrape` when `engine` is `obscura` or `render` is `true`.
 - `research_nvd_api_key`: optional NVD API key used by `security_search`.
 
-Research tools are disabled by default. The `scrape` and `security_search` tools do not require SearXNG, but `search` returns a configuration error until a SearXNG URL is configured.
+Research tools are disabled by default. The `scrape` and `security_search` tools do not require SearXNG, but `search` returns a configuration error until a SearXNG URL is configured. Static `scrape` does not require Obscura; rendered scraping requires a configured Obscura URL.

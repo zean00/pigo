@@ -819,6 +819,10 @@ func (s *Server) setConfigOption(params setConfigOptionParams) (any, *jsonrpcErr
 		config := session.Session.GetResearchConfig()
 		config.SearXNGURL = value
 		err = session.Session.SetResearchConfig(config)
+	case "research_obscura_url":
+		config := session.Session.GetResearchConfig()
+		config.ObscuraURL = value
+		err = session.Session.SetResearchConfig(config)
 	case "research_nvd_api_key":
 		config := session.Session.GetResearchConfig()
 		config.NVDAPIKey = value
@@ -912,6 +916,7 @@ func acpConfigOptions(session *codingagent.Session) []map[string]any {
 		stringConfigOption("builtin_tools_disabled", "Built-in tools disabled", strings.Join(toolPolicy.Disabled, ",")),
 		stringConfigOption("research_tools", "Research tools", strings.Join(researchConfig.Tools, ",")),
 		stringConfigOption("research_searxng_url", "Research SearXNG URL", researchConfig.SearXNGURL),
+		stringConfigOption("research_obscura_url", "Research Obscura URL", researchConfig.ObscuraURL),
 		stringConfigOption("research_nvd_api_key", "Research NVD API key", maskSecret(researchConfig.NVDAPIKey)),
 		modelConfigOption(session),
 	}

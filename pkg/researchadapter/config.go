@@ -17,6 +17,7 @@ var toolNames = []string{"research", "search", "scrape", "security_search"}
 type Config struct {
 	Tools      []string              `json:"tools,omitempty"`
 	SearXNGURL string                `json:"searxngUrl,omitempty"`
+	ObscuraURL string                `json:"obscuraUrl,omitempty"`
 	NVDAPIKey  string                `json:"-"`
 	HTTPClient *http.Client          `json:"-"`
 	Host       Host                  `json:"-"`
@@ -39,6 +40,7 @@ func ConfigFromEnv() Config {
 	return Config{
 		Tools:      splitList(os.Getenv("PIGO_RESEARCH_TOOLS")),
 		SearXNGURL: firstNonEmpty(os.Getenv("PIGO_SEARXNG_URL"), os.Getenv("SEARXNG_URL")),
+		ObscuraURL: firstNonEmpty(os.Getenv("PIGO_OBSCURA_URL"), os.Getenv("OBSCURA_URL")),
 		NVDAPIKey:  firstNonEmpty(os.Getenv("PIGO_NVD_API_KEY"), os.Getenv("NVD_API_KEY")),
 	}
 }
@@ -46,6 +48,7 @@ func ConfigFromEnv() Config {
 func (c Config) Normalized() Config {
 	c.Tools = normalizeList(c.Tools)
 	c.SearXNGURL = strings.TrimRight(strings.TrimSpace(c.SearXNGURL), "/")
+	c.ObscuraURL = strings.TrimRight(strings.TrimSpace(c.ObscuraURL), "/")
 	c.NVDAPIKey = strings.TrimSpace(c.NVDAPIKey)
 	return c
 }
@@ -73,6 +76,7 @@ func (c Config) Metadata() map[string]any {
 		"available":  ToolNames(),
 		"tools":      append([]string(nil), c.Tools...),
 		"searxngUrl": c.SearXNGURL,
+		"obscuraUrl": c.ObscuraURL,
 		"sources":    []string{"osv", "nvd", "cisa-kev"},
 		"nvdApiKey":  c.NVDAPIKey != "",
 	}

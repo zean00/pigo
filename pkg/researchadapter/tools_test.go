@@ -9,14 +9,16 @@ import (
 	"testing"
 
 	"github.com/badlogic/pigo/pkg/ai"
+	"golang.org/x/net/websocket"
 )
 
 func TestConfigFromEnvAndValidation(t *testing.T) {
 	t.Setenv("PIGO_RESEARCH_TOOLS", "search,scrape")
 	t.Setenv("PIGO_SEARXNG_URL", "http://search.test/")
+	t.Setenv("PIGO_OBSCURA_URL", "http://obscura.test/")
 	t.Setenv("PIGO_NVD_API_KEY", "nvd-key")
 	config := ConfigFromEnv().Normalized()
-	if len(config.Tools) != 2 || config.Tools[0] != "search" || config.SearXNGURL != "http://search.test" || config.NVDAPIKey != "nvd-key" {
+	if len(config.Tools) != 2 || config.Tools[0] != "search" || config.SearXNGURL != "http://search.test" || config.ObscuraURL != "http://obscura.test" || config.NVDAPIKey != "nvd-key" {
 		t.Fatalf("config = %#v", config)
 	}
 	if config.Metadata()["nvdApiKey"] != true {
@@ -67,6 +69,59 @@ func TestScrapeToolExtractsHTMLText(t *testing.T) {
 	result := tools[0].Execute(context.Background(), ai.ContentBlock{Arguments: map[string]any{"url": server.URL}})
 	if result.IsError || !strings.Contains(result.Text, "Hello") || strings.Contains(result.Text, "ignore") {
 		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestScrapeToolRequiresObscuraURL(t *testing.T) {
+	tools, _ := Tools(Config{Tools: []string{"scrape"}})
+	result := tools[0].Execute(context.Background(), ai.ContentBlock{Arguments: map[string]any{"url": "https://example.test", "engine": "obscura"}})
+	if !result.IsError || !strings.Contains(result.Text, "OBSCURA_URL") {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestScrapeToolUsesObscuraCDP(t *testing.T) {
+	server := httptest.NewServer(websocket.Handler(func(conn *websocket.Conn) {
+		for {
+			var request map[string]any
+			if err := websocket.JSON.Receive(conn, &request); err != nil {
+				return
+			}
+			id := request["id"]
+			method, _ := request["method"].(string)
+			response := map[string]any{"id": id, "result": map[string]any{}}
+			switch method {
+			case "Target.createTarget":
+				response["result"] = map[string]any{"targetId": "target-1"}
+			case "Target.attachToTarget":
+				response["result"] = map[string]any{"sessionId": "session-1"}
+			case "Runtime.evaluate":
+				params, _ := request["params"].(map[string]any)
+				expression, _ := params["expression"].(string)
+				value := "complete"
+				if strings.Contains(expression, "document.title") {
+					value = "Rendered Doc"
+				}
+				if strings.Contains(expression, "innerText") {
+					value = "Rendered body text"
+				}
+				response["result"] = map[string]any{"result": map[string]any{"value": value}}
+			}
+			if err := websocket.JSON.Send(conn, response); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+	obscuraURL := "ws" + strings.TrimPrefix(server.URL, "http")
+
+	tools, _ := Tools(Config{Tools: []string{"scrape"}, ObscuraURL: obscuraURL})
+	result := tools[0].Execute(context.Background(), ai.ContentBlock{Arguments: map[string]any{"url": "https://example.test/page", "render": true}})
+	if result.IsError || !strings.Contains(result.Text, "Rendered body text") {
+		t.Fatalf("result = %#v", result)
+	}
+	if result.Details["engine"] != "obscura" {
+		t.Fatalf("details = %#v", result.Details)
 	}
 }
 

@@ -1,0 +1,25 @@
+services:
+  obscura:
+    build:
+      context: .
+      args:
+        OBSCURA_VERSION: ${OBSCURA_VERSION:-latest}
+    image: pigo-obscura:${OBSCURA_VERSION:-latest}
+    command:
+      - serve
+      - --port
+      - "9222"
+      - --stealth
+      - --obey-robots
+      - --workers
+      - "${OBSCURA_WORKERS:-1}"
+    ports:
+      - "${OBSCURA_HOST:-127.0.0.1}:${OBSCURA_PORT:-9222}:9222"
+    restart: unless-stopped
+    shm_size: "512mb"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9222/json/version"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s

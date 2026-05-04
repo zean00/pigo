@@ -257,6 +257,14 @@ The `research` tool accepts `query`, optional `depth` (currently only `0` quick 
 
 `PIGO_OBSCURA_URL` falls back to `OBSCURA_URL`. Point it at a Docker-hosted Obscura CDP server, for example `http://localhost:9222` from `obscura serve --port 9222`. The `scrape` tool uses it when called with `engine: "obscura"` or `render: true`.
 
+A stealth-mode Obscura Compose template is available in `deploy/obscura`:
+
+```bash
+cd deploy/obscura
+docker compose up -d --build
+export PIGO_OBSCURA_URL=http://localhost:9222
+```
+
 `PIGO_NVD_API_KEY` falls back to `NVD_API_KEY`. It is optional, but helps avoid anonymous NVD API rate limits. ACP config state reports only whether a key is configured, not the key value.
 
 ACP sessions expose these config options:

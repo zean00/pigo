@@ -187,7 +187,7 @@ ACP clients can opt in to internet research tools with `session/set_config_optio
   "params": {
     "sessionId": "session-id",
     "configId": "research_tools",
-    "value": "search,scrape,security_search"
+    "value": "research,search,scrape,security_search"
   }
 }
 ```

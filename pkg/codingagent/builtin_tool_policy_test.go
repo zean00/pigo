@@ -2,6 +2,7 @@ package codingagent
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/badlogic/pigo/pkg/agentcore"
@@ -79,12 +80,78 @@ func TestSessionResearchToolsAreOptIn(t *testing.T) {
 	}
 }
 
+func TestSessionResearchToolRunsWithSafeSubAgentTools(t *testing.T) {
+	seenTools := []string{}
+	ai.RegisterProvider("codingagent-research-test-provider", sessionResearchProviderFunc(func(_ context.Context, req ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error) {
+		for _, tool := range req.Tools {
+			seenTools = append(seenTools, tool.Name)
+		}
+		for _, forbidden := range []string{"bash", "write", "edit", "ls", "find", "research"} {
+			if containsString(seenTools, forbidden) {
+				t.Fatalf("forbidden research sub-agent tool exposed: %s in %#v", forbidden, seenTools)
+			}
+		}
+		for _, required := range []string{"read", "grep", "search", "scrape", "security_search"} {
+			if !containsString(seenTools, required) {
+				t.Fatalf("missing research sub-agent tool %q in %#v", required, seenTools)
+			}
+		}
+		return sessionResearchTextResult("session research report"), ai.AssistantEvents([]ai.ContentBlock{{Type: "text", Text: "session research report"}}, "stop"), nil
+	}))
+	session := NewSession(t.TempDir(), nil)
+	session.Provider = "codingagent-research-test-provider"
+	session.ModelID = "codingagent-research-test-model"
+	if err := session.SetResearchConfig(researchadapter.Config{Tools: []string{"research"}}); err != nil {
+		t.Fatal(err)
+	}
+	var researchTool agentcore.Tool
+	for _, tool := range session.builtinTools() {
+		if tool.Name == "research" {
+			researchTool = tool
+			break
+		}
+	}
+	if researchTool.Name == "" {
+		t.Fatal("research tool not exposed")
+	}
+	result := researchTool.Execute(context.Background(), ai.ContentBlock{Arguments: map[string]any{"query": "session research"}})
+	if result.IsError || !strings.Contains(result.Text, "session research report") {
+		t.Fatalf("result = %#v", result)
+	}
+	hasProgress := false
+	for _, event := range session.Events {
+		if event["type"] == "research_progress" {
+			hasProgress = true
+			break
+		}
+	}
+	if !hasProgress {
+		t.Fatalf("events = %#v", session.Events)
+	}
+}
+
 func TestRunHeadlessSessionRejectsInvalidResearchTool(t *testing.T) {
 	_, err := RunHeadlessSession(context.Background(), t.TempDir(), SessionInput{
 		ResearchConfig: researchadapter.Config{Tools: []string{"unknown"}},
 	})
 	if err == nil {
 		t.Fatal("expected invalid research tool error")
+	}
+}
+
+type sessionResearchProviderFunc func(context.Context, ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error)
+
+func (fn sessionResearchProviderFunc) Complete(ctx context.Context, req ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error) {
+	return fn(ctx, req)
+}
+
+func sessionResearchTextResult(text string) ai.NormalizedResult {
+	return ai.NormalizedResult{
+		Role:       "assistant",
+		StopReason: "stop",
+		Text:       text,
+		Content:    []any{map[string]any{"type": "text", "text": text}},
+		Usage:      &ai.Usage{Input: 1, Output: 1, TotalTokens: 2},
 	}
 }
 

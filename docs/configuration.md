@@ -250,6 +250,8 @@ Available research tools:
 | `scrape` | Fetch HTTP(S) URLs and extract compact readable text. |
 | `security_search` | Search public vulnerability sources such as OSV, NVD, and CISA KEV. |
 
+The `research` tool accepts `query`, optional `depth` (currently only `0` quick mode), and optional `model`. A bare `model` value keeps the parent session provider; `provider/model` switches the quick research sub-agent to that provider and model.
+
 `PIGO_SEARXNG_URL` falls back to `SEARXNG_URL`. Production sessions use an external SearXNG URL; local validation can start a disposable Docker SearXNG container with the smoke script below.
 
 `PIGO_NVD_API_KEY` falls back to `NVD_API_KEY`. It is optional, but helps avoid anonymous NVD API rate limits. ACP config state reports only whether a key is configured, not the key value.

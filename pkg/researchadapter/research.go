@@ -30,7 +30,7 @@ func researchTool(config Config) agentcore.Tool {
 			toolCallID := strings.TrimSpace(call.ID)
 			provider, model := config.Host.Model()
 			if override, _ := call.Arguments["model"].(string); strings.TrimSpace(override) != "" {
-				model = strings.TrimSpace(override)
+				provider, model = researchModelOverride(provider, model, override)
 			}
 			if provider == "" || model == "" {
 				return agentcore.ToolResult{Text: "research requires the parent session to have a configured model", IsError: true}
@@ -47,6 +47,31 @@ func researchTool(config Config) agentcore.Tool {
 			return agentcore.ToolResult{Text: result, Details: details}
 		},
 	}
+}
+
+func researchModelOverride(currentProvider, currentModel, override string) (string, string) {
+	override = strings.TrimSpace(override)
+	if override == "" {
+		return currentProvider, currentModel
+	}
+	if strings.TrimSpace(currentProvider) != "" {
+		if _, ok := ai.GetModel(currentProvider, override); ok {
+			return currentProvider, override
+		}
+	}
+	if provider, model, ok := strings.Cut(override, "/"); ok {
+		provider = strings.TrimSpace(provider)
+		model = strings.TrimSpace(model)
+		if provider != "" && model != "" {
+			if _, err := ai.ResolveProvider(provider); err == nil {
+				return provider, model
+			}
+			if _, ok := ai.ProviderSpecForProvider(provider); ok {
+				return provider, model
+			}
+		}
+	}
+	return currentProvider, override
 }
 
 func runQuickResearch(ctx context.Context, config Config, provider, model, query, toolCallID string) (string, map[string]any, error) {

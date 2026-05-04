@@ -74,6 +74,25 @@ func TestResearchToolRejectsDeepMode(t *testing.T) {
 	}
 }
 
+func TestResearchModelOverrideSupportsProviderQualifiedModel(t *testing.T) {
+	ai.RegisterProvider("research-alt-provider", researchProviderFunc(func(context.Context, ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error) {
+		return textResult("unused"), nil, nil
+	}))
+	provider, model := researchModelOverride("research-test-provider", "research-test-model", "research-alt-provider/alt-model")
+	if provider != "research-alt-provider" || model != "alt-model" {
+		t.Fatalf("provider/model = %q/%q", provider, model)
+	}
+}
+
+func TestResearchModelOverrideKeepsCurrentProviderSlashModel(t *testing.T) {
+	ai.RegisterModel(ai.Model{Provider: "research-test-provider", ID: "vendor/model-a"})
+	defer ai.ClearProviderModels("research-test-provider")
+	provider, model := researchModelOverride("research-test-provider", "research-test-model", "vendor/model-a")
+	if provider != "research-test-provider" || model != "vendor/model-a" {
+		t.Fatalf("provider/model = %q/%q", provider, model)
+	}
+}
+
 type researchProviderFunc func(context.Context, ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error)
 
 func (fn researchProviderFunc) Complete(ctx context.Context, req ai.CompletionRequest) (ai.NormalizedResult, []ai.NormalizedEvent, error) {

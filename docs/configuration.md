@@ -137,6 +137,39 @@ Example RPC update:
 {"id":"d1","type":"set_domain_config","purpose":"readonly","contextFiles":["AGENTS.md"],"includeGitContext":true,"includePackageContext":false}
 ```
 
+## Prompt Injection Guard
+
+The prompt-injection guard is optional and disabled by default. It is a defense-in-depth layer for sessions that read untrusted files, web pages, search results, scraped pages, MCP output, or extension tool output.
+
+Modes:
+
+| Mode | Behavior |
+| --- | --- |
+| `off` | Default. Do not change prompts, tool results, or tool execution. |
+| `annotate` | Wrap configured untrusted tool results with a warning and metadata. |
+| `enforce` | Annotate untrusted tool results and block configured sensitive tools after untrusted content has entered the active prompt context. |
+
+Environment defaults:
+
+```bash
+export PIGO_PROMPT_INJECTION_GUARD=enforce
+export PIGO_PROMPT_INJECTION_SOURCES=workspace,web,mcp,extension
+export PIGO_PROMPT_INJECTION_SENSITIVE_TOOLS='bash,write,edit,mcp__*,extension:*'
+```
+
+Sources are `workspace`, `web`, `mcp`, and `extension`. In `enforce` mode, the default sensitive tools are `bash`, `write`, `edit`, `mcp__*`, and `extension:*`. The guard does not replace permission controls; combine it with built-in tool policy and bash permissions for high-risk sessions.
+
+ACP sessions expose these config options:
+
+- `prompt_injection_guard`
+- `prompt_injection_sources`
+- `prompt_injection_sensitive_tools`
+
+The JSONL RPC adapter supports:
+
+- `set_prompt_injection_guard`
+- `get_prompt_injection_guard`
+
 ## Command Output Compression
 
 `pigo` can compress noisy bash command output before it is stored in session history or sent back to the model. This is inspired by RTK-style command filtering, but implemented natively inside the headless coding-agent runtime.

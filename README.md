@@ -98,6 +98,10 @@ Sessions record provider-reported token usage and can optionally enforce per-ses
 
 `pigo` defaults to a coding-agent prompt, but embedders can set a session purpose of `coding`, `generic`, `research`, or `readonly`. Purpose changes the system-prompt framing and context sections only; tool access is still controlled separately through built-in tool policy, bash permissions, research tools, MCP tools, and ACP/RPC config. See [Configuration](docs/configuration.md#session-purpose-and-context).
 
+## Prompt Injection Guard
+
+`pigo` includes an optional prompt-injection guard. It is disabled by default. When enabled, it marks configured tool-result sources as untrusted data, adds system-prompt guidance, and can block sensitive tools after untrusted content enters the session context. This is defense in depth; use it alongside built-in tool policy and bash permissions. See [Configuration](docs/configuration.md#prompt-injection-guard).
+
 ## Internal Modules
 
 Session capabilities are wired through an internal module registry so features can register tools, ACP/RPC config options, RPC handlers, and session metadata behavior without hardcoding every new feature into the core runtime. Registration is atomic: failed modules are rolled back before returning an error. See [Architecture](docs/architecture.md#pkgcodingagent).

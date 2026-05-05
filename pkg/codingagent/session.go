@@ -44,6 +44,7 @@ type SessionInput struct {
 	UsageQuota         UsageQuotaConfig
 	ResearchConfig     researchadapter.Config
 	DomainConfig       SessionDomainConfig
+	PromptInjection    PromptInjectionConfig
 }
 
 type SessionResult struct {
@@ -105,6 +106,11 @@ func RunHeadlessSession(ctx context.Context, root string, input SessionInput) (S
 	}
 	if input.DomainConfig.Purpose != "" || len(input.DomainConfig.ContextFiles) > 0 || input.DomainConfig.IncludeGitContext != nil || input.DomainConfig.IncludePackageContext != nil || input.DomainConfig.ExtraInstructions != "" {
 		if err := session.SetDomainConfig(input.DomainConfig); err != nil {
+			return SessionResult{}, err
+		}
+	}
+	if input.PromptInjection.Mode != "" || len(input.PromptInjection.Sources) > 0 || len(input.PromptInjection.SensitiveTools) > 0 {
+		if err := session.SetPromptInjectionConfig(input.PromptInjection); err != nil {
 			return SessionResult{}, err
 		}
 	}

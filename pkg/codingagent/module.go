@@ -288,6 +288,7 @@ func (m sessionModule) Register(registry *ModuleRegistry) error {
 func defaultSessionModules() []SessionModule {
 	return []SessionModule{
 		sessionModule{id: "core", register: registerCoreModule},
+		sessionModule{id: "prompt_injection_guard", register: registerPromptInjectionGuardModule},
 		sessionModule{id: "command_compression", register: registerCommandCompressionModule},
 		sessionModule{id: "bash_permission", register: registerBashPermissionModule},
 		sessionModule{id: "builtin_tools", register: registerBuiltinToolsModule},
@@ -296,6 +297,53 @@ func defaultSessionModules() []SessionModule {
 		sessionModule{id: "tool_search", register: registerToolSearchModule},
 		sessionModule{id: "usage", register: registerUsageModule},
 	}
+}
+
+func registerPromptInjectionGuardModule(registry *ModuleRegistry) error {
+	for _, option := range []ModuleConfigOption{
+		{
+			ID: "prompt_injection_guard", Name: "Prompt injection guard", Category: "security", Type: "select",
+			Options: PromptInjectionGuardModes(),
+			Get:     func(session *Session) string { return session.GetPromptInjectionConfig().Mode },
+			Set: func(session *Session, value string) error {
+				config := session.GetPromptInjectionConfig()
+				config.Mode = value
+				return session.SetPromptInjectionConfig(config)
+			},
+		},
+		{
+			ID: "prompt_injection_sources", Name: "Prompt injection sources", Category: "security", Type: "text",
+			Get: func(session *Session) string {
+				return strings.Join(session.GetPromptInjectionConfig().Sources, ",")
+			},
+			Set: func(session *Session, value string) error {
+				config := session.GetPromptInjectionConfig()
+				config.Sources = commaSeparatedList(value)
+				return session.SetPromptInjectionConfig(config)
+			},
+		},
+		{
+			ID: "prompt_injection_sensitive_tools", Name: "Prompt injection sensitive tools", Category: "security", Type: "text",
+			Get: func(session *Session) string {
+				return strings.Join(session.GetPromptInjectionConfig().SensitiveTools, ",")
+			},
+			Set: func(session *Session, value string) error {
+				config := session.GetPromptInjectionConfig()
+				config.SensitiveTools = commaSeparatedList(value)
+				return session.SetPromptInjectionConfig(config)
+			},
+		},
+	} {
+		if err := registry.RegisterConfigOption(option); err != nil {
+			return err
+		}
+	}
+	if err := registry.RegisterRPCHandler("set_prompt_injection_guard", setPromptInjectionGuardRPC); err != nil {
+		return err
+	}
+	return registry.RegisterRPCHandler("get_prompt_injection_guard", func(_ context.Context, session *Session, command rpcCommand) rpcResponse {
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: session.GetPromptInjectionConfig().Metadata()}
+	})
 }
 
 func registerCoreModule(registry *ModuleRegistry) error {
@@ -992,6 +1040,23 @@ func setBuiltinToolPolicyRPC(_ context.Context, session *Session, command rpcCom
 		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
 	}
 	return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: session.GetBuiltinToolPolicy().Metadata()}
+}
+
+func setPromptInjectionGuardRPC(_ context.Context, session *Session, command rpcCommand) rpcResponse {
+	config := session.GetPromptInjectionConfig()
+	if strings.TrimSpace(command.Mode) != "" {
+		config.Mode = command.Mode
+	}
+	if command.Sources != nil {
+		config.Sources = command.Sources
+	}
+	if command.SensitiveTools != nil {
+		config.SensitiveTools = command.SensitiveTools
+	}
+	if err := session.SetPromptInjectionConfig(config); err != nil {
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+	}
+	return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: session.GetPromptInjectionConfig().Metadata()}
 }
 
 func setResearchToolsRPC(_ context.Context, session *Session, command rpcCommand) rpcResponse {

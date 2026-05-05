@@ -50,11 +50,17 @@ Optional research tools are also appended separately when enabled. `research` ru
 
 There is no separate research-specific grep tool. The built-in `grep` is the canonical local search tool and returns structured match metadata that future research orchestration can count under its gathering budget.
 
+## Prompt Injection Guard
+
+The prompt-injection guard is off by default. When enabled, pigo treats configured tool-result sources as untrusted data. In `annotate` mode it wraps those results with warning text and metadata. In `enforce` mode it also blocks configured sensitive tools after untrusted content has entered the active session context.
+
+The guard is deterministic and source-based. It does not classify content with a model, and it does not replace tool permissions. Use built-in tool policy, bash permissions, and MCP/research configuration to limit what the model can call.
+
 ## Internal Modules
 
 Session capabilities are registered through an internal module registry. The registry keeps optional features from spreading hardcoded branches across the core runtime, ACP adapter, and JSONL RPC server.
 
-Current internal modules register core config, command-output compression, bash permissions, built-in tool policy, built-in tools, research tools, extension tools, agent profile selection, optional tool discovery, and usage quota/ledger behavior. The same registered config option drives ACP `session/set_config_option`, ACP session state, and JSONL RPC behavior where applicable.
+Current internal modules register core config, prompt-injection guard config, command-output compression, bash permissions, built-in tool policy, built-in tools, research tools, extension tools, agent profile selection, optional tool discovery, and usage quota/ledger behavior. The same registered config option drives ACP `session/set_config_option`, ACP session state, and JSONL RPC behavior where applicable.
 
 Session-entry modules define whether metadata appears in the branch tree, whether it advances the active leaf, how it is reapplied after branching, and how it is exported. This is why labels and usage metadata can participate in persistence without becoming visible conversation nodes.
 

@@ -65,6 +65,8 @@ type rpcCommand struct {
 	Tools                 []string             `json:"tools,omitempty"`
 	EnabledTools          []string             `json:"enabledTools,omitempty"`
 	DisabledTools         []string             `json:"disabledTools,omitempty"`
+	Sources               []string             `json:"sources,omitempty"`
+	SensitiveTools        []string             `json:"sensitiveTools,omitempty"`
 	ResearchTools         []string             `json:"researchTools,omitempty"`
 	SearXNGURL            string               `json:"searxngUrl,omitempty"`
 	ObscuraURL            string               `json:"obscuraUrl,omitempty"`

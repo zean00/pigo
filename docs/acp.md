@@ -147,6 +147,31 @@ The related options are:
 
 Purpose changes prompt framing and context only. Tool access remains controlled by built-in tool policy, bash permissions, research-tool settings, and MCP tools.
 
+## Prompt Injection Guard Through ACP
+
+ACP clients can opt in to prompt-injection guard behavior with `session/set_config_option`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "session/set_config_option",
+  "params": {
+    "sessionId": "session-id",
+    "configId": "prompt_injection_guard",
+    "value": "enforce"
+  }
+}
+```
+
+The related options are:
+
+- `prompt_injection_guard`: `off`, `annotate`, or `enforce`.
+- `prompt_injection_sources`: comma-separated list of `workspace`, `web`, `mcp`, and `extension`.
+- `prompt_injection_sensitive_tools`: comma-separated list of tool names or glob patterns, such as `bash,write,edit,mcp__*,extension:*`.
+
+The guard is disabled by default. It annotates untrusted tool output and, in `enforce`, blocks configured sensitive tools after untrusted content has entered the session context.
+
 ## Usage Quotas Through ACP
 
 ACP clients can enable per-session usage quotas with `session/set_config_option`:

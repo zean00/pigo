@@ -124,6 +124,9 @@ func (s *RPCServer) Serve(ctx context.Context, in io.Reader, out io.Writer) erro
 }
 
 func (s *RPCServer) handle(ctx context.Context, command rpcCommand) rpcResponse {
+	if handler, ok := s.Session.ensureModuleRegistry().RPCHandler(command.Type); ok {
+		return handler(ctx, s.Session, command)
+	}
 	switch command.Type {
 	case "prompt":
 		attachments, err := rpcPromptAttachments(command.Attachments, command.Images)

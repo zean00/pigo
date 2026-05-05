@@ -42,6 +42,16 @@ Optional research tools are also appended separately when enabled. `research` ru
 
 There is no separate research-specific grep tool. The built-in `grep` is the canonical local search tool and returns structured match metadata that future research orchestration can count under its gathering budget.
 
+## Internal Modules
+
+Session capabilities are registered through an internal module registry. The registry keeps optional features from spreading hardcoded branches across the core runtime, ACP adapter, and JSONL RPC server.
+
+Current internal modules register core config, command-output compression, bash permissions, built-in tool policy, built-in tools, research tools, extension tools, and usage quota/ledger behavior. The same registered config option drives ACP `session/set_config_option`, ACP session state, and JSONL RPC behavior where applicable.
+
+Session-entry modules define whether metadata appears in the branch tree, whether it advances the active leaf, how it is reapplied after branching, and how it is exported. This is why labels and usage metadata can participate in persistence without becoming visible conversation nodes.
+
+Module registration is transactional. A module that fails during registration is rolled back before the error is returned.
+
 ## Tool Execution Modes
 
 The agent loop supports three tool execution modes:

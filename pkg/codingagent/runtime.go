@@ -95,6 +95,7 @@ type Session struct {
 	promptTemplates       []SlashCommandInfo
 	skills                []SlashCommandInfo
 	resourceDiagnostics   []ResourceDiagnostic
+	modules               *ModuleRegistry
 }
 
 type CompactorFunc func(ctx context.Context, messages []ai.Message, instructions string) (string, error)
@@ -1979,32 +1980,13 @@ func (s *Session) promptTextWithAttachments(prompt string, attachments []PromptA
 }
 
 func (s *Session) builtinTools() []agentcore.Tool {
-	tools := BuiltinToolsWithOptions(s.Root, BuiltinToolOptions{
-		OutputLimit:        s.ToolOutputLimit,
-		ShellCommandPrefix: s.ShellCommandPrefix,
-		CommandCompression: s.CommandCompression,
-		BashPermission:     s.BashPermission,
-		BuiltinToolPolicy:  s.BuiltinToolPolicy,
-	})
-	researchConfig := s.ResearchConfig
-	researchConfig.Host = sessionResearchHost{session: s}
-	researchConfig.EventSink = func(event agentcore.Event) {
-		s.appendRuntimeEvent(event)
-	}
-	researchTools, _ := researchadapter.Tools(researchConfig)
-	tools = append(tools, researchTools...)
-	extensionTools, _ := s.ExtensionTools()
-	return append(tools, extensionTools...)
+	tools, _ := s.ensureModuleRegistry().Tools()
+	return tools
 }
 
 func (s *Session) toolSpecs() []ai.Tool {
-	specs := BuiltinToolSpecsWithPolicy(s.BuiltinToolPolicy)
-	researchConfig := s.ResearchConfig
-	researchConfig.Host = sessionResearchHost{session: s}
-	_, researchSpecs := researchadapter.Tools(researchConfig)
-	specs = append(specs, researchSpecs...)
-	_, extensionSpecs := s.ExtensionTools()
-	return append(specs, extensionSpecs...)
+	_, specs := s.ensureModuleRegistry().Tools()
+	return specs
 }
 
 type sessionResearchHost struct {
@@ -2266,6 +2248,7 @@ func (s *Session) TryNewSessionWithParent(ctx context.Context, parentSession str
 	s.ResearchConfig = researchadapter.ConfigFromEnv()
 	s.IsStreaming = false
 	s.parentSession = strings.TrimSpace(parentSession)
+	s.ensureModuleRegistry()
 	s.seedDefaultModels()
 
 	if s.Store != nil {
@@ -2989,11 +2972,8 @@ func (s *Session) ExportToJSONL(outputPath string) (string, error) {
 	}
 	branch := s.resolveBranchEntries(s.leafID)
 	linear := linearizeSessionEntries(branch)
-	labels := s.labelEntriesForBranch(branch)
-	metadata := s.usageMetadataEntries()
 	exportEntries := append([]SessionEntry{header}, linear...)
-	exportEntries = append(exportEntries, labels...)
-	exportEntries = append(exportEntries, metadata...)
+	exportEntries = append(exportEntries, s.exportMetadataEntries(branch)...)
 	return outputPath, writeSessionEntries(outputPath, exportEntries)
 }
 
@@ -3206,7 +3186,7 @@ func (s *Session) Tree() []SessionTreeNode {
 	roots := []*SessionTreeNode{}
 
 	for _, entry := range s.entries {
-		if entry.Type == "session" || entry.Type == "label" || entry.Type == "usage_ledger" || entry.Type == "usage_quota" {
+		if !s.sessionEntryVisibleInTree(entry.Type) {
 			continue
 		}
 		node := &SessionTreeNode{
@@ -3232,7 +3212,7 @@ func (s *Session) Tree() []SessionTreeNode {
 	}
 
 	for _, entry := range s.entries {
-		if entry.Type == "session" || entry.Type == "label" || entry.Type == "usage_ledger" || entry.Type == "usage_quota" {
+		if !s.sessionEntryVisibleInTree(entry.Type) {
 			continue
 		}
 		node := nodeMap[entry.ID]
@@ -3491,22 +3471,6 @@ func (s *Session) applyEntry(entry SessionEntry) {
 		s.ThinkingLevel = entry.Level
 	case "session_name":
 		s.Name = entry.Name
-	case "label":
-		if entry.TargetID != "" {
-			if s.labelsByID == nil {
-				s.labelsByID = map[string]string{}
-			}
-			if s.labelTimes == nil {
-				s.labelTimes = map[string]string{}
-			}
-			if strings.TrimSpace(entry.Label) == "" {
-				delete(s.labelsByID, entry.TargetID)
-				delete(s.labelTimes, entry.TargetID)
-			} else {
-				s.labelsByID[entry.TargetID] = entry.Label
-				s.labelTimes[entry.TargetID] = entry.Timestamp
-			}
-		}
 	case "custom":
 		s.customEntries = append(s.customEntries, entry)
 	case "oauth_login":
@@ -3516,14 +3480,9 @@ func (s *Session) applyEntry(entry SessionEntry) {
 			}
 			s.OAuthCredentials[entry.OAuthProvider] = *entry.OAuthCredentials
 		}
-	case "usage_ledger":
-		if entry.UsageLedger != nil {
-			s.UsageLedger = append(s.UsageLedger, *entry.UsageLedger)
-		}
-	case "usage_quota":
-		if entry.UsageQuota != nil {
-			s.UsageQuota = entry.UsageQuota.Normalized()
-		}
+	}
+	if handler, ok := s.ensureModuleRegistry().SessionEntryHandler(entry.Type); ok && handler.Apply != nil {
+		handler.Apply(s, entry)
 	}
 }
 
@@ -3549,6 +3508,7 @@ func (s *Session) loadSession(entries []SessionEntry) {
 	s.UsageQuota = UsageQuotaConfigFromEnv()
 	s.UsageLedger = nil
 	s.parentSession = ""
+	s.ensureModuleRegistry()
 
 	if len(entries) == 0 {
 		s.entries = make([]SessionEntry, 0)
@@ -3571,7 +3531,7 @@ func (s *Session) loadSession(entries []SessionEntry) {
 	}
 
 	for i := len(s.entries) - 1; i >= 0; i-- {
-		if s.entries[i].Type == "session" || s.entries[i].Type == "label" || s.entries[i].Type == "usage_ledger" || s.entries[i].Type == "usage_quota" {
+		if !s.sessionEntryAffectsLeaf(s.entries[i].Type) {
 			continue
 		}
 		s.leafID = s.entries[i].ID
@@ -3596,6 +3556,7 @@ func (s *Session) rebuildStateFromLeaf(leafID string) {
 	s.ToolExecution = ToolExecutionModeFromEnv()
 	s.UsageQuota = UsageQuotaConfigFromEnv()
 	s.UsageLedger = nil
+	s.ensureModuleRegistry()
 
 	branch := s.resolveBranchEntries(leafID)
 	for _, entry := range branch {
@@ -3606,16 +3567,30 @@ func (s *Session) rebuildStateFromLeaf(leafID string) {
 		branchIDs[entry.ID] = struct{}{}
 	}
 	for _, entry := range s.entries {
-		switch entry.Type {
-		case "label":
-			if _, ok := branchIDs[entry.TargetID]; ok {
-				s.applyEntry(entry)
-			}
-		case "usage_ledger", "usage_quota":
-			s.applyEntry(entry)
+		if _, ok := branchIDs[entry.ID]; ok {
+			continue
+		}
+		if handler, ok := s.ensureModuleRegistry().SessionEntryHandler(entry.Type); ok && handler.ApplyAfterBranch != nil {
+			handler.ApplyAfterBranch(s, entry, branchIDs)
 		}
 	}
 	s.seedDefaultModels()
+}
+
+func (s *Session) sessionEntryVisibleInTree(entryType string) bool {
+	handler, ok := s.ensureModuleRegistry().SessionEntryHandler(entryType)
+	if !ok {
+		return true
+	}
+	return handler.VisibleInTree
+}
+
+func (s *Session) sessionEntryAffectsLeaf(entryType string) bool {
+	handler, ok := s.ensureModuleRegistry().SessionEntryHandler(entryType)
+	if !ok {
+		return true
+	}
+	return handler.AffectsLeaf
 }
 
 func (s *Session) prepareEntry(entry SessionEntry) SessionEntry {
@@ -3770,10 +3745,23 @@ func (s *Session) labelEntriesForBranch(branch []SessionEntry) []SessionEntry {
 	return labels
 }
 
-func (s *Session) usageMetadataEntries() []SessionEntry {
+func (s *Session) exportMetadataEntries(branch []SessionEntry) []SessionEntry {
+	registry := s.ensureModuleRegistry()
+	entries := make([]SessionEntry, 0)
+	for _, entryType := range registry.entryOrder {
+		handler, ok := registry.SessionEntryHandler(entryType)
+		if !ok || handler.ExportMetadata == nil {
+			continue
+		}
+		entries = append(entries, handler.ExportMetadata(s, branch)...)
+	}
+	return entries
+}
+
+func (s *Session) metadataEntriesForType(entryType string) []SessionEntry {
 	entries := make([]SessionEntry, 0)
 	for _, entry := range s.entries {
-		if entry.Type != "usage_ledger" && entry.Type != "usage_quota" {
+		if entry.Type != entryType {
 			continue
 		}
 		copied := entry

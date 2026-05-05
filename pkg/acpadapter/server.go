@@ -12,7 +12,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -767,101 +766,15 @@ func (s *Server) setConfigOption(params setConfigOptionParams) (any, *jsonrpcErr
 	}
 	value := strings.TrimSpace(params.configValue())
 	var err error
-	switch strings.TrimSpace(params.ConfigID) {
-	case "thinking_level":
-		err = session.Session.SetThinkingLevel(value)
-	case "steering_mode":
-		err = session.Session.SetSteeringMode(value)
-	case "follow_up_mode":
-		err = session.Session.SetFollowUpMode(value)
-	case "tool_execution":
-		err = session.Session.SetToolExecutionMode(value)
-	case "model":
+	if option, ok := session.Session.ConfigOption(params.ConfigID); ok {
+		err = option.SetValue(session.Session, value)
+	} else if strings.TrimSpace(params.ConfigID) == "model" {
 		var model codingagent.ModelInfo
 		model, err = findACPModel(session.Session, value)
 		if err == nil {
 			_, err = session.Session.SetModel(model.Provider, model.ModelID)
 		}
-	case "command_compression":
-		config := session.Session.GetCommandCompression()
-		config.Mode = value
-		err = session.Session.SetCommandCompression(config)
-	case "command_compression_enabled_filters":
-		config := session.Session.GetCommandCompression()
-		config.EnabledFilters = commaList(value)
-		err = session.Session.SetCommandCompression(config)
-	case "command_compression_disabled_filters":
-		config := session.Session.GetCommandCompression()
-		config.DisabledFilters = commaList(value)
-		err = session.Session.SetCommandCompression(config)
-	case "bash_permission_mode":
-		policy := session.Session.GetBashPermissionPolicy()
-		policy.Mode = value
-		err = session.Session.SetBashPermissionPolicy(policy)
-	case "bash_permission_allow":
-		policy := session.Session.GetBashPermissionPolicy()
-		policy.Allow = commaList(value)
-		err = session.Session.SetBashPermissionPolicy(policy)
-	case "bash_permission_deny":
-		policy := session.Session.GetBashPermissionPolicy()
-		policy.Deny = commaList(value)
-		err = session.Session.SetBashPermissionPolicy(policy)
-	case "builtin_tools_enabled":
-		policy := session.Session.GetBuiltinToolPolicy()
-		policy.Enabled = commaList(value)
-		err = session.Session.SetBuiltinToolPolicy(policy)
-	case "builtin_tools_disabled":
-		policy := session.Session.GetBuiltinToolPolicy()
-		policy.Disabled = commaList(value)
-		err = session.Session.SetBuiltinToolPolicy(policy)
-	case "research_tools":
-		config := session.Session.GetResearchConfig()
-		config.Tools = commaList(value)
-		err = session.Session.SetResearchConfig(config)
-	case "research_searxng_url":
-		config := session.Session.GetResearchConfig()
-		config.SearXNGURL = value
-		err = session.Session.SetResearchConfig(config)
-	case "research_obscura_url":
-		config := session.Session.GetResearchConfig()
-		config.ObscuraURL = value
-		err = session.Session.SetResearchConfig(config)
-	case "research_nvd_api_key":
-		config := session.Session.GetResearchConfig()
-		config.NVDAPIKey = value
-		err = session.Session.SetResearchConfig(config)
-	case "usage_quota":
-		config := session.Session.GetUsageQuota()
-		config.Mode = value
-		err = session.Session.SetUsageQuota(config)
-	case "usage_max_input_tokens", "usage_max_output_tokens", "usage_max_cache_read_tokens", "usage_max_cache_write_tokens", "usage_max_total_tokens":
-		var parsed int
-		parsed, err = strconv.Atoi(value)
-		if err == nil {
-			config := session.Session.GetUsageQuota()
-			switch strings.TrimSpace(params.ConfigID) {
-			case "usage_max_input_tokens":
-				config.MaxInputTokens = parsed
-			case "usage_max_output_tokens":
-				config.MaxOutputTokens = parsed
-			case "usage_max_cache_read_tokens":
-				config.MaxCacheReadTokens = parsed
-			case "usage_max_cache_write_tokens":
-				config.MaxCacheWriteTokens = parsed
-			case "usage_max_total_tokens":
-				config.MaxTotalTokens = parsed
-			}
-			err = session.Session.SetUsageQuota(config)
-		}
-	case "usage_max_cost":
-		var parsed float64
-		parsed, err = strconv.ParseFloat(value, 64)
-		if err == nil {
-			config := session.Session.GetUsageQuota()
-			config.MaxCost = parsed
-			err = session.Session.SetUsageQuota(config)
-		}
-	default:
+	} else {
 		return nil, invalidParams(fmt.Errorf("unknown config option %q", params.ConfigID))
 	}
 	if err != nil {
@@ -932,96 +845,36 @@ func acpModeState(session *codingagent.Session) map[string]any {
 }
 
 func acpConfigOptions(session *codingagent.Session) []map[string]any {
-	compression := session.GetCommandCompression()
-	permission := session.GetBashPermissionPolicy()
-	toolPolicy := session.GetBuiltinToolPolicy()
-	researchConfig := session.GetResearchConfig()
-	usageQuota := session.GetUsageQuota()
-	return []map[string]any{
-		selectConfigOption("thinking_level", "Thinking level", session.ThinkingLevel, []string{"off", "low", "medium", "high", "xhigh"}),
-		selectConfigOption("steering_mode", "Steering mode", session.SteeringMode, []string{"one-at-a-time", "all"}),
-		selectConfigOption("follow_up_mode", "Follow-up mode", session.FollowUpMode, []string{"one-at-a-time", "all"}),
-		selectConfigOption("tool_execution", "Tool execution", string(session.ToolExecution), []string{"parallel", "sequential", "interleaved"}),
-		selectConfigOption("command_compression", "Command compression", compression.Mode, []string{"off", "auto", "force"}),
-		stringConfigOption("command_compression_enabled_filters", "Command compression enabled filters", strings.Join(compression.EnabledFilters, ",")),
-		stringConfigOption("command_compression_disabled_filters", "Command compression disabled filters", strings.Join(compression.DisabledFilters, ",")),
-		selectConfigOption("bash_permission_mode", "Bash permission mode", permission.Mode, []string{"allow-all", "allow-list"}),
-		stringConfigOption("bash_permission_allow", "Bash permission allow", strings.Join(permission.Allow, ",")),
-		stringConfigOption("bash_permission_deny", "Bash permission deny", strings.Join(permission.Deny, ",")),
-		stringConfigOption("builtin_tools_enabled", "Built-in tools enabled", strings.Join(toolPolicy.Enabled, ",")),
-		stringConfigOption("builtin_tools_disabled", "Built-in tools disabled", strings.Join(toolPolicy.Disabled, ",")),
-		stringConfigOption("research_tools", "Research tools", strings.Join(researchConfig.Tools, ",")),
-		stringConfigOption("research_searxng_url", "Research SearXNG URL", researchConfig.SearXNGURL),
-		stringConfigOption("research_obscura_url", "Research Obscura URL", researchConfig.ObscuraURL),
-		stringConfigOption("research_nvd_api_key", "Research NVD API key", maskSecret(researchConfig.NVDAPIKey)),
-		selectConfigOption("usage_quota", "Usage quota", usageQuota.Mode, []string{"off", "enforce"}),
-		stringConfigOption("usage_max_input_tokens", "Usage max input tokens", fmt.Sprint(usageQuota.MaxInputTokens)),
-		stringConfigOption("usage_max_output_tokens", "Usage max output tokens", fmt.Sprint(usageQuota.MaxOutputTokens)),
-		stringConfigOption("usage_max_cache_read_tokens", "Usage max cache read tokens", fmt.Sprint(usageQuota.MaxCacheReadTokens)),
-		stringConfigOption("usage_max_cache_write_tokens", "Usage max cache write tokens", fmt.Sprint(usageQuota.MaxCacheWriteTokens)),
-		stringConfigOption("usage_max_total_tokens", "Usage max total tokens", fmt.Sprint(usageQuota.MaxTotalTokens)),
-		stringConfigOption("usage_max_cost", "Usage max cost", fmt.Sprintf("%g", usageQuota.MaxCost)),
-		modelConfigOption(session),
+	options := make([]map[string]any, 0, len(session.ConfigOptions())+1)
+	for _, option := range session.ConfigOptions() {
+		options = append(options, acpConfigOptionFromModule(session, option))
 	}
+	return append(options, modelConfigOption(session))
 }
 
-func maskSecret(value string) string {
-	if strings.TrimSpace(value) == "" {
-		return ""
-	}
-	return "<configured>"
-}
-
-func selectConfigOption(id, name, current string, values []string) map[string]any {
-	options := make([]map[string]any, 0, len(values))
-	for _, value := range values {
-		options = append(options, map[string]any{"value": value, "name": value})
-	}
-	option := map[string]any{
-		"id":           id,
-		"name":         name,
-		"type":         "select",
-		"currentValue": current,
-		"options":      options,
-	}
-	switch id {
-	case "thinking_level":
-		option["category"] = "thought_level"
-	case "steering_mode", "follow_up_mode", "tool_execution":
-		option["category"] = "mode"
-	case "usage_quota":
-		option["category"] = "usage"
-	}
-	return option
-}
-
-func stringConfigOption(id, name, current string) map[string]any {
-	category := "command_output"
-	if strings.HasPrefix(id, "usage_") {
-		category = "usage"
+func acpConfigOptionFromModule(session *codingagent.Session, option codingagent.ModuleConfigOption) map[string]any {
+	current := option.CurrentValue(session)
+	if option.Type == "select" {
+		choices := make([]map[string]any, 0, len(option.Options))
+		for _, value := range option.Options {
+			choices = append(choices, map[string]any{"value": value, "name": value})
+		}
+		return map[string]any{
+			"id":           option.ID,
+			"name":         option.Name,
+			"category":     option.Category,
+			"type":         "select",
+			"currentValue": current,
+			"options":      choices,
+		}
 	}
 	return map[string]any{
-		"id":           id,
-		"name":         name,
-		"category":     category,
+		"id":           option.ID,
+		"name":         option.Name,
+		"category":     option.Category,
 		"type":         "text",
 		"currentValue": current,
 	}
-}
-
-func commaList(value string) []string {
-	if strings.TrimSpace(value) == "" {
-		return nil
-	}
-	parts := strings.Split(value, ",")
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			out = append(out, part)
-		}
-	}
-	return out
 }
 
 func modelConfigOption(session *codingagent.Session) map[string]any {

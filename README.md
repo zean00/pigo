@@ -29,7 +29,7 @@ Start here:
 
 - `pkg/ai`: provider-independent message, stream, tool-call, model, auth, usage, and normalization contracts.
 - `pkg/agentcore`: model/tool loop, event streaming, session state, and provider request behavior.
-- `pkg/codingagent`: headless coding-agent runtime for workspace operations, session storage, hooks, OAuth, and model selection.
+- `pkg/codingagent`: headless coding-agent runtime for workspace operations, session storage, hooks, internal modules, OAuth, and model selection.
 - `pkg/acpadapter`: ACP stdio adapter for host applications.
 - `pkg/mcpadapter`: MCP server registry and tool bridge.
 
@@ -93,6 +93,10 @@ The built-in coding tools are `bash`, `write`, `read`, `edit`, `ls`, `grep`, and
 Tool execution can run in `parallel`, `sequential`, or `interleaved` mode. Interleaved mode returns one tool result to the model at a time so reasoning can continue between tool calls. See [Configuration](docs/configuration.md#tool-execution).
 
 Sessions record provider-reported token usage and can optionally enforce per-session token/cost quotas. See [Configuration](docs/configuration.md#usage-ledger-and-quotas).
+
+## Internal Modules
+
+Session capabilities are wired through an internal module registry so features can register tools, ACP/RPC config options, RPC handlers, and session metadata behavior without hardcoding every new feature into the core runtime. Registration is atomic: failed modules are rolled back before returning an error. See [Architecture](docs/architecture.md#pkgcodingagent).
 
 ## Research Tools
 

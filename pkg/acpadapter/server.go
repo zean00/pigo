@@ -811,6 +811,16 @@ func (s *Server) sessionStateResult(session *codingagent.Session) map[string]any
 		"models":        acpModelState(session),
 		"modes":         acpModeState(session),
 		"configOptions": acpConfigOptions(session),
+		"agents":        acpAgentState(session),
+	}
+}
+
+func acpAgentState(session *codingagent.Session) map[string]any {
+	return map[string]any{
+		"activeProfile": session.ActiveAgentProfile(),
+		"profiles":      session.AgentProfiles(),
+		"teams":         session.AgentTeams(),
+		"chains":        session.AgentChains(),
 	}
 }
 
@@ -855,8 +865,9 @@ func acpConfigOptions(session *codingagent.Session) []map[string]any {
 func acpConfigOptionFromModule(session *codingagent.Session, option codingagent.ModuleConfigOption) map[string]any {
 	current := option.CurrentValue(session)
 	if option.Type == "select" {
-		choices := make([]map[string]any, 0, len(option.Options))
-		for _, value := range option.Options {
+		values := option.SelectOptions(session)
+		choices := make([]map[string]any, 0, len(values))
+		for _, value := range values {
 			choices = append(choices, map[string]any{"value": value, "name": value})
 		}
 		return map[string]any{

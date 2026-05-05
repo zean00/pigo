@@ -778,6 +778,49 @@ func TestNewSessionAppliesInitialModelSelection(t *testing.T) {
 	}
 }
 
+func TestSessionStateIncludesAgentResources(t *testing.T) {
+	root := t.TempDir()
+	agentDir := filepath.Join(root, "agent-home")
+	if err := os.MkdirAll(filepath.Join(agentDir, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	profile := "---\nname: reviewer\ndescription: Review code\n---\nReview carefully."
+	if err := os.WriteFile(filepath.Join(agentDir, "agents", "reviewer.md"), []byte(profile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server := New(ServerOptions{AgentDir: agentDir, DiscoverResources: true})
+	result, rpcErr := server.handleRequest(context.Background(), jsonrpcRequest{
+		Method: "session/new",
+		Params: json.RawMessage(`{"cwd":` + quote(root) + `,"mcpServers":[]}`),
+	})
+	if rpcErr != nil {
+		t.Fatalf("new session error = %#v", rpcErr)
+	}
+	sessionID := result.(map[string]any)["sessionId"].(string)
+	setProfile, rpcErr := server.handleRequest(context.Background(), jsonrpcRequest{
+		Method: "session/set_config_option",
+		Params: json.RawMessage(`{"sessionId":` + quote(sessionID) + `,"configId":"agent_profile","value":"reviewer"}`),
+	})
+	if rpcErr != nil {
+		t.Fatalf("set agent profile error = %#v", rpcErr)
+	}
+	state := setProfile.(map[string]any)
+	agents := state["agents"].(map[string]any)
+	if agents["activeProfile"] != "reviewer" {
+		t.Fatalf("agents = %#v", agents)
+	}
+	options := state["configOptions"].([]map[string]any)
+	found := false
+	for _, option := range options {
+		if option["id"] == "agent_profile" && option["currentValue"] == "reviewer" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("config options = %#v", options)
+	}
+}
+
 func TestDocumentNotificationsFeedPromptContext(t *testing.T) {
 	root := t.TempDir()
 	session := codingagent.NewSession(root, []codingagent.AssistantTurn{

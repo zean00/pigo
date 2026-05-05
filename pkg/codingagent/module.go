@@ -3,6 +3,7 @@ package codingagent
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -33,13 +34,14 @@ type ModuleToolProvider func(*Session) ([]agentcore.Tool, []ai.Tool)
 type ModuleRPCHandler func(context.Context, *Session, rpcCommand) rpcResponse
 
 type ModuleConfigOption struct {
-	ID       string
-	Name     string
-	Category string
-	Type     string
-	Options  []string
-	Get      func(*Session) string
-	Set      func(*Session, string) error
+	ID          string
+	Name        string
+	Category    string
+	Type        string
+	Options     []string
+	OptionsFunc func(*Session) []string
+	Get         func(*Session) string
+	Set         func(*Session, string) error
 }
 
 type ModuleSessionEntryHandler struct {
@@ -208,6 +210,13 @@ func (o ModuleConfigOption) CurrentValue(session *Session) string {
 	return o.Get(session)
 }
 
+func (o ModuleConfigOption) SelectOptions(session *Session) []string {
+	if o.OptionsFunc != nil {
+		return o.OptionsFunc(session)
+	}
+	return append([]string(nil), o.Options...)
+}
+
 func (o ModuleConfigOption) SetValue(session *Session, value string) error {
 	if o.Set == nil {
 		return fmt.Errorf("config option %s is read-only", o.ID)
@@ -284,6 +293,7 @@ func defaultSessionModules() []SessionModule {
 		sessionModule{id: "builtin_tools", register: registerBuiltinToolsModule},
 		sessionModule{id: "research", register: registerResearchModule},
 		sessionModule{id: "extension_tools", register: registerExtensionToolsModule},
+		sessionModule{id: "tool_search", register: registerToolSearchModule},
 		sessionModule{id: "usage", register: registerUsageModule},
 	}
 }
@@ -331,13 +341,63 @@ func registerCoreModule(registry *ModuleRegistry) error {
 			Get:     func(session *Session) string { return string(session.ToolExecution) },
 			Set:     func(session *Session, value string) error { return session.SetToolExecutionMode(value) },
 		},
+		{
+			ID: "agent_profile", Name: "Agent profile", Category: "agent", Type: "select",
+			OptionsFunc: func(session *Session) []string {
+				values := []string{"default"}
+				for _, profile := range session.AgentProfiles() {
+					values = append(values, profile.Name)
+				}
+				return values
+			},
+			Get: func(session *Session) string {
+				active := session.ActiveAgentProfile()
+				if active == "" {
+					return "default"
+				}
+				return active
+			},
+			Set: func(session *Session, value string) error { return session.SetActiveAgentProfile(value) },
+		},
 	}
 	for _, option := range options {
 		if err := registry.RegisterConfigOption(option); err != nil {
 			return err
 		}
 	}
+	if err := registry.RegisterRPCHandler("set_agent_profile", func(_ context.Context, session *Session, command rpcCommand) rpcResponse {
+		if err := session.SetActiveAgentProfile(command.Name); err != nil {
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+		}
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: agentResourcesMetadata(session)}
+	}); err != nil {
+		return err
+	}
+	if err := registry.RegisterRPCHandler("get_agent_profiles", func(_ context.Context, session *Session, command rpcCommand) rpcResponse {
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: agentResourcesMetadata(session)}
+	}); err != nil {
+		return err
+	}
+	if err := registry.RegisterRPCHandler("get_agent_teams", func(_ context.Context, session *Session, command rpcCommand) rpcResponse {
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: map[string]any{"teams": session.AgentTeams()}}
+	}); err != nil {
+		return err
+	}
+	if err := registry.RegisterRPCHandler("get_agent_chains", func(_ context.Context, session *Session, command rpcCommand) rpcResponse {
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: map[string]any{"chains": session.AgentChains()}}
+	}); err != nil {
+		return err
+	}
 	return nil
+}
+
+func agentResourcesMetadata(session *Session) map[string]any {
+	return map[string]any{
+		"active":   session.ActiveAgentProfile(),
+		"profiles": session.AgentProfiles(),
+		"teams":    session.AgentTeams(),
+		"chains":   session.AgentChains(),
+	}
 }
 
 func registerBuiltinToolsModule(registry *ModuleRegistry) error {
@@ -389,6 +449,124 @@ func registerExtensionToolsModule(registry *ModuleRegistry) error {
 		return session.ExtensionTools()
 	})
 	return nil
+}
+
+func registerToolSearchModule(registry *ModuleRegistry) error {
+	registry.RegisterToolProvider(func(session *Session) ([]agentcore.Tool, []ai.Tool) {
+		if !session.IsToolSearchEnabled() {
+			return nil, nil
+		}
+		tool := agentcore.Tool{
+			Name: "tool_search",
+			Execute: func(_ context.Context, call ai.ContentBlock) agentcore.ToolResult {
+				query := strings.ToLower(strings.TrimSpace(fmt.Sprint(call.Arguments["query"])))
+				metadata := session.visibleToolMetadata()
+				if query != "" {
+					filtered := make([]map[string]any, 0, len(metadata))
+					for _, item := range metadata {
+						text := strings.ToLower(fmt.Sprint(item["name"]) + " " + fmt.Sprint(item["description"]) + " " + fmt.Sprint(item["source"]))
+						if strings.Contains(text, query) {
+							filtered = append(filtered, item)
+						}
+					}
+					metadata = filtered
+				}
+				return agentcore.ToolResult{
+					Text:    fmt.Sprintf("%d tools matched", len(metadata)),
+					Details: map[string]any{"tools": metadata},
+				}
+			},
+		}
+		spec := ai.Tool{
+			Name:        "tool_search",
+			Description: "Search the currently visible model tools and return read-only metadata about their names, descriptions, and sources.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"query": map[string]any{"type": "string", "description": "Optional substring to match against tool metadata."},
+				},
+			},
+		}
+		return []agentcore.Tool{tool}, []ai.Tool{spec}
+	})
+	if err := registry.RegisterConfigOption(ModuleConfigOption{
+		ID:       "tool_search",
+		Name:     "Tool search",
+		Category: "tools",
+		Type:     "select",
+		Options:  []string{"off", "on"},
+		Get: func(session *Session) string {
+			if session.IsToolSearchEnabled() {
+				return "on"
+			}
+			return "off"
+		},
+		Set: func(session *Session, value string) error {
+			switch strings.ToLower(strings.TrimSpace(value)) {
+			case "on", "true", "1", "yes":
+				session.SetToolSearchEnabled(true)
+			case "", "off", "false", "0", "no":
+				session.SetToolSearchEnabled(false)
+			default:
+				return fmt.Errorf("invalid tool_search value: %s", value)
+			}
+			return nil
+		},
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func toolSearchEnabledFromEnv() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("PIGO_TOOL_SEARCH"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Session) visibleToolMetadata() []map[string]any {
+	_, specs := s.ensureModuleRegistry().Tools()
+	items := make([]map[string]any, 0, len(specs))
+	for _, spec := range specs {
+		source := "extension"
+		switch {
+		case isBuiltinToolName(spec.Name):
+			source = "builtin"
+		case strings.HasPrefix(spec.Name, "mcp__"):
+			source = "mcp"
+		case researchToolName(spec.Name):
+			source = "research"
+		case spec.Name == "tool_search":
+			source = "tool_search"
+		}
+		items = append(items, map[string]any{
+			"name":        spec.Name,
+			"description": spec.Description,
+			"source":      source,
+		})
+	}
+	return items
+}
+
+func isBuiltinToolName(name string) bool {
+	for _, candidate := range BuiltinToolNames() {
+		if name == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func researchToolName(name string) bool {
+	for _, candidate := range researchadapter.ToolNames() {
+		if name == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 func registerResearchModule(registry *ModuleRegistry) error {

@@ -48,6 +48,7 @@ type Session struct {
 	BashPermission     BashPermissionPolicy
 	BuiltinToolPolicy  BuiltinToolPolicy
 	ResearchConfig     researchadapter.Config
+	ToolSearchEnabled  bool
 	Turns              []AssistantTurn
 	turnIndex          int
 	Events             []agentcore.Event
@@ -94,6 +95,10 @@ type Session struct {
 	toolResultHooks       []ToolResultHandler
 	promptTemplates       []SlashCommandInfo
 	skills                []SlashCommandInfo
+	agentProfiles         []AgentProfile
+	agentTeams            []AgentTeam
+	agentChains           []AgentChain
+	activeAgentProfile    string
 	resourceDiagnostics   []ResourceDiagnostic
 	modules               *ModuleRegistry
 }
@@ -356,6 +361,7 @@ type State struct {
 	ToolExecution  string `json:"toolExecution"`
 	SteeringMode   string `json:"steeringMode"`
 	FollowUpMode   string `json:"followUpMode"`
+	AgentProfile   string `json:"agentProfile,omitempty"`
 	AutoCompaction bool   `json:"autoCompactionEnabled"`
 	IsCompacting   bool   `json:"isCompacting"`
 	// Not used in the simplified runtime yet.
@@ -760,6 +766,116 @@ func (s *Session) SetSkills(commands []SlashCommandInfo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.skills = copySlashCommands(commands)
+}
+
+func (s *Session) AgentProfiles() []AgentProfile {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]AgentProfile(nil), s.agentProfiles...)
+}
+
+func (s *Session) SetAgentProfiles(profiles []AgentProfile) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.agentProfiles = append([]AgentProfile(nil), profiles...)
+	if s.activeAgentProfile == "" {
+		return
+	}
+	for _, profile := range s.agentProfiles {
+		if strings.EqualFold(profile.Name, s.activeAgentProfile) {
+			return
+		}
+	}
+	s.activeAgentProfile = ""
+}
+
+func (s *Session) AgentTeams() []AgentTeam {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]AgentTeam(nil), s.agentTeams...)
+}
+
+func (s *Session) SetAgentTeams(teams []AgentTeam) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.agentTeams = append([]AgentTeam(nil), teams...)
+}
+
+func (s *Session) AgentChains() []AgentChain {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]AgentChain(nil), s.agentChains...)
+}
+
+func (s *Session) SetAgentChains(chains []AgentChain) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.agentChains = append([]AgentChain(nil), chains...)
+}
+
+func (s *Session) ActiveAgentProfile() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.activeAgentProfile
+}
+
+func (s *Session) SetActiveAgentProfile(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" || strings.EqualFold(name, "default") {
+		s.mu.Lock()
+		s.activeAgentProfile = ""
+		s.mu.Unlock()
+		return nil
+	}
+	var selected AgentProfile
+	found := false
+	for _, profile := range s.AgentProfiles() {
+		if strings.EqualFold(profile.Name, name) {
+			selected = profile
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("unknown agent profile: %s", name)
+	}
+	if selected.Provider != "" || selected.ModelID != "" {
+		provider := selected.Provider
+		if provider == "" {
+			provider = s.Provider
+		}
+		modelID := selected.ModelID
+		if modelID == "" {
+			modelID = s.ModelID
+		}
+		if provider != "" && modelID != "" {
+			if _, err := s.SetModel(provider, modelID); err != nil {
+				return err
+			}
+		}
+	}
+	if selected.ThinkingLevel != "" {
+		if err := s.SetThinkingLevel(selected.ThinkingLevel); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	s.activeAgentProfile = selected.Name
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Session) activeAgentProfileData() (AgentProfile, bool) {
+	active := s.ActiveAgentProfile()
+	if active == "" {
+		return AgentProfile{}, false
+	}
+	for _, profile := range s.AgentProfiles() {
+		if strings.EqualFold(profile.Name, active) {
+			return profile, true
+		}
+	}
+	return AgentProfile{}, false
 }
 
 func (s *Session) ResourceDiagnostics() []ResourceDiagnostic {
@@ -2105,6 +2221,9 @@ func (s *Session) HeadlessSystemPrompt() string {
 		}
 		lines = append(lines, "Project context files:\n"+builder.String())
 	}
+	if profile, ok := s.activeAgentProfileData(); ok && strings.TrimSpace(profile.Instructions) != "" {
+		lines = append(lines, "Active agent profile: "+profile.Name+"\n"+profile.Instructions)
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -2176,6 +2295,7 @@ func (s *Session) State() State {
 		ToolExecution:     string(s.ToolExecution),
 		SteeringMode:      s.SteeringMode,
 		FollowUpMode:      s.FollowUpMode,
+		AgentProfile:      s.ActiveAgentProfile(),
 		AutoCompaction:    s.AutoCompaction,
 		IsCompacting:      s.IsCompacting,
 		PendingMessageCnt: 0,
@@ -2230,6 +2350,7 @@ func (s *Session) TryNewSessionWithParent(ctx context.Context, parentSession str
 	s.labelsByID = map[string]string{}
 	s.labelTimes = map[string]string{}
 	s.customEntries = nil
+	s.activeAgentProfile = ""
 	s.SessionEntryTypes = []string{"model_change", "thinking_level_change"}
 	s.Name = ""
 	s.ThinkingLevel = "off"
@@ -2246,6 +2367,7 @@ func (s *Session) TryNewSessionWithParent(ctx context.Context, parentSession str
 	s.BashPermission = BashPermissionPolicyFromEnv()
 	s.BuiltinToolPolicy = BuiltinToolPolicyFromEnv()
 	s.ResearchConfig = researchadapter.ConfigFromEnv()
+	s.ToolSearchEnabled = toolSearchEnabledFromEnv()
 	s.IsStreaming = false
 	s.parentSession = strings.TrimSpace(parentSession)
 	s.ensureModuleRegistry()
@@ -2822,6 +2944,14 @@ func (s *Session) SetResearchConfig(config researchadapter.Config) error {
 
 func (s *Session) GetResearchConfig() researchadapter.Config {
 	return s.ResearchConfig.Normalized()
+}
+
+func (s *Session) SetToolSearchEnabled(enabled bool) {
+	s.ToolSearchEnabled = enabled
+}
+
+func (s *Session) IsToolSearchEnabled() bool {
+	return s.ToolSearchEnabled
 }
 
 func (s *Session) AbortRetry() {
@@ -3499,6 +3629,7 @@ func (s *Session) loadSession(entries []SessionEntry) {
 	s.labelsByID = map[string]string{}
 	s.labelTimes = map[string]string{}
 	s.customEntries = nil
+	s.activeAgentProfile = ""
 	s.SessionEntryTypes = []string{"model_change", "thinking_level_change"}
 	s.Name = ""
 	s.ThinkingLevel = "off"
@@ -3507,6 +3638,7 @@ func (s *Session) loadSession(entries []SessionEntry) {
 	s.ToolExecution = ToolExecutionModeFromEnv()
 	s.UsageQuota = UsageQuotaConfigFromEnv()
 	s.UsageLedger = nil
+	s.ToolSearchEnabled = toolSearchEnabledFromEnv()
 	s.parentSession = ""
 	s.ensureModuleRegistry()
 
@@ -3549,6 +3681,7 @@ func (s *Session) rebuildStateFromLeaf(leafID string) {
 	s.labelsByID = map[string]string{}
 	s.labelTimes = map[string]string{}
 	s.customEntries = nil
+	s.activeAgentProfile = ""
 	s.Name = ""
 	s.ThinkingLevel = "off"
 	s.Provider = ""
@@ -3556,6 +3689,7 @@ func (s *Session) rebuildStateFromLeaf(leafID string) {
 	s.ToolExecution = ToolExecutionModeFromEnv()
 	s.UsageQuota = UsageQuotaConfigFromEnv()
 	s.UsageLedger = nil
+	s.ToolSearchEnabled = toolSearchEnabledFromEnv()
 	s.ensureModuleRegistry()
 
 	branch := s.resolveBranchEntries(leafID)

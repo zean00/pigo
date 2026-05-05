@@ -46,11 +46,21 @@ There is no separate research-specific grep tool. The built-in `grep` is the can
 
 Session capabilities are registered through an internal module registry. The registry keeps optional features from spreading hardcoded branches across the core runtime, ACP adapter, and JSONL RPC server.
 
-Current internal modules register core config, command-output compression, bash permissions, built-in tool policy, built-in tools, research tools, extension tools, and usage quota/ledger behavior. The same registered config option drives ACP `session/set_config_option`, ACP session state, and JSONL RPC behavior where applicable.
+Current internal modules register core config, command-output compression, bash permissions, built-in tool policy, built-in tools, research tools, extension tools, agent profile selection, optional tool discovery, and usage quota/ledger behavior. The same registered config option drives ACP `session/set_config_option`, ACP session state, and JSONL RPC behavior where applicable.
 
 Session-entry modules define whether metadata appears in the branch tree, whether it advances the active leaf, how it is reapplied after branching, and how it is exported. This is why labels and usage metadata can participate in persistence without becoming visible conversation nodes.
 
 Module registration is transactional. A module that fails during registration is rolled back before the error is returned.
+
+## Agent Profiles And Workflows
+
+`pigo` can load lightweight agent resources inspired by `agent-pi` without implementing a full multi-agent runtime. Agent profiles are markdown files under `~/.pi/agent/agents` or `<workspace>/.pi/agents`; frontmatter can define `name`, `description`, `provider`, `model`, `thinkingLevel`, and comma-separated `tools`, while the markdown body is used as profile instructions.
+
+Selecting an `agent_profile` applies the profile instructions as a system-prompt overlay. If the profile declares a provider/model or thinking level, those values are applied to the session. Selecting `default` clears the profile overlay.
+
+Teams and chains are loaded from `teams.yaml` and `chains.yaml` in the same agent resource directories and are exposed as metadata to ACP/RPC clients. pigo does not execute teams or chains by itself; host applications can use the metadata to orchestrate multiple sessions or future modules can build on it.
+
+The optional `tool_search` tool is a read-only discovery tool. When enabled, it returns visible tool names, descriptions, and source categories. It does not invoke other tools.
 
 ## Tool Execution Modes
 

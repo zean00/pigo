@@ -279,6 +279,67 @@ This policy controls built-in model tools. Extension tools and MCP tools are att
 
 The built-in `grep` tool is also the local search primitive used for future research orchestration. `pigo` does not define a duplicate research-specific grep tool.
 
+## Agent Profiles And Workflow Metadata
+
+`pigo` can load lightweight agent resources from:
+
+- `~/.pi/agent/agents`
+- `<workspace>/.pi/agents`
+
+Agent profiles are markdown files with optional frontmatter:
+
+```markdown
+---
+name: reviewer
+description: Review code changes
+provider: openai
+model: gpt-4.1
+thinkingLevel: medium
+tools: read,grep
+---
+
+Focus on correctness, regressions, and missing tests.
+```
+
+The profile body is appended to the headless system prompt when the profile is active. `provider`, `model`, and `thinkingLevel` are applied only when present. Set `agent_profile` to `default` to clear the active profile.
+
+Teams and chains are loaded as metadata from `teams.yaml` and `chains.yaml` in the same directories:
+
+```yaml
+teams:
+  - name: delivery
+    description: Delivery team
+    agents: [planner, reviewer]
+```
+
+```yaml
+chains:
+  - name: review-chain
+    steps:
+      - name: plan
+        agent: planner
+        prompt: Plan this change
+      - name: review
+        agent: reviewer
+        prompt: Review this change
+```
+
+ACP sessions expose `agent_profile` through `session/set_config_option` and include loaded profiles, teams, and chains in session state. JSONL RPC supports `get_agent_profiles`, `set_agent_profile`, `get_agent_teams`, and `get_agent_chains`.
+
+This is a configuration/resource layer, not full multi-agent orchestration. pigo does not execute teams or chains by itself.
+
+## Tool Search
+
+`tool_search` is an optional read-only discovery tool that returns visible tool names, descriptions, and source categories. It does not invoke tools.
+
+Enable it with:
+
+```bash
+export PIGO_TOOL_SEARCH=1
+```
+
+ACP clients can also set `tool_search` to `on` or `off` with `session/set_config_option`.
+
 ## Research Tools
 
 `pigo` can expose optional internet research tools. They are disabled by default and must be explicitly enabled:

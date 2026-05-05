@@ -27,7 +27,7 @@ The agent core owns the generic model/tool loop. It converts session messages in
 
 The coding-agent runtime adds workspace behavior. It provides read, edit, grep/search, bash, session persistence, branch and label handling, hooks, model/mode selection, and JSONL RPC commands. This is the main headless coding agent target.
 
-The runtime also owns an internal session module registry. Built-in capabilities such as command-output compression, bash permissions, built-in tool filtering, research tools, usage quotas, extension tools, and core session metadata register through this registry instead of requiring direct changes to every runtime surface. Modules can contribute:
+The runtime also owns an internal session module registry. Built-in capabilities such as command-output compression, bash permissions, built-in tool filtering, research tools, agent profile selection, usage quotas, extension tools, and core session metadata register through this registry instead of requiring direct changes to every runtime surface. Modules can contribute:
 
 - Model-facing tools and tool specs.
 - ACP/RPC config options and setters.
@@ -35,6 +35,8 @@ The runtime also owns an internal session module registry. Built-in capabilities
 - Session-entry policies for tree visibility, branch leaf behavior, state rebuild, and export metadata.
 
 Module registration is atomic. If a module returns an error while registering capabilities, any partially installed tools, config options, RPC handlers, or entry handlers are rolled back so the session is not left in a mixed state and the module can be retried.
+
+Agent profiles, teams, and chains are treated as headless resources. They are loaded from `.pi/agents` and `~/.pi/agent/agents`, exposed to ACP/RPC clients, and can be used as prompt/config overlays. They are intentionally metadata and configuration in pigo itself; full supervisor/worker orchestration belongs in a host application or a future module.
 
 ### `pkg/acpadapter`
 

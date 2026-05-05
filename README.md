@@ -98,6 +98,10 @@ Sessions record provider-reported token usage and can optionally enforce per-ses
 
 Session capabilities are wired through an internal module registry so features can register tools, ACP/RPC config options, RPC handlers, and session metadata behavior without hardcoding every new feature into the core runtime. Registration is atomic: failed modules are rolled back before returning an error. See [Architecture](docs/architecture.md#pkgcodingagent).
 
+## Agent Profiles
+
+`pigo` can load lightweight agent profiles, teams, and chains from `.pi/agents` and `~/.pi/agent/agents`. Profiles act as optional system-prompt/config overlays; teams and chains are exposed as metadata for host applications. pigo does not execute multi-agent workflows by itself. See [Configuration](docs/configuration.md#agent-profiles-and-workflow-metadata).
+
 ## Research Tools
 
 Optional internet research tools can be exposed with `PIGO_RESEARCH_TOOLS=research,search,scrape,security_search`. They are disabled by default; `search` uses an external SearXNG instance from `PIGO_SEARXNG_URL` or `SEARXNG_URL`, and rendered `scrape` can use a Docker-hosted Obscura CDP server from `PIGO_OBSCURA_URL` or `OBSCURA_URL`. See [Configuration](docs/configuration.md#research-tools).

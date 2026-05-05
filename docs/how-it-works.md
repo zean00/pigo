@@ -23,6 +23,14 @@ For each prompt:
 6. Tool results are appended to the model conversation.
 7. The loop continues until the provider returns a final assistant response or the request is canceled.
 
+## Session Purpose
+
+The default session purpose is `coding`, which preserves the normal headless coding-agent system prompt. Sessions can also use `generic`, `research`, or `readonly` purpose to reduce coding-specific prompt framing for embedders that use pigo as a broader headless agent.
+
+Purpose affects only the composed system prompt and context sections. It does not change tool availability. A read-only or research-style session should still use built-in tool policy, bash permissions, research tool settings, and MCP configuration to expose the intended tool surface.
+
+The system prompt is composed from the purpose prompt, workspace path, optional git/package context, configured context files, extra embedder instructions, and the active agent profile overlay.
+
 ## Workspace Tools
 
 The coding-agent runtime provides tools for common headless coding tasks:

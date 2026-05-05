@@ -120,6 +120,33 @@ ACP clients can choose the tool execution mode with `session/set_config_option`:
 
 Supported values are `parallel`, `sequential`, and `interleaved`. Interleaved mode executes one tool call, returns that result to the model, and lets the model reason before choosing the next tool.
 
+## Session Purpose Through ACP
+
+ACP clients can adjust prompt/domain framing with `session/set_config_option`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 6,
+  "method": "session/set_config_option",
+  "params": {
+    "sessionId": "session-id",
+    "configId": "session_purpose",
+    "value": "readonly"
+  }
+}
+```
+
+The related options are:
+
+- `session_purpose`: `coding`, `generic`, `research`, or `readonly`.
+- `context_files`: comma-separated context file names, defaulting to `AGENTS.md,CLAUDE.md`; values must be file names, not paths.
+- `include_git_context`: `true` or `false`.
+- `include_package_context`: `true` or `false`.
+- `extra_instructions`: additional embedder-provided system-prompt instructions.
+
+Purpose changes prompt framing and context only. Tool access remains controlled by built-in tool policy, bash permissions, research-tool settings, and MCP tools.
+
 ## Usage Quotas Through ACP
 
 ACP clients can enable per-session usage quotas with `session/set_config_option`:

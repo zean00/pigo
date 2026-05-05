@@ -94,6 +94,10 @@ Tool execution can run in `parallel`, `sequential`, or `interleaved` mode. Inter
 
 Sessions record provider-reported token usage and can optionally enforce per-session token/cost quotas. See [Configuration](docs/configuration.md#usage-ledger-and-quotas).
 
+## Session Purpose
+
+`pigo` defaults to a coding-agent prompt, but embedders can set a session purpose of `coding`, `generic`, `research`, or `readonly`. Purpose changes the system-prompt framing and context sections only; tool access is still controlled separately through built-in tool policy, bash permissions, research tools, MCP tools, and ACP/RPC config. See [Configuration](docs/configuration.md#session-purpose-and-context).
+
 ## Internal Modules
 
 Session capabilities are wired through an internal module registry so features can register tools, ACP/RPC config options, RPC handlers, and session metadata behavior without hardcoding every new feature into the core runtime. Registration is atomic: failed modules are rolled back before returning an error. See [Architecture](docs/architecture.md#pkgcodingagent).

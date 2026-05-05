@@ -48,6 +48,7 @@ type Session struct {
 	BashPermission     BashPermissionPolicy
 	BuiltinToolPolicy  BuiltinToolPolicy
 	ResearchConfig     researchadapter.Config
+	DomainConfig       SessionDomainConfig
 	ToolSearchEnabled  bool
 	Turns              []AssistantTurn
 	turnIndex          int
@@ -2196,21 +2197,23 @@ func (s *Session) providerHistoryWithSystem(systemPrompt string) []ai.Message {
 }
 
 func (s *Session) HeadlessSystemPrompt() string {
-	lines := []string{
-		"You are a headless coding agent operating in a local workspace.",
-		"Use the available tools to inspect and modify files. Keep responses concise and technical.",
-		"Workspace: " + s.Root,
+	config := s.GetDomainConfig()
+	lines := sessionPurposePromptLines(config.Purpose)
+	lines = append(lines, "Workspace: "+s.Root)
+	if boolValue(config.IncludeGitContext) {
+		if branch := currentGitBranch(s.Root); branch != "" {
+			lines = append(lines, "Git branch: "+branch)
+		}
+		if status := shortGitStatus(s.Root); status != "" {
+			lines = append(lines, "Git status:\n"+status)
+		}
 	}
-	if branch := currentGitBranch(s.Root); branch != "" {
-		lines = append(lines, "Git branch: "+branch)
+	if boolValue(config.IncludePackageContext) {
+		if packages := packageContext(s.Root); packages != "" {
+			lines = append(lines, "Project context:\n"+packages)
+		}
 	}
-	if status := shortGitStatus(s.Root); status != "" {
-		lines = append(lines, "Git status:\n"+status)
-	}
-	if packages := packageContext(s.Root); packages != "" {
-		lines = append(lines, "Project context:\n"+packages)
-	}
-	if contextFiles := LoadProjectContextFiles(s.Root, DefaultAgentDir()); len(contextFiles) > 0 {
+	if contextFiles := LoadProjectContextFilesWithNames(s.Root, DefaultAgentDir(), config.ContextFiles); len(contextFiles) > 0 {
 		var builder strings.Builder
 		builder.WriteString("Project-specific instructions and guidelines:")
 		for _, file := range contextFiles {
@@ -2221,19 +2224,55 @@ func (s *Session) HeadlessSystemPrompt() string {
 		}
 		lines = append(lines, "Project context files:\n"+builder.String())
 	}
+	if strings.TrimSpace(config.ExtraInstructions) != "" {
+		lines = append(lines, "Additional session instructions:\n"+config.ExtraInstructions)
+	}
 	if profile, ok := s.activeAgentProfileData(); ok && strings.TrimSpace(profile.Instructions) != "" {
 		lines = append(lines, "Active agent profile: "+profile.Name+"\n"+profile.Instructions)
 	}
 	return strings.Join(lines, "\n")
 }
 
+func sessionPurposePromptLines(purpose string) []string {
+	switch strings.ToLower(strings.TrimSpace(purpose)) {
+	case SessionPurposeGeneric:
+		return []string{
+			"You are a headless agent operating in a local workspace.",
+			"Use the available tools to complete the user's task. Keep responses concise and technical.",
+		}
+	case SessionPurposeResearch:
+		return []string{
+			"You are a headless research agent operating in a local workspace.",
+			"Gather evidence, cite sources when available, and avoid modifying files unless the user explicitly asks and the available tools allow it.",
+		}
+	case SessionPurposeReadonly:
+		return []string{
+			"You are a headless read-only agent operating in a local workspace.",
+			"Inspect available information, but do not modify files or run destructive commands.",
+		}
+	default:
+		return []string{
+			"You are a headless coding agent operating in a local workspace.",
+			"Use the available tools to inspect and modify files. Keep responses concise and technical.",
+		}
+	}
+}
+
 func LoadProjectContextFiles(root, agentDir string) []ProjectContextFile {
+	return LoadProjectContextFilesWithNames(root, agentDir, defaultContextFileNames)
+}
+
+func LoadProjectContextFilesWithNames(root, agentDir string, names []string) []ProjectContextFile {
+	names = normalizeContextFileNames(names)
+	if len(names) == 0 {
+		names = defaultContextFileNames
+	}
 	root = filepath.Clean(root)
 	agentDir = filepath.Clean(agentDir)
 	contextFiles := []ProjectContextFile{}
 	seen := map[string]struct{}{}
 
-	if file, ok := loadContextFileFromDir(agentDir); ok {
+	if file, ok := loadContextFileFromDir(agentDir, names); ok {
 		contextFiles = append(contextFiles, file)
 		seen[file.Path] = struct{}{}
 	}
@@ -2241,7 +2280,7 @@ func LoadProjectContextFiles(root, agentDir string) []ProjectContextFile {
 	var ancestors []ProjectContextFile
 	current := root
 	for {
-		if file, ok := loadContextFileFromDir(current); ok {
+		if file, ok := loadContextFileFromDir(current, names); ok {
 			if _, exists := seen[file.Path]; !exists {
 				ancestors = append([]ProjectContextFile{file}, ancestors...)
 				seen[file.Path] = struct{}{}
@@ -2257,8 +2296,8 @@ func LoadProjectContextFiles(root, agentDir string) []ProjectContextFile {
 	return contextFiles
 }
 
-func loadContextFileFromDir(dir string) (ProjectContextFile, bool) {
-	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
+func loadContextFileFromDir(dir string, names []string) (ProjectContextFile, bool) {
+	for _, name := range names {
 		path := filepath.Join(dir, name)
 		content, err := os.ReadFile(path)
 		if err == nil {
@@ -2367,6 +2406,7 @@ func (s *Session) TryNewSessionWithParent(ctx context.Context, parentSession str
 	s.BashPermission = BashPermissionPolicyFromEnv()
 	s.BuiltinToolPolicy = BuiltinToolPolicyFromEnv()
 	s.ResearchConfig = researchadapter.ConfigFromEnv()
+	s.DomainConfig = SessionDomainConfigFromEnv()
 	s.ToolSearchEnabled = toolSearchEnabledFromEnv()
 	s.IsStreaming = false
 	s.parentSession = strings.TrimSpace(parentSession)
@@ -2944,6 +2984,18 @@ func (s *Session) SetResearchConfig(config researchadapter.Config) error {
 
 func (s *Session) GetResearchConfig() researchadapter.Config {
 	return s.ResearchConfig.Normalized()
+}
+
+func (s *Session) SetDomainConfig(config SessionDomainConfig) error {
+	if err := config.Validate(); err != nil {
+		return err
+	}
+	s.DomainConfig = config.Normalized()
+	return nil
+}
+
+func (s *Session) GetDomainConfig() SessionDomainConfig {
+	return s.DomainConfig.Normalized()
 }
 
 func (s *Session) SetToolSearchEnabled(enabled bool) {

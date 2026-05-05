@@ -94,6 +94,49 @@ err := ai.RegisterProviderConfig(ai.ProviderConfig{
 
 Most local servers ignore the API key, but `RegisterProviderConfig` currently requires a non-empty value when defining models, so use a harmless placeholder such as `local`.
 
+## Session Purpose And Context
+
+`pigo` defaults to `coding` purpose because the project is focused on a headless coding agent. Embedders can use lighter domain framing without changing the provider loop or tool implementations:
+
+| Purpose | Prompt framing |
+| --- | --- |
+| `coding` | Headless coding agent that can inspect and modify workspace files. |
+| `generic` | Headless workspace agent for tasks that are not necessarily coding-specific. |
+| `research` | Headless research agent that gathers evidence and cites sources when available. |
+| `readonly` | Headless read-only agent that should inspect information without modifying files or running destructive commands. |
+
+Purpose only changes system-prompt/context behavior. It does not enable or disable tools. Use built-in tool policy, bash permissions, research tool config, and MCP config to control what the model can actually call.
+
+Environment defaults:
+
+```bash
+export PIGO_SESSION_PURPOSE=research
+export PIGO_CONTEXT_FILES=AGENTS.md,RESEARCH.md
+export PIGO_INCLUDE_GIT_CONTEXT=false
+export PIGO_INCLUDE_PACKAGE_CONTEXT=false
+```
+
+Context file values must be file names only, not paths. Values such as `../SECRET.md` or `nested/AGENTS.md` are rejected; invalid environment defaults fall back to the safe built-in domain config.
+
+ACP sessions expose these config options:
+
+- `session_purpose`
+- `context_files`
+- `include_git_context`
+- `include_package_context`
+- `extra_instructions`
+
+The JSONL RPC adapter supports:
+
+- `set_domain_config`
+- `get_domain_config`
+
+Example RPC update:
+
+```json
+{"id":"d1","type":"set_domain_config","purpose":"readonly","contextFiles":["AGENTS.md"],"includeGitContext":true,"includePackageContext":false}
+```
+
 ## Command Output Compression
 
 `pigo` can compress noisy bash command output before it is stored in session history or sent back to the model. This is inspired by RTK-style command filtering, but implemented natively inside the headless coding-agent runtime.

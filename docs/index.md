@@ -6,6 +6,8 @@ The purpose of this port is to create a headless coding agent runtime that can b
 
 The project is intentionally focused on runtime behavior rather than recreating every interactive product surface from `pi-mono`.
 
+The default session purpose is still `coding`, but embedders can configure `generic`, `research`, or `readonly` prompt framing when they want to use the same headless runtime outside a strictly coding-oriented workflow. Tool access remains controlled separately by tool policy, bash permissions, research-tool settings, MCP tools, and ACP/RPC config.
+
 ## Goals
 
 - Provide a reusable headless coding agent for local workspaces.

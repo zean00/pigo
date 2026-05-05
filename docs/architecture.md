@@ -25,9 +25,9 @@ The agent core owns the generic model/tool loop. It converts session messages in
 
 ### `pkg/codingagent`
 
-The coding-agent runtime adds workspace behavior. It provides read, edit, grep/search, bash, session persistence, branch and label handling, hooks, model/mode selection, and JSONL RPC commands. This is the main headless coding agent target.
+The coding-agent runtime adds workspace behavior. It provides read, edit, grep/search, bash, session persistence, branch and label handling, hooks, model/mode selection, configurable session-purpose prompting, and JSONL RPC commands. This is the main headless coding agent target.
 
-The runtime also owns an internal session module registry. Built-in capabilities such as command-output compression, bash permissions, built-in tool filtering, research tools, agent profile selection, usage quotas, extension tools, and core session metadata register through this registry instead of requiring direct changes to every runtime surface. Modules can contribute:
+The runtime also owns an internal session module registry. Built-in capabilities such as session purpose/context config, command-output compression, bash permissions, built-in tool filtering, research tools, agent profile selection, usage quotas, extension tools, and core session metadata register through this registry instead of requiring direct changes to every runtime surface. Modules can contribute:
 
 - Model-facing tools and tool specs.
 - ACP/RPC config options and setters.

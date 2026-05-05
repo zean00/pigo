@@ -359,6 +359,66 @@ func registerCoreModule(registry *ModuleRegistry) error {
 			},
 			Set: func(session *Session, value string) error { return session.SetActiveAgentProfile(value) },
 		},
+		{
+			ID: "session_purpose", Name: "Session purpose", Category: "domain", Type: "select",
+			Options: SessionPurposeValues(),
+			Get:     func(session *Session) string { return session.GetDomainConfig().Purpose },
+			Set: func(session *Session, value string) error {
+				config := session.GetDomainConfig()
+				config.Purpose = value
+				return session.SetDomainConfig(config)
+			},
+		},
+		{
+			ID: "context_files", Name: "Context files", Category: "domain", Type: "text",
+			Get: func(session *Session) string { return strings.Join(session.GetDomainConfig().ContextFiles, ",") },
+			Set: func(session *Session, value string) error {
+				config := session.GetDomainConfig()
+				config.ContextFiles = commaSeparatedList(value)
+				return session.SetDomainConfig(config)
+			},
+		},
+		{
+			ID: "include_git_context", Name: "Include git context", Category: "domain", Type: "select",
+			Options: []string{"true", "false"},
+			Get: func(session *Session) string {
+				return fmt.Sprint(boolValue(session.GetDomainConfig().IncludeGitContext))
+			},
+			Set: func(session *Session, value string) error {
+				parsed, err := parseConfigBool(value)
+				if err != nil {
+					return err
+				}
+				config := session.GetDomainConfig()
+				config.IncludeGitContext = &parsed
+				return session.SetDomainConfig(config)
+			},
+		},
+		{
+			ID: "include_package_context", Name: "Include package context", Category: "domain", Type: "select",
+			Options: []string{"true", "false"},
+			Get: func(session *Session) string {
+				return fmt.Sprint(boolValue(session.GetDomainConfig().IncludePackageContext))
+			},
+			Set: func(session *Session, value string) error {
+				parsed, err := parseConfigBool(value)
+				if err != nil {
+					return err
+				}
+				config := session.GetDomainConfig()
+				config.IncludePackageContext = &parsed
+				return session.SetDomainConfig(config)
+			},
+		},
+		{
+			ID: "extra_instructions", Name: "Extra instructions", Category: "domain", Type: "text",
+			Get: func(session *Session) string { return session.GetDomainConfig().ExtraInstructions },
+			Set: func(session *Session, value string) error {
+				config := session.GetDomainConfig()
+				config.ExtraInstructions = value
+				return session.SetDomainConfig(config)
+			},
+		},
 	}
 	for _, option := range options {
 		if err := registry.RegisterConfigOption(option); err != nil {
@@ -385,6 +445,14 @@ func registerCoreModule(registry *ModuleRegistry) error {
 	}
 	if err := registry.RegisterRPCHandler("get_agent_chains", func(_ context.Context, session *Session, command rpcCommand) rpcResponse {
 		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: map[string]any{"chains": session.AgentChains()}}
+	}); err != nil {
+		return err
+	}
+	if err := registry.RegisterRPCHandler("set_domain_config", setDomainConfigRPC); err != nil {
+		return err
+	}
+	if err := registry.RegisterRPCHandler("get_domain_config", func(_ context.Context, session *Session, command rpcCommand) rpcResponse {
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: session.GetDomainConfig().Metadata()}
 	}); err != nil {
 		return err
 	}
@@ -830,6 +898,17 @@ func commaSeparatedList(value string) []string {
 	return out
 }
 
+func parseConfigBool(value string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true, nil
+	case "0", "false", "no", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid boolean value %q", value)
+	}
+}
+
 func applyLabelEntry(session *Session, entry SessionEntry) {
 	if entry.TargetID == "" {
 		return
@@ -936,6 +1015,29 @@ func setResearchToolsRPC(_ context.Context, session *Session, command rpcCommand
 		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
 	}
 	return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: session.GetResearchConfig().Metadata()}
+}
+
+func setDomainConfigRPC(_ context.Context, session *Session, command rpcCommand) rpcResponse {
+	config := session.GetDomainConfig()
+	if strings.TrimSpace(command.Purpose) != "" {
+		config.Purpose = command.Purpose
+	}
+	if command.ContextFiles != nil {
+		config.ContextFiles = command.ContextFiles
+	}
+	if command.IncludeGitContext != nil {
+		config.IncludeGitContext = command.IncludeGitContext
+	}
+	if command.IncludePackageContext != nil {
+		config.IncludePackageContext = command.IncludePackageContext
+	}
+	if command.ExtraInstructions != nil {
+		config.ExtraInstructions = *command.ExtraInstructions
+	}
+	if err := session.SetDomainConfig(config); err != nil {
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+	}
+	return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: session.GetDomainConfig().Metadata()}
 }
 
 func setUsageQuotaRPC(_ context.Context, session *Session, command rpcCommand) rpcResponse {

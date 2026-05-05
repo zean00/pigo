@@ -43,6 +43,7 @@ type SessionInput struct {
 	BuiltinToolPolicy  BuiltinToolPolicy
 	UsageQuota         UsageQuotaConfig
 	ResearchConfig     researchadapter.Config
+	DomainConfig       SessionDomainConfig
 }
 
 type SessionResult struct {
@@ -99,6 +100,11 @@ func RunHeadlessSession(ctx context.Context, root string, input SessionInput) (S
 	}
 	if len(input.ResearchConfig.Tools) > 0 || input.ResearchConfig.SearXNGURL != "" || input.ResearchConfig.ObscuraURL != "" {
 		if err := session.SetResearchConfig(input.ResearchConfig); err != nil {
+			return SessionResult{}, err
+		}
+	}
+	if input.DomainConfig.Purpose != "" || len(input.DomainConfig.ContextFiles) > 0 || input.DomainConfig.IncludeGitContext != nil || input.DomainConfig.IncludePackageContext != nil || input.DomainConfig.ExtraInstructions != "" {
+		if err := session.SetDomainConfig(input.DomainConfig); err != nil {
 			return SessionResult{}, err
 		}
 	}

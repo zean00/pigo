@@ -153,11 +153,11 @@ Environment defaults:
 
 ```bash
 export PIGO_PROMPT_INJECTION_GUARD=enforce
-export PIGO_PROMPT_INJECTION_SOURCES=workspace,web,mcp,extension
-export PIGO_PROMPT_INJECTION_SENSITIVE_TOOLS='bash,write,edit,mcp__*,extension:*'
+export PIGO_PROMPT_INJECTION_SOURCES=workspace,web,mcp,a2a,extension
+export PIGO_PROMPT_INJECTION_SENSITIVE_TOOLS='bash,write,edit,mcp__*,a2a__*,extension:*'
 ```
 
-Sources are `workspace`, `web`, `mcp`, and `extension`. In `enforce` mode, the default sensitive tools are `bash`, `write`, `edit`, `mcp__*`, and `extension:*`. The guard does not replace permission controls; combine it with built-in tool policy and bash permissions for high-risk sessions.
+Sources are `workspace`, `web`, `mcp`, `a2a`, and `extension`. In `enforce` mode, the default sensitive tools are `bash`, `write`, `edit`, `mcp__*`, `a2a__*`, and `extension:*`. The guard does not replace permission controls; combine it with built-in tool policy and bash permissions for high-risk sessions.
 
 ACP sessions expose these config options:
 
@@ -473,6 +473,56 @@ scripts/test-searxng.sh
 ```
 
 The script starts `searxng/searxng`, waits for JSON search readiness, runs the live `search` smoke test, and removes the container.
+
+## A2A Configuration
+
+A2A remote-agent tools are disabled by default:
+
+```bash
+export PIGO_A2A_TOOLS=on
+export PIGO_A2A_CONFIG_JSON='{
+  "enabled": true,
+  "agents": [
+    {
+      "name": "research",
+      "url": "http://localhost:4388/a2a",
+      "allowInsecure": true
+    }
+  ]
+}'
+```
+
+Config is loaded in this order:
+
+1. `PIGO_A2A_CONFIG_JSON`
+2. `PIGO_A2A_CONFIG`
+3. `<workspace>/.pi/a2a.json`
+4. `~/.pi/agent/a2a.json`
+
+Each configured agent becomes a model-facing tool named `a2a__<agent>__send_message`. Tool names are normalized to lowercase letters, numbers, and underscores.
+
+Remote agent fields:
+
+| Field | Behavior |
+| --- | --- |
+| `name` | Required local name used in the tool name. |
+| `url` | A2A JSON-RPC endpoint. |
+| `cardUrl` | Optional Agent Card URL. Defaults to `/.well-known/agent-card.json` on the same origin as `url` when omitted. |
+| `headers` | Explicit headers to send to the remote server. |
+| `bearerToken` | Convenience value converted to an `Authorization: Bearer ...` header. |
+| `allowInsecure` | Allow non-HTTPS URLs for non-local test endpoints. |
+
+ACP sessions expose these config options:
+
+- `a2a_tools`
+- `a2a_agents`
+
+The JSONL RPC adapter supports:
+
+- `set_a2a_tools`
+- `get_a2a_agents`
+
+Use `cmd/pigo-a2a` when this project should serve as a remote A2A agent. See [A2A](a2a.md).
 
 ## MCP Configuration
 

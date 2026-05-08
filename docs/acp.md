@@ -167,10 +167,31 @@ ACP clients can opt in to prompt-injection guard behavior with `session/set_conf
 The related options are:
 
 - `prompt_injection_guard`: `off`, `annotate`, or `enforce`.
-- `prompt_injection_sources`: comma-separated list of `workspace`, `web`, `mcp`, and `extension`.
-- `prompt_injection_sensitive_tools`: comma-separated list of tool names or glob patterns, such as `bash,write,edit,mcp__*,extension:*`.
+- `prompt_injection_sources`: comma-separated list of `workspace`, `web`, `mcp`, `a2a`, and `extension`.
+- `prompt_injection_sensitive_tools`: comma-separated list of tool names or glob patterns, such as `bash,write,edit,mcp__*,a2a__*,extension:*`.
 
 The guard is disabled by default. It annotates untrusted tool output and, in `enforce`, blocks configured sensitive tools after untrusted content has entered the session context.
+
+## A2A Remote Agents Through ACP
+
+ACP clients can enable remote A2A agents as model tools with `session/set_config_option`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "method": "session/set_config_option",
+  "params": {
+    "sessionId": "session-id",
+    "configId": "a2a_tools",
+    "value": "on"
+  }
+}
+```
+
+Simple local agent mappings can be set with `a2a_agents` as comma-separated `name=url` pairs. More complete config is normally loaded through `PIGO_A2A_CONFIG_JSON`, `PIGO_A2A_CONFIG`, `.pi/a2a.json`, or `~/.pi/agent/a2a.json`.
+
+Configured agents are exposed as model tools named `a2a__<agent>__send_message`.
 
 ## Usage Quotas Through ACP
 

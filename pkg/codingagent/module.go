@@ -2,11 +2,13 @@ package codingagent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 
+	"github.com/badlogic/pigo/pkg/a2a"
 	"github.com/badlogic/pigo/pkg/agentcore"
 	"github.com/badlogic/pigo/pkg/ai"
 	"github.com/badlogic/pigo/pkg/researchadapter"
@@ -292,6 +294,7 @@ func defaultSessionModules() []SessionModule {
 		sessionModule{id: "command_compression", register: registerCommandCompressionModule},
 		sessionModule{id: "bash_permission", register: registerBashPermissionModule},
 		sessionModule{id: "builtin_tools", register: registerBuiltinToolsModule},
+		sessionModule{id: "a2a", register: registerA2AModule},
 		sessionModule{id: "research", register: registerResearchModule},
 		sessionModule{id: "extension_tools", register: registerExtensionToolsModule},
 		sessionModule{id: "tool_search", register: registerToolSearchModule},
@@ -632,6 +635,69 @@ func registerToolSearchModule(registry *ModuleRegistry) error {
 		return err
 	}
 	return nil
+}
+
+func registerA2AModule(registry *ModuleRegistry) error {
+	registry.RegisterToolProvider(func(session *Session) ([]agentcore.Tool, []ai.Tool) {
+		return a2a.Tools(session.GetA2AConfig())
+	})
+	for _, option := range []ModuleConfigOption{
+		{
+			ID: "a2a_tools", Name: "A2A tools", Category: "a2a", Type: "select",
+			Options: []string{"off", "on"},
+			Get: func(session *Session) string {
+				if session.GetA2AConfig().Enabled {
+					return "on"
+				}
+				return "off"
+			},
+			Set: func(session *Session, value string) error {
+				config := session.GetA2AConfig()
+				switch strings.ToLower(strings.TrimSpace(value)) {
+				case "on", "true", "1", "yes":
+					config.Enabled = true
+				case "", "off", "false", "0", "no":
+					config.Enabled = false
+				default:
+					return fmt.Errorf("invalid a2a_tools value: %s", value)
+				}
+				return session.SetA2AConfig(config)
+			},
+		},
+		{
+			ID: "a2a_agents", Name: "A2A agents", Category: "a2a", Type: "text",
+			Get: func(session *Session) string {
+				names := []string{}
+				for _, agent := range session.GetA2AConfig().Agents {
+					names = append(names, agent.Name)
+				}
+				return strings.Join(names, ",")
+			},
+			Set: func(session *Session, value string) error {
+				config := session.GetA2AConfig()
+				config.Agents = nil
+				for _, item := range commaSeparatedList(value) {
+					parts := strings.SplitN(item, "=", 2)
+					if len(parts) != 2 {
+						return fmt.Errorf("a2a agent must be name=url")
+					}
+					config.Agents = append(config.Agents, a2a.RemoteAgent{Name: parts[0], URL: parts[1]})
+				}
+				return session.SetA2AConfig(config)
+			},
+		},
+	} {
+		if err := registry.RegisterConfigOption(option); err != nil {
+			return err
+		}
+	}
+	if err := registry.RegisterRPCHandler("set_a2a_tools", setA2AToolsRPC); err != nil {
+		return err
+	}
+	return registry.RegisterRPCHandler("get_a2a_agents", func(_ context.Context, session *Session, command rpcCommand) rpcResponse {
+		data := session.GetA2AConfig().Metadata()
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: data}
+	})
 }
 
 func toolSearchEnabledFromEnv() bool {
@@ -1080,6 +1146,26 @@ func setResearchToolsRPC(_ context.Context, session *Session, command rpcCommand
 		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
 	}
 	return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: session.GetResearchConfig().Metadata()}
+}
+
+func setA2AToolsRPC(_ context.Context, session *Session, command rpcCommand) rpcResponse {
+	config := session.GetA2AConfig()
+	if command.Enabled != nil {
+		config.Enabled = *command.Enabled
+	}
+	if command.Data != nil {
+		data, err := json.Marshal(command.Data)
+		if err != nil {
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+		}
+		if err := json.Unmarshal(data, &config); err != nil {
+			return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+		}
+	}
+	if err := session.SetA2AConfig(config); err != nil {
+		return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: false, Error: err.Error()}
+	}
+	return rpcResponse{ID: command.ID, Type: "response", Command: command.Type, Success: true, Data: session.GetA2AConfig().Metadata()}
 }
 
 func setDomainConfigRPC(_ context.Context, session *Session, command rpcCommand) rpcResponse {

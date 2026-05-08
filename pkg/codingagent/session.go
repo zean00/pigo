@@ -15,6 +15,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/badlogic/pigo/pkg/a2a"
 	"github.com/badlogic/pigo/pkg/agentcore"
 	"github.com/badlogic/pigo/pkg/ai"
 	"github.com/badlogic/pigo/pkg/researchadapter"
@@ -41,6 +42,7 @@ type SessionInput struct {
 	CommandCompression CommandOutputCompressionConfig
 	BashPermission     BashPermissionPolicy
 	BuiltinToolPolicy  BuiltinToolPolicy
+	A2AConfig          a2a.Config
 	UsageQuota         UsageQuotaConfig
 	ResearchConfig     researchadapter.Config
 	DomainConfig       SessionDomainConfig
@@ -91,6 +93,11 @@ func RunHeadlessSession(ctx context.Context, root string, input SessionInput) (S
 	}
 	if len(input.BuiltinToolPolicy.Enabled) > 0 || len(input.BuiltinToolPolicy.Disabled) > 0 {
 		if err := session.SetBuiltinToolPolicy(input.BuiltinToolPolicy); err != nil {
+			return SessionResult{}, err
+		}
+	}
+	if input.A2AConfig.Enabled || len(input.A2AConfig.Agents) > 0 {
+		if err := session.SetA2AConfig(input.A2AConfig); err != nil {
 			return SessionResult{}, err
 		}
 	}

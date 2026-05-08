@@ -2,7 +2,7 @@
 
 `pigo` is a Go porting effort for selected parts of the original `pi-mono` project.
 
-The purpose of this port is to create a headless coding agent runtime that can be embedded in, launched by, or controlled from another project. The main integration boundary is ACP, the Agent Client Protocol. `pigo` exposes the coding-agent session lifecycle over ACP and can attach external MCP tools to each session.
+The purpose of this port is to create a headless coding agent runtime that can be embedded in, launched by, or controlled from another project. The main integration boundary is ACP, the Agent Client Protocol. `pigo` exposes the coding-agent session lifecycle over ACP, can attach external MCP tools to each session, and can optionally interoperate with other agents through A2A.
 
 The project is intentionally focused on runtime behavior rather than recreating every interactive product surface from `pi-mono`.
 
@@ -22,6 +22,8 @@ The default session purpose is still `coding`, but embedders can configure `gene
 - `pkg/agentcore`: generic agent loop, tool execution, event streaming, session state, and provider loop behavior.
 - `pkg/codingagent`: headless coding-agent runtime for workspace operations, session storage, RPC, hooks, OAuth, and model selection.
 - `pkg/acpadapter`: ACP stdio server that exposes `pigo` sessions to ACP clients.
+- `pkg/a2a`: A2A protocol types, client, remote-agent config, and model-facing remote agent tools.
+- `pkg/a2aadapter`: HTTP A2A server that exposes `pigo` as a remote agent.
 - `pkg/mcpadapter`: MCP client registry and tool bridge for stdio, HTTP, and SSE MCP servers.
 
 ## Non-Goals
@@ -33,6 +35,7 @@ The default session purpose is still `coding`, but embedders can configure `gene
 ## Command Surface
 
 - `cmd/pigo-acp`: ACP stdio adapter.
+- `cmd/pigo-a2a`: HTTP A2A adapter.
 - `cmd/pigo-rpc`: minimal JSONL RPC server for the headless coding-agent runtime.
 - `cmd/pigo-auth`: OAuth helper for supported OAuth providers.
 - `cmd/pigo-parity`: behavior comparator against a local `pi-mono` checkout.
@@ -47,4 +50,5 @@ The default session purpose is still `coding`, but embedders can configure `gene
 - [How It Works](how-it-works.md): request flow from ACP/RPC through model and tools.
 - [Comparison with pi-mono](pi-mono-comparison.md): what is ported, comparable, and intentionally omitted.
 - [ACP](acp.md): Agent Client Protocol support.
+- [A2A](a2a.md): Agent-to-agent serving and calling support.
 - [MCP](mcp.md): Model Context Protocol tool support.

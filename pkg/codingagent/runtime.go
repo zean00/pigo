@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/badlogic/pigo/pkg/a2a"
 	"github.com/badlogic/pigo/pkg/agentcore"
 	"github.com/badlogic/pigo/pkg/ai"
 	"github.com/badlogic/pigo/pkg/researchadapter"
@@ -47,6 +48,7 @@ type Session struct {
 	CommandCompression CommandOutputCompressionConfig
 	BashPermission     BashPermissionPolicy
 	BuiltinToolPolicy  BuiltinToolPolicy
+	A2AConfig          a2a.Config
 	ResearchConfig     researchadapter.Config
 	DomainConfig       SessionDomainConfig
 	PromptInjection    PromptInjectionConfig
@@ -2430,6 +2432,7 @@ func (s *Session) TryNewSessionWithParent(ctx context.Context, parentSession str
 	s.CommandCompression = CommandOutputCompressionConfigFromEnv()
 	s.BashPermission = BashPermissionPolicyFromEnv()
 	s.BuiltinToolPolicy = BuiltinToolPolicyFromEnv()
+	s.A2AConfig = a2a.ConfigFromEnv(s.Root)
 	s.ResearchConfig = researchadapter.ConfigFromEnv()
 	s.DomainConfig = SessionDomainConfigFromEnv()
 	s.PromptInjection = PromptInjectionConfigFromEnv()
@@ -3011,6 +3014,19 @@ func (s *Session) SetResearchConfig(config researchadapter.Config) error {
 
 func (s *Session) GetResearchConfig() researchadapter.Config {
 	return s.ResearchConfig.Normalized()
+}
+
+func (s *Session) SetA2AConfig(config a2a.Config) error {
+	config = config.Normalized()
+	if err := config.Validate(); err != nil {
+		return err
+	}
+	s.A2AConfig = config
+	return nil
+}
+
+func (s *Session) GetA2AConfig() a2a.Config {
+	return s.A2AConfig.Normalized()
 }
 
 func (s *Session) SetDomainConfig(config SessionDomainConfig) error {

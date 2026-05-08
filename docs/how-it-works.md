@@ -1,6 +1,6 @@
 # How It Works
 
-`pigo` runs a headless coding-agent session around a workspace root. A client sends prompts, the agent calls a model provider, the model may request tools, and the runtime applies tool calls against the workspace or external MCP servers.
+`pigo` runs a headless coding-agent session around a workspace root. A client sends prompts, the agent calls a model provider, the model may request tools, and the runtime applies tool calls against the workspace, external MCP servers, or configured remote A2A agents.
 
 ## ACP Session Flow
 
@@ -19,7 +19,7 @@ For each prompt:
 2. The agent core applies the configured system prompt and available tools.
 3. The provider layer converts normalized messages into provider-specific request payloads.
 4. Streaming provider events are normalized into common event types.
-5. Tool calls are routed to coding-agent tools or MCP tools.
+5. Tool calls are routed to coding-agent tools, MCP tools, A2A remote-agent tools, research tools, or extension tools.
 6. Tool results are appended to the model conversation.
 7. The loop continues until the provider returns a final assistant response or the request is canceled.
 
@@ -44,11 +44,17 @@ The coding-agent runtime provides tools for common headless coding tasks:
 
 Workspace paths are resolved against the session root to avoid unintended access outside the workspace.
 
-The model-facing built-in tool names are `bash`, `write`, `read`, `edit`, `ls`, `grep`, and `find`. Sessions can filter these built-in tools before the provider request is built. An enabled list exposes only selected built-ins; a disabled list removes tools from the exposed set. Extension tools and MCP tools are appended separately.
+The model-facing built-in tool names are `bash`, `write`, `read`, `edit`, `ls`, `grep`, and `find`. Sessions can filter these built-in tools before the provider request is built. An enabled list exposes only selected built-ins; a disabled list removes tools from the exposed set. Extension tools, MCP tools, and A2A remote-agent tools are appended separately.
 
 Optional research tools are also appended separately when enabled. `research` runs an isolated quick-mode sub-agent, `search` talks to an external SearXNG instance, `scrape` fetches and extracts readable URL text with static HTTP or an optional Docker-hosted Obscura CDP server, and `security_search` queries public vulnerability sources. They are opt-in so ordinary headless coding sessions do not gain network research tools unexpectedly.
 
 There is no separate research-specific grep tool. The built-in `grep` is the canonical local search tool and returns structured match metadata that future research orchestration can count under its gathering budget.
+
+## A2A Flow
+
+When serving A2A, `cmd/pigo-a2a` publishes an Agent Card and maps incoming A2A `message/send` or `message/stream` requests to a new coding-agent session prompt. The response is returned as a completed A2A task with a text artifact. Streaming requests receive task lifecycle SSE updates.
+
+When calling A2A, configured remote agents become tools named `a2a__<agent>__send_message`. The tool fetches the remote Agent Card, sends the task message over JSON-RPC, streams progress when supported, and returns the final remote task output to the model.
 
 ## Prompt Injection Guard
 
@@ -60,7 +66,7 @@ The guard is deterministic and source-based. It does not classify content with a
 
 Session capabilities are registered through an internal module registry. The registry keeps optional features from spreading hardcoded branches across the core runtime, ACP adapter, and JSONL RPC server.
 
-Current internal modules register core config, prompt-injection guard config, command-output compression, bash permissions, built-in tool policy, built-in tools, research tools, extension tools, agent profile selection, optional tool discovery, and usage quota/ledger behavior. The same registered config option drives ACP `session/set_config_option`, ACP session state, and JSONL RPC behavior where applicable.
+Current internal modules register core config, prompt-injection guard config, command-output compression, bash permissions, built-in tool policy, built-in tools, A2A remote-agent tools, research tools, extension tools, agent profile selection, optional tool discovery, and usage quota/ledger behavior. The same registered config option drives ACP `session/set_config_option`, ACP session state, and JSONL RPC behavior where applicable.
 
 Session-entry modules define whether metadata appears in the branch tree, whether it advances the active leaf, how it is reapplied after branching, and how it is exported. This is why labels and usage metadata can participate in persistence without becoming visible conversation nodes.
 

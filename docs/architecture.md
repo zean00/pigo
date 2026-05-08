@@ -10,6 +10,8 @@
 | Agent loop | `pkg/agentcore` | Prompt loop, system prompt handling, tool execution, event emission, session state, and provider request construction. |
 | Coding-agent runtime | `pkg/codingagent` | Workspace tools, session entries, branching, labels, hooks, JSONL RPC, OAuth state, model selection, and headless coding behavior. |
 | ACP adapter | `pkg/acpadapter` | JSON-RPC stdio ACP server and ACP session lifecycle mapping. |
+| A2A protocol/client | `pkg/a2a` | A2A protocol objects, Agent Card client, JSON-RPC/SSE client, config loading, and remote-agent model tools. |
+| A2A adapter | `pkg/a2aadapter` | HTTP A2A server that exposes pigo sessions as remote A2A tasks. |
 | MCP adapter | `pkg/mcpadapter` | MCP server config loading, client registry, tool discovery, tool invocation, and progress forwarding. |
 | Commands | `cmd/*` | CLI entry points for ACP, RPC, auth, conformance, parity, and model generation. |
 
@@ -27,7 +29,7 @@ The agent core owns the generic model/tool loop. It converts session messages in
 
 The coding-agent runtime adds workspace behavior. It provides read, edit, grep/search, bash, session persistence, branch and label handling, hooks, model/mode selection, configurable session-purpose prompting, and JSONL RPC commands. This is the main headless coding agent target.
 
-The runtime also owns an internal session module registry. Built-in capabilities such as session purpose/context config, prompt-injection guard config, command-output compression, bash permissions, built-in tool filtering, research tools, agent profile selection, usage quotas, extension tools, and core session metadata register through this registry instead of requiring direct changes to every runtime surface. Modules can contribute:
+The runtime also owns an internal session module registry. Built-in capabilities such as session purpose/context config, prompt-injection guard config, command-output compression, bash permissions, built-in tool filtering, A2A remote-agent tools, research tools, agent profile selection, usage quotas, extension tools, and core session metadata register through this registry instead of requiring direct changes to every runtime surface. Modules can contribute:
 
 - Model-facing tools and tool specs.
 - ACP/RPC config options and setters.
@@ -46,16 +48,24 @@ The ACP adapter exposes the coding-agent runtime through the Agent Client Protoc
 
 The MCP adapter loads MCP server definitions, connects to stdio/HTTP/SSE servers, discovers tool schemas, exposes those tools to the agent loop, invokes them, and forwards progress notifications back through ACP.
 
+### `pkg/a2a` and `pkg/a2aadapter`
+
+The A2A packages add an agent-to-agent interoperability boundary without turning the core runtime into an orchestrator.
+
+`pkg/a2aadapter` serves pigo over HTTP. It publishes an Agent Card at `/.well-known/agent-card.json`, accepts JSON-RPC requests at `/a2a`, maps A2A messages to coding-agent prompts, stores in-memory task state, and returns A2A task/artifact/status objects.
+
+`pkg/a2a` also acts as a client. When enabled, configured remote A2A agents are exposed as model tools named `a2a__<agent>__send_message`. Those tools fetch the remote Agent Card, call `message/stream` when streaming is advertised, fall back to `message/send`, and return the final task text plus task metadata.
+
 ## Data Flow
 
 ```text
-ACP client or RPC caller
+ACP client, A2A client, or RPC caller
         |
         v
-cmd/pigo-acp or cmd/pigo-rpc
+cmd/pigo-acp, cmd/pigo-a2a, or cmd/pigo-rpc
         |
         v
-pkg/acpadapter or pkg/codingagent.RPCServer
+pkg/acpadapter, pkg/a2aadapter, or pkg/codingagent.RPCServer
         |
         v
 pkg/codingagent.Session
@@ -70,7 +80,7 @@ pkg/ai provider transport
 model provider or local OpenAI-compatible server
 ```
 
-Tool calls travel back through `pkg/agentcore` into coding-agent tools or MCP tools. Tool results are normalized and appended to the conversation before the loop continues.
+Tool calls travel back through `pkg/agentcore` into coding-agent tools, MCP tools, A2A remote-agent tools, or extension tools. Tool results are normalized and appended to the conversation before the loop continues.
 
 ## Persistence
 

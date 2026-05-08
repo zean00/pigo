@@ -12,6 +12,7 @@ nav:
   - pi-mono Comparison: pi-mono-comparison.md
   - ACP: acp.md
   - A2A: a2a.md
+  - Orchestration: orchestration.md
   - MCP: mcp.md
 markdown_extensions:
   - toc:

@@ -18,7 +18,7 @@ const (
 
 var (
 	promptInjectionSourcesDefault        = []string{"workspace", "web", "mcp", "a2a", "extension"}
-	promptInjectionSensitiveToolsDefault = []string{"bash", "write", "edit", "mcp__*", "a2a__*", "extension:*"}
+	promptInjectionSensitiveToolsDefault = []string{"bash", "write", "edit", "mcp__*", "a2a__*", "delegate_task", "orchestrate_task", "extension:*"}
 )
 
 type PromptInjectionConfig struct {
@@ -161,6 +161,8 @@ func promptInjectionToolSource(toolName string) string {
 	case strings.HasPrefix(toolName, "mcp__"):
 		return "mcp"
 	case strings.HasPrefix(toolName, "a2a__"):
+		return "a2a"
+	case toolName == "delegate_task" || toolName == "orchestrate_task":
 		return "a2a"
 	case isBuiltinToolName(toolName) || toolName == "tool_search":
 		return ""

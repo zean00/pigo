@@ -168,7 +168,7 @@ The related options are:
 
 - `prompt_injection_guard`: `off`, `annotate`, or `enforce`.
 - `prompt_injection_sources`: comma-separated list of `workspace`, `web`, `mcp`, `a2a`, and `extension`.
-- `prompt_injection_sensitive_tools`: comma-separated list of tool names or glob patterns, such as `bash,write,edit,mcp__*,a2a__*,extension:*`.
+- `prompt_injection_sensitive_tools`: comma-separated list of tool names or glob patterns, such as `bash,write,edit,mcp__*,a2a__*,delegate_task,orchestrate_task,extension:*`.
 
 The guard is disabled by default. It annotates untrusted tool output and, in `enforce`, blocks configured sensitive tools after untrusted content has entered the session context.
 
@@ -192,6 +192,25 @@ ACP clients can enable remote A2A agents as model tools with `session/set_config
 Simple local agent mappings can be set with `a2a_agents` as comma-separated `name=url` pairs. More complete config is normally loaded through `PIGO_A2A_CONFIG_JSON`, `PIGO_A2A_CONFIG`, `.pi/a2a.json`, or `~/.pi/agent/a2a.json`.
 
 Configured agents are exposed as model tools named `a2a__<agent>__send_message`.
+
+## Orchestration Through ACP
+
+ACP clients can enable the optional A2A-backed orchestrator with `session/set_config_option`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "method": "session/set_config_option",
+  "params": {
+    "sessionId": "session-id",
+    "configId": "orchestrator_enabled",
+    "value": "on"
+  }
+}
+```
+
+Related options are `orchestrator_max_parallel`, `orchestrator_timeout_ms`, `orchestrator_agents`, and `orchestrator_reducer`. ACP session state includes orchestration run summaries for clients that want to inspect supervisor/task-graph progress.
 
 ## Usage Quotas Through ACP
 

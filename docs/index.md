@@ -24,6 +24,7 @@ The default session purpose is still `coding`, but embedders can configure `gene
 - `pkg/acpadapter`: ACP stdio server that exposes `pigo` sessions to ACP clients.
 - `pkg/a2a`: A2A protocol types, client, remote-agent config, and model-facing remote agent tools.
 - `pkg/a2aadapter`: HTTP A2A server that exposes `pigo` as a remote agent.
+- `pkg/orchestrator`: optional A2A-backed supervisor and task-graph orchestration.
 - `pkg/mcpadapter`: MCP client registry and tool bridge for stdio, HTTP, and SSE MCP servers.
 
 ## Non-Goals
@@ -51,4 +52,5 @@ The default session purpose is still `coding`, but embedders can configure `gene
 - [Comparison with pi-mono](pi-mono-comparison.md): what is ported, comparable, and intentionally omitted.
 - [ACP](acp.md): Agent Client Protocol support.
 - [A2A](a2a.md): Agent-to-agent serving and calling support.
+- [Orchestration](orchestration.md): optional A2A-backed supervisor and task graph support.
 - [MCP](mcp.md): Model Context Protocol tool support.

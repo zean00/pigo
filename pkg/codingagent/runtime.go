@@ -20,6 +20,7 @@ import (
 	"github.com/badlogic/pigo/pkg/a2a"
 	"github.com/badlogic/pigo/pkg/agentcore"
 	"github.com/badlogic/pigo/pkg/ai"
+	"github.com/badlogic/pigo/pkg/orchestrator"
 	"github.com/badlogic/pigo/pkg/researchadapter"
 )
 
@@ -49,6 +50,7 @@ type Session struct {
 	BashPermission     BashPermissionPolicy
 	BuiltinToolPolicy  BuiltinToolPolicy
 	A2AConfig          a2a.Config
+	OrchestratorConfig orchestrator.Config
 	ResearchConfig     researchadapter.Config
 	DomainConfig       SessionDomainConfig
 	PromptInjection    PromptInjectionConfig
@@ -105,6 +107,7 @@ type Session struct {
 	activeAgentProfile    string
 	resourceDiagnostics   []ResourceDiagnostic
 	modules               *ModuleRegistry
+	orchestratorManager   *orchestrator.Manager
 	promptInjectionActive bool
 }
 
@@ -783,6 +786,7 @@ func (s *Session) SetAgentProfiles(profiles []AgentProfile) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.agentProfiles = append([]AgentProfile(nil), profiles...)
+	s.orchestratorManager = nil
 	if s.activeAgentProfile == "" {
 		return
 	}
@@ -2433,11 +2437,13 @@ func (s *Session) TryNewSessionWithParent(ctx context.Context, parentSession str
 	s.BashPermission = BashPermissionPolicyFromEnv()
 	s.BuiltinToolPolicy = BuiltinToolPolicyFromEnv()
 	s.A2AConfig = a2a.ConfigFromEnv(s.Root)
+	s.OrchestratorConfig = orchestrator.ConfigFromEnv()
 	s.ResearchConfig = researchadapter.ConfigFromEnv()
 	s.DomainConfig = SessionDomainConfigFromEnv()
 	s.PromptInjection = PromptInjectionConfigFromEnv()
 	s.promptInjectionActive = false
 	s.ToolSearchEnabled = toolSearchEnabledFromEnv()
+	s.orchestratorManager = nil
 	s.IsStreaming = false
 	s.parentSession = strings.TrimSpace(parentSession)
 	s.ensureModuleRegistry()
@@ -3022,11 +3028,22 @@ func (s *Session) SetA2AConfig(config a2a.Config) error {
 		return err
 	}
 	s.A2AConfig = config
+	s.orchestratorManager = nil
 	return nil
 }
 
 func (s *Session) GetA2AConfig() a2a.Config {
 	return s.A2AConfig.Normalized()
+}
+
+func (s *Session) SetOrchestratorConfig(config orchestrator.Config) error {
+	s.OrchestratorConfig = config.Normalized()
+	s.orchestratorManager = nil
+	return nil
+}
+
+func (s *Session) GetOrchestratorConfig() orchestrator.Config {
+	return s.OrchestratorConfig.Normalized()
 }
 
 func (s *Session) SetDomainConfig(config SessionDomainConfig) error {
@@ -3752,6 +3769,8 @@ func (s *Session) loadSession(entries []SessionEntry) {
 	s.UsageQuota = UsageQuotaConfigFromEnv()
 	s.UsageLedger = nil
 	s.ToolSearchEnabled = toolSearchEnabledFromEnv()
+	s.OrchestratorConfig = orchestrator.ConfigFromEnv()
+	s.orchestratorManager = nil
 	s.parentSession = ""
 	s.ensureModuleRegistry()
 
@@ -3803,6 +3822,8 @@ func (s *Session) rebuildStateFromLeaf(leafID string) {
 	s.UsageQuota = UsageQuotaConfigFromEnv()
 	s.UsageLedger = nil
 	s.ToolSearchEnabled = toolSearchEnabledFromEnv()
+	s.OrchestratorConfig = orchestrator.ConfigFromEnv()
+	s.orchestratorManager = nil
 	s.ensureModuleRegistry()
 
 	branch := s.resolveBranchEntries(leafID)

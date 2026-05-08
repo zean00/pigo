@@ -18,6 +18,7 @@ import (
 	"github.com/badlogic/pigo/pkg/a2a"
 	"github.com/badlogic/pigo/pkg/agentcore"
 	"github.com/badlogic/pigo/pkg/ai"
+	"github.com/badlogic/pigo/pkg/orchestrator"
 	"github.com/badlogic/pigo/pkg/researchadapter"
 	"golang.org/x/text/unicode/norm"
 )
@@ -43,6 +44,7 @@ type SessionInput struct {
 	BashPermission     BashPermissionPolicy
 	BuiltinToolPolicy  BuiltinToolPolicy
 	A2AConfig          a2a.Config
+	OrchestratorConfig orchestrator.Config
 	UsageQuota         UsageQuotaConfig
 	ResearchConfig     researchadapter.Config
 	DomainConfig       SessionDomainConfig
@@ -98,6 +100,11 @@ func RunHeadlessSession(ctx context.Context, root string, input SessionInput) (S
 	}
 	if input.A2AConfig.Enabled || len(input.A2AConfig.Agents) > 0 {
 		if err := session.SetA2AConfig(input.A2AConfig); err != nil {
+			return SessionResult{}, err
+		}
+	}
+	if input.OrchestratorConfig.Enabled || input.OrchestratorConfig.MaxParallel > 0 || input.OrchestratorConfig.TimeoutMillis > 0 || len(input.OrchestratorConfig.Agents) > 0 || input.OrchestratorConfig.Reducer != "" {
+		if err := session.SetOrchestratorConfig(input.OrchestratorConfig); err != nil {
 			return SessionResult{}, err
 		}
 	}

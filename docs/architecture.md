@@ -12,6 +12,7 @@
 | ACP adapter | `pkg/acpadapter` | JSON-RPC stdio ACP server and ACP session lifecycle mapping. |
 | A2A protocol/client | `pkg/a2a` | A2A protocol objects, Agent Card client, JSON-RPC/SSE client, config loading, and remote-agent model tools. |
 | A2A adapter | `pkg/a2aadapter` | HTTP A2A server that exposes pigo sessions as remote A2A tasks. |
+| Orchestrator | `pkg/orchestrator` | Optional A2A-backed supervisor delegation, task graph execution, and result reduction. |
 | MCP adapter | `pkg/mcpadapter` | MCP server config loading, client registry, tool discovery, tool invocation, and progress forwarding. |
 | Commands | `cmd/*` | CLI entry points for ACP, RPC, auth, conformance, parity, and model generation. |
 
@@ -29,7 +30,7 @@ The agent core owns the generic model/tool loop. It converts session messages in
 
 The coding-agent runtime adds workspace behavior. It provides read, edit, grep/search, bash, session persistence, branch and label handling, hooks, model/mode selection, configurable session-purpose prompting, and JSONL RPC commands. This is the main headless coding agent target.
 
-The runtime also owns an internal session module registry. Built-in capabilities such as session purpose/context config, prompt-injection guard config, command-output compression, bash permissions, built-in tool filtering, A2A remote-agent tools, research tools, agent profile selection, usage quotas, extension tools, and core session metadata register through this registry instead of requiring direct changes to every runtime surface. Modules can contribute:
+The runtime also owns an internal session module registry. Built-in capabilities such as session purpose/context config, prompt-injection guard config, command-output compression, bash permissions, built-in tool filtering, A2A remote-agent tools, optional orchestration, research tools, agent profile selection, usage quotas, extension tools, and core session metadata register through this registry instead of requiring direct changes to every runtime surface. Modules can contribute:
 
 - Model-facing tools and tool specs.
 - ACP/RPC config options and setters.
@@ -55,6 +56,12 @@ The A2A packages add an agent-to-agent interoperability boundary without turning
 `pkg/a2aadapter` serves pigo over HTTP. It publishes an Agent Card at `/.well-known/agent-card.json`, accepts JSON-RPC requests at `/a2a`, maps A2A messages to coding-agent prompts, stores in-memory task state, and returns A2A task/artifact/status objects.
 
 `pkg/a2a` also acts as a client. When enabled, configured remote A2A agents are exposed as model tools named `a2a__<agent>__send_message`. Those tools fetch the remote Agent Card, call `message/stream` when streaming is advertised, fall back to `message/send`, and return the final task text plus task metadata.
+
+### `pkg/orchestrator`
+
+The orchestrator is an optional layer above A2A. It provides supervisor-style delegation and bounded task-graph execution using configured A2A agents. It does not call providers directly and does not modify `pkg/agentcore` or `pkg/ai`.
+
+The coding-agent module exposes orchestrator tools and RPC/config handlers when enabled. Run snapshots are persisted as custom session entries so ACP/RPC clients can inspect orchestration state without a new database or session format.
 
 ## Data Flow
 

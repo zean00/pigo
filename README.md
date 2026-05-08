@@ -24,6 +24,7 @@ Start here:
 - [Comparison with original pi-mono](docs/pi-mono-comparison.md)
 - [ACP](docs/acp.md)
 - [A2A](docs/a2a.md)
+- [Orchestration](docs/orchestration.md)
 - [MCP](docs/mcp.md)
 
 ## Scope
@@ -33,6 +34,7 @@ Start here:
 - `pkg/codingagent`: headless coding-agent runtime for workspace operations, session storage, hooks, internal modules, OAuth, and model selection.
 - `pkg/acpadapter`: ACP stdio adapter for host applications.
 - `pkg/a2a` and `pkg/a2aadapter`: A2A client/tool support and HTTP server adapter.
+- `pkg/orchestrator`: optional A2A-backed supervisor and task-graph orchestration.
 - `pkg/mcpadapter`: MCP server registry and tool bridge.
 
 Out of scope:
@@ -85,6 +87,10 @@ MCP servers can be attached to ACP sessions. MCP config is read from ACP `mcpSer
 `pigo-a2a` exposes pigo as a remote Agent-to-Agent Protocol server over HTTP. It publishes an Agent Card at `/.well-known/agent-card.json` and supports JSON-RPC `message/send`, `message/stream`, `tasks/get`, and `tasks/cancel` on `/a2a`.
 
 Remote A2A agents can also be exposed to the model as tools with `PIGO_A2A_TOOLS=on` and `PIGO_A2A_CONFIG_JSON`, `PIGO_A2A_CONFIG`, `.pi/a2a.json`, or `~/.pi/agent/a2a.json`. See [A2A](docs/a2a.md).
+
+## Orchestration
+
+`pigo` includes an optional A2A-backed supervisor/orchestrator module. When `PIGO_ORCHESTRATOR=on`, sessions can expose `delegate_task`, `orchestrate_task`, `orchestration_status`, and `cancel_orchestration` tools. The module uses configured A2A agents and persists run snapshots as session custom entries. It does not change the core agent loop or provider layer. See [Orchestration](docs/orchestration.md).
 
 ## Command Output Compression
 

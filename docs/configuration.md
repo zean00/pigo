@@ -154,10 +154,10 @@ Environment defaults:
 ```bash
 export PIGO_PROMPT_INJECTION_GUARD=enforce
 export PIGO_PROMPT_INJECTION_SOURCES=workspace,web,mcp,a2a,extension
-export PIGO_PROMPT_INJECTION_SENSITIVE_TOOLS='bash,write,edit,mcp__*,a2a__*,extension:*'
+export PIGO_PROMPT_INJECTION_SENSITIVE_TOOLS='bash,write,edit,mcp__*,a2a__*,delegate_task,orchestrate_task,extension:*'
 ```
 
-Sources are `workspace`, `web`, `mcp`, `a2a`, and `extension`. In `enforce` mode, the default sensitive tools are `bash`, `write`, `edit`, `mcp__*`, `a2a__*`, and `extension:*`. The guard does not replace permission controls; combine it with built-in tool policy and bash permissions for high-risk sessions.
+Sources are `workspace`, `web`, `mcp`, `a2a`, and `extension`. In `enforce` mode, the default sensitive tools are `bash`, `write`, `edit`, `mcp__*`, `a2a__*`, `delegate_task`, `orchestrate_task`, and `extension:*`. The guard does not replace permission controls; combine it with built-in tool policy and bash permissions for high-risk sessions.
 
 ACP sessions expose these config options:
 
@@ -523,6 +523,43 @@ The JSONL RPC adapter supports:
 - `get_a2a_agents`
 
 Use `cmd/pigo-a2a` when this project should serve as a remote A2A agent. See [A2A](a2a.md).
+
+## Orchestration Configuration
+
+The A2A-backed supervisor/orchestrator is disabled by default:
+
+```bash
+export PIGO_ORCHESTRATOR=on
+export PIGO_ORCHESTRATOR_MAX_PARALLEL=3
+export PIGO_ORCHESTRATOR_TIMEOUT_MS=120000
+export PIGO_ORCHESTRATOR_AGENTS=research
+```
+
+It uses configured A2A agents as its remote execution pool. Enable A2A agents with `PIGO_A2A_CONFIG_JSON`, `PIGO_A2A_CONFIG`, `.pi/a2a.json`, or `~/.pi/agent/a2a.json`.
+
+When enabled, model-facing tools are:
+
+- `delegate_task`
+- `orchestrate_task`
+- `orchestration_status`
+- `cancel_orchestration`
+
+ACP sessions expose these config options:
+
+- `orchestrator_enabled`
+- `orchestrator_max_parallel`
+- `orchestrator_timeout_ms`
+- `orchestrator_agents`
+- `orchestrator_reducer`
+
+JSONL RPC supports:
+
+- `start_orchestration`
+- `get_orchestration`
+- `list_orchestrations`
+- `cancel_orchestration`
+
+See [Orchestration](orchestration.md).
 
 ## MCP Configuration
 

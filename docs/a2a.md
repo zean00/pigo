@@ -99,3 +99,5 @@ Client-side config only sends explicitly configured headers or bearer tokens. HT
 ## Current Boundaries
 
 This is an interoperability layer, not a built-in orchestrator. pigo can call remote agents as tools and can serve task requests to other agents. Higher-level routing, supervisor policies, task decomposition, and multi-agent workflow state should live in a host application or a future optional module.
+
+`pkg/orchestrator` is that optional module for pigo-managed delegation and task graphs. It still uses A2A as the remote-agent boundary and leaves the core agent loop unchanged. See [Orchestration](orchestration.md).

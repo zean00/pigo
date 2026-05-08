@@ -808,10 +808,11 @@ func (s *Server) newSessionResult(sessionID string, session *acpSession) map[str
 
 func (s *Server) sessionStateResult(session *codingagent.Session) map[string]any {
 	return map[string]any{
-		"models":        acpModelState(session),
-		"modes":         acpModeState(session),
-		"configOptions": acpConfigOptions(session),
-		"agents":        acpAgentState(session),
+		"models":         acpModelState(session),
+		"modes":          acpModeState(session),
+		"configOptions":  acpConfigOptions(session),
+		"agents":         acpAgentState(session),
+		"orchestrations": session.Orchestrations(),
 	}
 }
 

@@ -295,6 +295,7 @@ func defaultSessionModules() []SessionModule {
 		sessionModule{id: "bash_permission", register: registerBashPermissionModule},
 		sessionModule{id: "builtin_tools", register: registerBuiltinToolsModule},
 		sessionModule{id: "a2a", register: registerA2AModule},
+		sessionModule{id: "orchestrator", register: registerOrchestratorModule},
 		sessionModule{id: "research", register: registerResearchModule},
 		sessionModule{id: "extension_tools", register: registerExtensionToolsModule},
 		sessionModule{id: "tool_search", register: registerToolSearchModule},

@@ -56,6 +56,12 @@ When serving A2A, `cmd/pigo-a2a` publishes an Agent Card and maps incoming A2A `
 
 When calling A2A, configured remote agents become tools named `a2a__<agent>__send_message`. The tool fetches the remote Agent Card, sends the task message over JSON-RPC, streams progress when supported, and returns the final remote task output to the model.
 
+## Supervisor And Orchestration
+
+The optional orchestrator module builds on A2A instead of changing the core agent loop. `delegate_task` sends a single task to a remote A2A agent. `orchestrate_task` runs a small task graph with dependencies, bounded parallelism, and deterministic Markdown reduction.
+
+The module stores run snapshots as session custom entries and exposes them through RPC and ACP state. Routing uses explicit agent names first, then simple name, description, skill, and tag matching from configured A2A agents and loaded agent profiles.
+
 ## Prompt Injection Guard
 
 The prompt-injection guard is off by default. When enabled, pigo treats configured tool-result sources as untrusted data. In `annotate` mode it wraps those results with warning text and metadata. In `enforce` mode it also blocks configured sensitive tools after untrusted content has entered the active session context.
@@ -66,7 +72,7 @@ The guard is deterministic and source-based. It does not classify content with a
 
 Session capabilities are registered through an internal module registry. The registry keeps optional features from spreading hardcoded branches across the core runtime, ACP adapter, and JSONL RPC server.
 
-Current internal modules register core config, prompt-injection guard config, command-output compression, bash permissions, built-in tool policy, built-in tools, A2A remote-agent tools, research tools, extension tools, agent profile selection, optional tool discovery, and usage quota/ledger behavior. The same registered config option drives ACP `session/set_config_option`, ACP session state, and JSONL RPC behavior where applicable.
+Current internal modules register core config, prompt-injection guard config, command-output compression, bash permissions, built-in tool policy, built-in tools, A2A remote-agent tools, optional orchestration, research tools, extension tools, agent profile selection, optional tool discovery, and usage quota/ledger behavior. The same registered config option drives ACP `session/set_config_option`, ACP session state, and JSONL RPC behavior where applicable.
 
 Session-entry modules define whether metadata appears in the branch tree, whether it advances the active leaf, how it is reapplied after branching, and how it is exported. This is why labels and usage metadata can participate in persistence without becoming visible conversation nodes.
 
